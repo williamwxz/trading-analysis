@@ -356,31 +356,14 @@ resource "aws_iam_role_policy" "codebuild" {
       # Logs
       {
         Effect   = "Allow"
-        Action   = [
-          "logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents",
-          "logs:DescribeLogGroups", "logs:DescribeLogStreams"
-        ]
+        Action   = ["logs:*"]
         Resource = "*"
       },
-      # Pipeline artifact bucket
+      # S3
       {
         Effect   = "Allow"
-        Action   = ["s3:GetObject", "s3:PutObject", "s3:GetObjectVersion", "s3:GetBucketVersioning", "s3:GetLifecycleConfiguration"]
-        Resource = [
-          aws_s3_bucket.pipeline_artifacts.arn,
-          "${aws_s3_bucket.pipeline_artifacts.arn}/*",
-          aws_s3_bucket.data.arn,
-          "${aws_s3_bucket.data.arn}/*"
-        ]
-      },
-      # Terraform state bucket
-      {
-        Effect   = "Allow"
-        Action   = ["s3:GetObject", "s3:PutObject", "s3:ListBucket", "s3:DeleteObject", "s3:GetBucketVersioning"]
-        Resource = [
-          "arn:aws:s3:::trading-analysis-tfstate",
-          "arn:aws:s3:::trading-analysis-tfstate/*"
-        ]
+        Action   = ["s3:*"]
+        Resource = "*"
       },
       # ECR — push image and read
       {
