@@ -181,15 +181,21 @@ resource "aws_ecs_cluster_capacity_providers" "main" {
 # RDS — Postgres for Dagster Metadata
 # ─────────────────────────────────────────────────────────────────────────────
 
+resource "random_password" "db_password" {
+  length           = 16
+  special          = true
+  override_special = "!#$%&*()-_=+[]{}<>:?"
+}
+
 resource "aws_db_instance" "dagster" {
   identifier           = "${local.name_prefix}-db"
   allocated_storage    = 20
   engine               = "postgres"
   engine_version       = "16.1"
-  instance_class       = "db.t4g.micro" # Arm-based, cost-effective
+  instance_class       = "db.t4g.micro"
   db_name              = "dagster"
   username             = "dagster"
-  password             = "changeme123" # Placeholder, will be managed in Secrets Manager
+  password             = random_password.db_password.result
   parameter_group_name = "default.postgres16"
   skip_final_snapshot  = true
   publicly_accessible  = false
@@ -197,6 +203,14 @@ resource "aws_db_instance" "dagster" {
   db_subnet_group_name   = aws_db_subnet_group.main.name
 
   tags = local.common_tags
+}
+
+# Automatically sync the generated password to Secrets Manager
+resource "aws_secretsmanager_secret_version" "dagster_pg" {
+  secret_id = aws_secretsmanager_secret.dagster_pg.id
+  secret_string = jsonencode({
+    password = random_password.db_password.result
+  })
 }
 
 resource "aws_db_subnet_group" "main" {
