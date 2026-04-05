@@ -80,7 +80,7 @@ Simplified fork of falcon-lakehouse: no EKS, no StarRocks, no Amber Data.
 | Streaming (reserved) | Amazon MSK Serverless |
 | Dashboards | Grafana 11 + grafana-clickhouse-datasource |
 | IaC | Terraform 1.5 |
-| CI/CD | GitHub Actions → OIDC → AWS |
+| CI/CD | AWS CodePipeline (us-east-1) → ECS (ap-northeast-1) |
 
 ---
 
@@ -130,69 +130,32 @@ docker compose up -d   # Grafana at http://localhost:3001
 
 ---
 
-## GitHub → AWS Deployment Setup
+## CI/CD: AWS CodePipeline Setup
 
-This repo uses **GitHub Actions OIDC** (no long-lived AWS keys). One-time setup:
+The pipeline is fully AWS-native using **AWS CodePipeline + CodeConnections** (no GitHub secrets or OIDC needed). The pipeline lives in `us-east-1` (where the GitHub connection was created) and deploys to `ap-northeast-1` (Tokyo).
 
-### 1 — Create the OIDC provider in AWS
-
-```bash
-aws iam create-open-id-connect-provider \
-  --url https://token.actions.githubusercontent.com \
-  --client-id-list sts.amazonaws.com \
-  --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1 \
-  --region ap-northeast-1
+```
+GitHub (main branch)
+    → CodeConnections (us-east-1)
+    → CodePipeline: Test → Build → Deploy
+                                      └→ Terraform apply (ap-northeast-1)
+                                      └→ ECS task update (ap-northeast-1)
+                                      └→ ClickHouse schema (if changed)
 ```
 
-### 2 — Create the IAM role
+### One-time setup
 
-Create `infra/terraform/iam_github_actions.tf` or apply this policy manually. The trust policy allows only your repo:
+**1 — Activate the GitHub connection**
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "Federated": "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com"
-      },
-      "Action": "sts:AssumeRoleWithWebIdentity",
-      "Condition": {
-        "StringLike": {
-          "token.actions.githubusercontent.com:sub": "repo:YOUR_GITHUB_ORG/trading-analysis:*"
-        },
-        "StringEquals": {
-          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
-        }
-      }
-    }
-  ]
-}
+The CodeConnections connector is already created:
+```
+arn:aws:codeconnections:us-east-1:339163283253:connection/31f9d517-f760-4d90-b7d8-b87cde5be67f
 ```
 
-Attach these AWS managed policies to the role:
-- `AmazonECS_FullAccess`
-- `AmazonEC2ContainerRegistryFullAccess`
-- `AmazonS3FullAccess`
-- Custom inline policy for Terraform state (S3 + DynamoDB if using locking)
+If it shows `PENDING`, activate it in the AWS Console:
+[AWS Console → CodePipeline → Settings → Connections](https://us-east-1.console.aws.amazon.com/codesuite/settings/connections) → select the connection → **Update pending connection** → authorize with GitHub.
 
-### 3 — Add GitHub Secrets
-
-In your repo → **Settings → Secrets and variables → Actions**, add:
-
-| Secret | Value |
-|---|---|
-| `AWS_ACCOUNT_ID` | Your 12-digit AWS account ID |
-| `AWS_ROLE_TO_ASSUME` | `arn:aws:iam::<ACCOUNT_ID>:role/trading-analysis-github-actions` |
-| `CLICKHOUSE_HOST` | Your ClickHouse Cloud hostname |
-| `CLICKHOUSE_PASSWORD` | Your ClickHouse Cloud password |
-
-### 4 — Create a GitHub Environment
-
-Go to **Settings → Environments → New environment**, name it `production`. This gates the deployment jobs behind any protection rules you want (e.g. required reviewers).
-
-### 5 — Bootstrap Terraform state bucket
+**2 — Bootstrap the Terraform state bucket (Tokyo)**
 
 ```bash
 aws s3 mb s3://trading-analysis-tfstate --region ap-northeast-1
@@ -201,13 +164,44 @@ aws s3api put-bucket-versioning \
   --versioning-configuration Status=Enabled
 ```
 
-### 6 — Push to main
+**3 — Seed secrets in AWS Secrets Manager**
+
+```bash
+# ClickHouse Cloud credentials
+aws secretsmanager create-secret \
+  --name trading-analysis-production/clickhouse \
+  --region ap-northeast-1 \
+  --secret-string '{"host":"<ch-host>","password":"<ch-password>"}'
+
+# Dagster Postgres (RDS or Aurora Serverless)
+aws secretsmanager create-secret \
+  --name trading-analysis-production/dagster-pg \
+  --region ap-northeast-1 \
+  --secret-string '{"host":"<pg-host>","password":"<pg-password>"}'
+```
+
+**4 — Apply Terraform to create the pipeline**
+
+```bash
+cd infra/terraform
+terraform init
+terraform apply \
+  -var="aws_region=ap-northeast-1" \
+  -var="environment=production" \
+  -var="github_repo=williamwxz/trading-analysis"
+```
+
+This creates the CodePipeline, three CodeBuild projects (test/build/deploy), IAM roles, S3 artifact bucket, and CloudWatch log groups — all in `us-east-1`, targeting `ap-northeast-1` for the actual workloads.
+
+**5 — Push to main**
 
 ```bash
 git push origin main
 ```
 
-The workflow runs: **test → terraform plan → terraform apply → docker build → push ECR → apply schema (if changed) → deploy ECS**.
+The pipeline auto-triggers on every push to `main` and runs: **Test → Build (Docker → ECR) → Deploy (Terraform + ECS + schema if changed)**.
+
+View pipeline status: [CodePipeline Console](https://us-east-1.console.aws.amazon.com/codesuite/codepipeline/pipelines/trading-analysis-production/view)
 
 ---
 

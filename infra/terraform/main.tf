@@ -18,12 +18,20 @@ terraform {
   backend "s3" {
     bucket = "trading-analysis-tfstate"
     key    = "infra/terraform.tfstate"
-    region = "ap-southeast-1"
+    region = "ap-northeast-1"  # Tokyo
   }
 }
 
+# Primary provider — Tokyo (all ECS/ECR/MSK/S3 resources)
 provider "aws" {
   region = var.aws_region
+}
+
+# Secondary provider — us-east-1 (CodePipeline must be in the same region
+# as the CodeConnections connection, which was created in us-east-1)
+provider "aws" {
+  alias  = "us_east_1"
+  region = "us-east-1"
 }
 
 

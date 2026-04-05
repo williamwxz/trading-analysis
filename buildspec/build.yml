@@ -1,0 +1,46 @@
+version: 0.2
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage: Build
+# Builds the Docker image and pushes to ECR in Tokyo (ap-northeast-1).
+# Exports the full image URI as an artifact for the Deploy stage.
+# ─────────────────────────────────────────────────────────────────────────────
+
+env:
+  exported-variables:
+    - IMAGE_URI
+
+phases:
+  pre_build:
+    commands:
+      - echo "Logging in to ECR in $DEPLOY_REGION..."
+      - aws ecr get-login-password --region $DEPLOY_REGION |
+          docker login --username AWS --password-stdin
+          $AWS_ACCOUNT_ID.dkr.ecr.$DEPLOY_REGION.amazonaws.com
+      - IMAGE_URI=$AWS_ACCOUNT_ID.dkr.ecr.$DEPLOY_REGION.amazonaws.com/$IMAGE_NAME:$CODEBUILD_RESOLVED_SOURCE_VERSION
+      - IMAGE_LATEST=$AWS_ACCOUNT_ID.dkr.ecr.$DEPLOY_REGION.amazonaws.com/$IMAGE_NAME:latest
+
+  build:
+    commands:
+      - echo "Building Docker image..."
+      - docker build
+          --cache-from $IMAGE_LATEST
+          --build-arg BUILDKIT_INLINE_CACHE=1
+          -t $IMAGE_URI
+          -t $IMAGE_LATEST
+          .
+
+  post_build:
+    commands:
+      - echo "Pushing image to ECR..."
+      - docker push $IMAGE_URI
+      - docker push $IMAGE_LATEST
+      - echo "Image pushed: $IMAGE_URI"
+      # Write image URI to file so Deploy stage can read it
+      - echo $IMAGE_URI > image_uri.txt
+      - printf '{"ImageURI":"%s"}' "$IMAGE_URI" > imageDetail.json
+
+artifacts:
+  files:
+    - image_uri.txt
+    - imageDetail.json

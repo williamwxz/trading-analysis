@@ -1,0 +1,24 @@
+version: 0.2
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage: Test
+# Runs pytest against the trading_dagster package.
+# ─────────────────────────────────────────────────────────────────────────────
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.11
+    commands:
+      - pip install --upgrade pip
+      - pip install -e ".[dev]"
+
+  build:
+    commands:
+      - echo "Running tests..."
+      - pytest tests/ -v --tb=short
+
+artifacts:
+  files:
+    - "**/*"
+  discard-paths: no
