@@ -205,7 +205,13 @@ resource "aws_ecs_task_definition" "dagster" {
       ]
 
       environment = [
-        { name = "DAGSTER_HOME", value = "/app" },
+        { name = "DAGSTER_HOME",    value = "/app" },
+        { name = "CLICKHOUSE_USER",    value = "dev_ro3" },
+        { name = "CLICKHOUSE_PORT",    value = "8443" },
+        { name = "CLICKHOUSE_SECURE",  value = "true" },
+        { name = "DAGSTER_PG_USERNAME", value = "dagster" },
+        { name = "DAGSTER_PG_PORT",     value = "5432" },
+        { name = "DAGSTER_PG_DATABASE", value = "dagster" },
       ]
 
       secrets = [
@@ -231,7 +237,13 @@ resource "aws_ecs_task_definition" "dagster" {
       command   = ["dagster-daemon", "run"]
 
       environment = [
-        { name = "DAGSTER_HOME", value = "/app" },
+        { name = "DAGSTER_HOME",    value = "/app" },
+        { name = "CLICKHOUSE_USER",    value = "dev_ro3" },
+        { name = "CLICKHOUSE_PORT",    value = "8443" },
+        { name = "CLICKHOUSE_SECURE",  value = "true" },
+        { name = "DAGSTER_PG_USERNAME", value = "dagster" },
+        { name = "DAGSTER_PG_PORT",     value = "5432" },
+        { name = "DAGSTER_PG_DATABASE", value = "dagster" },
       ]
 
       secrets = [
