@@ -1,142 +1,108 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
 Mini trading analytics pipeline — a simplified fork of falcon-lakehouse. Processes strategy PnL data with Binance API polling, ClickHouse Cloud analytics, Dagster orchestration, and Grafana dashboards. Deployed on AWS ECS Fargate.
 
 **Key simplifications from falcon-lakehouse:**
-- No EKS → ECS Fargate
-- No StarRocks → ClickHouse Cloud only
+- No EKS → ECS Fargate; no StarRocks → ClickHouse Cloud only
 - No Amber Data / Redpanda → Binance REST API polling via Dagster
-- V2 PnL pipeline only (no v1)
+- V2 PnL pipeline only (no v1 SQL-based anchor CTE approach)
 - No bronze/silver/gold layers → direct analytics tables
 
-## Repository Structure
-
-```
-trading-analysis/
-├── trading_dagster/              # Core Python Dagster package
-│   ├── assets/                   # Dagster pipeline assets
-│   │   ├── binance_futures_ohlcv.py    # Binance 1min OHLCV polling
-│   │   ├── pnl_prod_v2_refresh.py      # Production PnL refresh
-│   │   ├── pnl_bt_v2_refresh.py        # Backtest PnL refresh
-│   │   ├── pnl_real_trade_v2_refresh.py # Real trade PnL refresh
-│   │   ├── pnl_rollup.py              # Hourly rollup
-│   │   └── pnl_safety_scan.py         # Daily safety scan
-│   ├── definitions/
-│   │   └── __init__.py           # Dagster entry point (Definitions)
-│   ├── sensors/
-│   │   └── automation_sensors.py # 2 automation sensors
-│   └── utils/
-│       ├── clickhouse_client.py  # ClickHouse Cloud client (clickhouse-connect)
-│       └── pnl_compute.py       # Anchor-chained PnL computation engine
-├── schemas/
-│   └── clickhouse_cloud.sql      # ClickHouse Cloud DDL (apply once)
-├── infra/
-│   ├── terraform/main.tf         # ECS Fargate + S3 + MSK + Grafana
-│   └── grafana/
-│       ├── dashboards/           # 5 strategy PnL dashboards (L1-L5)
-│       └── provisioning/         # Datasource + dashboard provisioning
-├── tests/
-│   └── test_pnl_compute.py      # Unit tests for PnL computation
-├── pyproject.toml                # Python package config
-├── dagster.yaml                  # Dagster instance config
-├── Dockerfile                    # Production container
-├── docker-compose.yml            # Local dev stack
-└── .env.example                  # Environment variables template
-```
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Orchestration | Dagster 1.11+ |
-| Analytics DB | ClickHouse Cloud (HTTPS, port 8443) |
-| Data Source | Binance Futures REST API |
-| Streaming | Amazon MSK Serverless (reserved for future use) |
-| Data Lake | AWS S3 |
-| Infrastructure | AWS ECS Fargate, Terraform |
-| Monitoring | Grafana + ClickHouse datasource |
-| Python | 3.11+ |
-
-## Data Pipeline
-
-```
-Binance Futures API (REST polling, every 2 min)
-    ↓
-analytics.futures_price_1min (ClickHouse Cloud)
-
-Strategy execution service (external push)
-    ↓
-analytics.strategy_output_history_v2 / _bt_v2
-
-PnL refresh assets (every 5/10 min, Python anchor-chaining)
-    ↓
-analytics.strategy_pnl_1min_{prod,bt,real_trade}_v2
-
-Rollup asset (hourly, argMax aggregation)
-    ↓
-analytics.strategy_pnl_1hour_{prod,bt,real_trade}_v2
-```
-
-## Automation
-
-| Sensor | Asset Groups | Interval |
-|--------|-------------|----------|
-| `market_data_automation_sensor` | market_data | 60s |
-| `strategy_pnl_automation_sensor` | strategy_pnl | 60s |
-
-Assets use `AutomationCondition.on_cron()` with `~in_progress()` guard.
-
-## Local Development
+## Commands
 
 ```bash
 # Setup
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .[dev]
 
-# Set environment variables
-cp .env.example .env
-# Edit .env with your ClickHouse Cloud credentials
-
-# Run Dagster locally (needs Postgres for metadata)
-docker compose up -d postgres
-dagster dev  # http://localhost:3000
-
-# Or run full stack
-docker compose up -d
-# Dagster: http://localhost:3000
-# Grafana: http://localhost:3001 (admin/admin)
-```
-
-## Code Quality
-
-```bash
+# Code quality
 black .
 ruff check --fix .
 mypy .
+
+# Tests (all unit, no ClickHouse required)
 pytest
-pytest tests/test_pnl_compute.py -v  # run specific test
+pytest tests/test_pnl_compute.py -v        # specific file
+pytest -m unit                              # unit tests only
+pytest -m integration                       # requires ClickHouse/S3
+
+# Local Dagster (needs Postgres for metadata)
+docker compose up -d postgres
+dagster dev                                 # http://localhost:3000
+
+# Full local stack
+docker compose up -d
+# Dagster: http://localhost:3000, Grafana: http://localhost:3001 (admin/admin)
 ```
 
-Line length: 88. Target Python: 3.11.
+Line length: 88. Target Python 3.11.
 
-## ClickHouse Cloud
+## Architecture
 
-Uses `clickhouse-connect` library (native HTTPS protocol). All queries go through `trading_dagster/utils/clickhouse_client.py`.
+### Data Pipeline
+
+```
+Binance Futures REST API (every 2 min)
+    → analytics.futures_price_1min
+
+External strategy service (push)
+    → analytics.strategy_output_history_v2 / _bt_v2
+
+PnL refresh assets (every 5/10 min, Python anchor-chaining)
+    → analytics.strategy_pnl_1min_{prod,bt,real_trade}_v2
+
+Rollup asset (hourly, argMax aggregation)
+    → analytics.strategy_pnl_1hour_{prod,bt,real_trade}_v2
+```
+
+### Dagster Entry Point
+
+`pyproject.toml` sets `[tool.dagster] module_name = "trading_dagster"`. Dagster discovers assets via `trading_dagster/definitions/__init__.py`, which imports all `*_asset` variables from the assets package and registers them with two `AutomationConditionSensorDefinition` sensors.
+
+### Automation Sensors
+
+| Sensor | Asset Groups | Interval |
+|--------|-------------|----------|
+| `market_data_automation_sensor` | `market_data` | 60s |
+| `strategy_pnl_automation_sensor` | `strategy_pnl` | 60s |
+
+Assets use `AutomationCondition.on_cron("...") & ~AutomationCondition.in_progress()`.
+
+### Incremental Refresh Pattern (PnL assets)
+
+Each PnL refresh asset follows this pattern:
+1. **Watermark check**: reads `analytics.pnl_refresh_watermarks` (or falls back to `max(updated_at) - 2h` from target) to find `since`
+2. **Skip if up to date**: compare source `max(revision_ts)` against watermark
+3. **Python PnL computation**: `fetch_new_bars_*` → `fetch_anchors` → `fetch_prices` → `compute_*_pnl` → `insert_rows`
+4. **Write watermark**: update `analytics.pnl_refresh_watermarks` after successful insert
+5. **Tail fill**: pure SQL fills gap from last bar timestamp to `now()` using current position and live prices
+
+The **tail fill** runs after the Python refresh to keep PnL current between bar boundaries. It's pure SQL because it only needs one anchor row (no chaining required).
+
+### Why Python for PnL (not SQL)
+
+V1 used a SQL anchor CTE. It fails when multiple bars arrive in a single INSERT batch: SQL can't chain bar N's end-price into bar N+1's start-price within the same query. V2 uses Python to iterate bars in order, passing `anchor_pnl` and `anchor_price` forward explicitly.
+
+### Real Trade vs Prod/Bt
+
+`real_trade` bars have multiple revisions per bar (live updates). `fetch_new_bars_real_trade` uses a window function to select the latest revision per execution group, identified by `execution_ts = toStartOfMinute(revision_ts + 59s)`. Prod/bt use `argMin(row_json, revision_ts)` (first revision wins).
+
+### ClickHouse Patterns
+
+- **All queries through** `trading_dagster/utils/clickhouse_client.py` — `get_client()`, `query_rows()`, `query_dicts()`, `query_scalar()`, `execute()`, `insert_rows()`
+- **No connection pooling**: each call to `query_*`/`execute`/`insert_rows` creates a new connection unless a `client=` is passed explicitly. Pass a shared `client` when doing multiple operations in one asset run (see `binance_futures_ohlcv.py`)
+- **ReplacingMergeTree deduplication**: use `FINAL` in SELECT queries on PnL tables to get deduplicated results (e.g., in rollup watermark queries)
+- **Idempotent upserts**: tables use `ReplacingMergeTree(updated_at)` — re-inserting rows with newer `updated_at` replaces older ones after background merges
+
+### ClickHouse Cloud Connection
 
 Required env vars: `CLICKHOUSE_HOST`, `CLICKHOUSE_PORT` (8443), `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`, `CLICKHOUSE_SECURE` (true).
 
-Schema: Apply `schemas/clickhouse_cloud.sql` to initialize. Uses `ReplacingMergeTree(updated_at)` for idempotent upserts — no `Replicated*` prefixes needed (Cloud handles replication).
-
-## Key Design Decisions
-
-- **V2-only**: Dropped v1 SQL-based PnL (anchor CTE can't chain between bars within a batch). V2 uses Python for correct bar-to-bar cumulative PnL.
-- **No streaming layer**: Binance API polling replaces Amber Data → Redpanda → Kafka MV. Simpler, fewer moving parts, same 1-min granularity.
-- **ECS Fargate**: No Kubernetes complexity. Dagster webserver + daemon in one task definition. Grafana in a separate task.
-- **ClickHouse Cloud**: No operator, no replicas to manage. HTTPS endpoint, pay-per-query.
+Schema: `schemas/clickhouse_cloud.sql` (apply once). No `Replicated*` prefix needed — Cloud handles replication.
 
 ## Deployment
 
@@ -147,11 +113,8 @@ aws ecr get-login-password | docker login --username AWS --password-stdin <ecr-u
 docker tag trading-analysis:latest <ecr-url>:latest
 docker push <ecr-url>:latest
 
-# Apply Terraform
-cd infra/terraform
-terraform init
-terraform plan
-terraform apply
+# Apply Terraform (ECS Fargate + S3 + Grafana)
+cd infra/terraform && terraform init && terraform apply
 
 # Apply ClickHouse schema (one-time)
 clickhouse-client --host <cloud-host> --secure --password <pw> < schemas/clickhouse_cloud.sql
