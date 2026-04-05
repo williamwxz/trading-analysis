@@ -1,8 +1,8 @@
 # ============================================================================
 # trading-analysis Infrastructure — ECS Fargate + S3 + MSK
 # ============================================================================
-# Simplified from falcon-lakehouse: no EKS, no Helm for compute.
-# ClickHouse Cloud is external (managed service, not provisioned here).
+# Simplified: only one environment, everything in ap-northeast-1.
+# ClickHouse Cloud is external.
 # ============================================================================
 
 terraform {
@@ -22,16 +22,9 @@ terraform {
   }
 }
 
-# Primary provider — Tokyo (all ECS/ECR/MSK/S3 resources)
+# Primary provider — Tokyo (all resources)
 provider "aws" {
   region = var.aws_region
-}
-
-# Secondary provider — us-east-1 (CodePipeline must be in the same region
-# as the CodeConnections connection, which was created in us-east-1)
-provider "aws" {
-  alias  = "us_east_1"
-  region = "us-east-1"
 }
 
 
@@ -40,11 +33,11 @@ provider "aws" {
 # ─────────────────────────────────────────────────────────────────────────────
 
 variable "aws_region" {
-  default = "ap-southeast-1"
+  default = "ap-northeast-1"
 }
 
 variable "environment" {
-  default = "production"
+  default = "default"
 }
 
 variable "project" {
@@ -52,7 +45,7 @@ variable "project" {
 }
 
 locals {
-  name_prefix = "${var.project}-${var.environment}"
+  name_prefix = var.project
   common_tags = {
     Project     = var.project
     Environment = var.environment
@@ -62,7 +55,7 @@ locals {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# VPC (reuse default or create minimal)
+# VPC
 # ─────────────────────────────────────────────────────────────────────────────
 
 data "aws_vpc" "default" {
@@ -82,7 +75,7 @@ data "aws_subnets" "default" {
 # ─────────────────────────────────────────────────────────────────────────────
 
 resource "aws_s3_bucket" "data" {
-  bucket = "${local.name_prefix}-data"
+  bucket = "${local.name_prefix}-data-v2"
   tags   = local.common_tags
 }
 
@@ -100,6 +93,10 @@ resource "aws_s3_bucket_lifecycle_configuration" "data" {
     id     = "archive-old-data"
     status = "Enabled"
 
+    filter {
+      prefix = ""
+    }
+
     transition {
       days          = 90
       storage_class = "GLACIER_IR"
@@ -109,7 +106,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "data" {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Amazon MSK Serverless (Kafka replacement for Redpanda)
+# Amazon MSK Serverless
 # ─────────────────────────────────────────────────────────────────────────────
 
 resource "aws_msk_serverless_cluster" "main" {
@@ -154,7 +151,7 @@ resource "aws_security_group" "msk" {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ECS Cluster (Fargate)
+# ECS Cluster
 # ─────────────────────────────────────────────────────────────────────────────
 
 resource "aws_ecs_cluster" "main" {
@@ -181,7 +178,7 @@ resource "aws_ecs_cluster_capacity_providers" "main" {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ECS Task Definition — Dagster Webserver + Daemon
+# ECS Task Definition — Dagster
 # ─────────────────────────────────────────────────────────────────────────────
 
 resource "aws_ecs_task_definition" "dagster" {
@@ -356,7 +353,6 @@ resource "aws_security_group" "ecs_tasks" {
   name_prefix = "${local.name_prefix}-ecs-"
   vpc_id      = data.aws_vpc.default.id
 
-  # Dagster UI + Grafana
   ingress {
     from_port   = 3000
     to_port     = 3000
@@ -364,7 +360,6 @@ resource "aws_security_group" "ecs_tasks" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # All outbound (ClickHouse Cloud, Binance API, S3, etc.)
   egress {
     from_port   = 0
     to_port     = 0

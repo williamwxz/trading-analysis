@@ -1,44 +1,38 @@
 # ============================================================================
 # AWS CodePipeline — trading-analysis CI/CD
 # ============================================================================
-# Pipeline lives in us-east-1 because the CodeConnections connection was
-# created there. All build/deploy steps target ap-northeast-1 (Tokyo) via
-# the DEPLOY_REGION environment variable in each CodeBuild project.
+# Everything now consolidated in ap-northeast-1 (Tokyo).
 #
-# Connection ARN (pre-existing, created outside Terraform):
-#   arn:aws:codeconnections:us-east-1:339163283253:connection/31f9d517-f760-4d90-b7d8-b87cde5be67f
-#
-# Pipeline stages:
-#   Source  → GitHub main branch (via CodeConnections)
-#   Test    → pytest
-#   Build   → docker build + push to ECR (ap-northeast-1)
-#   Deploy  → terraform apply + ECS update + ClickHouse schema (if changed)
+# Connection ARN (pre-existing, created in Tokyo):
+#   arn:aws:codeconnections:ap-northeast-1:339163283253:connection/ef9b3b42-c3f2-4a90-98a0-2c4a2869ade2
 # ============================================================================
 
 locals {
-  connection_arn = "arn:aws:codeconnections:us-east-1:339163283253:connection/31f9d517-f760-4d90-b7d8-b87cde5be67f"
-  deploy_region  = "ap-northeast-1"
-  pipeline_region = "us-east-1"
+  connection_arn  = "arn:aws:codeconnections:ap-northeast-1:339163283253:connection/ef9b3b42-c3f2-4a90-98a0-2c4a2869ade2"
+  deploy_region   = "ap-northeast-1"
+  pipeline_region = "ap-northeast-1"
 }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# S3 Artifact Bucket (must be in the same region as the pipeline)
+# S3 Artifact Bucket
 # ─────────────────────────────────────────────────────────────────────────────
 
 resource "aws_s3_bucket" "pipeline_artifacts" {
-  provider = aws.us_east_1
-  bucket   = "${local.name_prefix}-pipeline-artifacts"
+  bucket   = "${local.name_prefix}-pipeline-v2"
   tags     = local.common_tags
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "pipeline_artifacts" {
-  provider = aws.us_east_1
   bucket   = aws_s3_bucket.pipeline_artifacts.id
 
   rule {
     id     = "expire-artifacts"
     status = "Enabled"
+
+    filter {
+      prefix = ""
+    }
 
     expiration {
       days = 14
@@ -52,7 +46,6 @@ resource "aws_s3_bucket_lifecycle_configuration" "pipeline_artifacts" {
 # ─────────────────────────────────────────────────────────────────────────────
 
 resource "aws_codebuild_project" "test" {
-  provider     = aws.us_east_1
   name         = "${local.name_prefix}-test"
   service_role = aws_iam_role.codebuild.arn
   tags         = local.common_tags
@@ -82,11 +75,10 @@ resource "aws_codebuild_project" "test" {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CodeBuild — Build (Docker image → ECR in Tokyo)
+# CodeBuild — Build (Docker image → ECR)
 # ─────────────────────────────────────────────────────────────────────────────
 
 resource "aws_codebuild_project" "build" {
-  provider     = aws.us_east_1
   name         = "${local.name_prefix}-build"
   service_role = aws_iam_role.codebuild.arn
   tags         = local.common_tags
@@ -99,7 +91,7 @@ resource "aws_codebuild_project" "build" {
     compute_type    = "BUILD_GENERAL1_SMALL"
     image           = "aws/codebuild/standard:7.0"
     type            = "LINUX_CONTAINER"
-    privileged_mode = true  # Required for docker build
+    privileged_mode = true
 
     environment_variable {
       name  = "DEPLOY_REGION"
@@ -130,11 +122,10 @@ resource "aws_codebuild_project" "build" {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CodeBuild — Deploy (Terraform + ECS update + schema)
+# CodeBuild — Deploy
 # ─────────────────────────────────────────────────────────────────────────────
 
 resource "aws_codebuild_project" "deploy" {
-  provider     = aws.us_east_1
   name         = "${local.name_prefix}-deploy"
   service_role = aws_iam_role.codebuild.arn
   tags         = local.common_tags
@@ -168,7 +159,6 @@ resource "aws_codebuild_project" "deploy" {
       name  = "IMAGE_NAME"
       value = "trading-analysis-dagster"
     }
-    # ClickHouse credentials from Secrets Manager
     environment_variable {
       name  = "CLICKHOUSE_HOST_SECRET"
       value = aws_secretsmanager_secret.clickhouse.arn
@@ -197,7 +187,6 @@ resource "aws_codebuild_project" "deploy" {
 data "aws_caller_identity" "current" {}
 
 resource "aws_codepipeline" "main" {
-  provider = aws.us_east_1
   name     = local.name_prefix
   role_arn = aws_iam_role.codepipeline.arn
   tags     = local.common_tags
@@ -220,7 +209,7 @@ resource "aws_codepipeline" "main" {
 
       configuration = {
         ConnectionArn        = local.connection_arn
-        FullRepositoryId     = var.github_repo          # e.g. "your-org/trading-analysis"
+        FullRepositoryId     = var.github_repo
         BranchName           = "main"
         OutputArtifactFormat = "CODE_ZIP"
         DetectChanges        = "true"
@@ -289,7 +278,6 @@ resource "aws_codepipeline" "main" {
 # ─────────────────────────────────────────────────────────────────────────────
 
 resource "aws_iam_role" "codepipeline" {
-  provider = aws.us_east_1
   name     = "${local.name_prefix}-codepipeline"
   tags     = local.common_tags
 
@@ -304,7 +292,6 @@ resource "aws_iam_role" "codepipeline" {
 }
 
 resource "aws_iam_role_policy" "codepipeline" {
-  provider = aws.us_east_1
   name     = "codepipeline-policy"
   role     = aws_iam_role.codepipeline.id
 
@@ -342,11 +329,10 @@ resource "aws_iam_role_policy" "codepipeline" {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# IAM — CodeBuild Role (shared across all three projects)
+# IAM — CodeBuild Role
 # ─────────────────────────────────────────────────────────────────────────────
 
 resource "aws_iam_role" "codebuild" {
-  provider = aws.us_east_1
   name     = "${local.name_prefix}-codebuild"
   tags     = local.common_tags
 
@@ -361,7 +347,6 @@ resource "aws_iam_role" "codebuild" {
 }
 
 resource "aws_iam_role_policy" "codebuild" {
-  provider = aws.us_east_1
   name     = "codebuild-policy"
   role     = aws_iam_role.codebuild.id
 
@@ -372,7 +357,7 @@ resource "aws_iam_role_policy" "codebuild" {
       {
         Effect   = "Allow"
         Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-        Resource = "arn:aws:logs:us-east-1:${data.aws_caller_identity.current.account_id}:*"
+        Resource = "arn:aws:logs:${local.deploy_region}:${data.aws_caller_identity.current.account_id}:*"
       },
       # Pipeline artifact bucket
       {
@@ -383,7 +368,7 @@ resource "aws_iam_role_policy" "codebuild" {
           "${aws_s3_bucket.pipeline_artifacts.arn}/*"
         ]
       },
-      # Terraform state bucket in Tokyo
+      # Terraform state bucket
       {
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:PutObject", "s3:ListBucket", "s3:DeleteObject"]
@@ -392,7 +377,7 @@ resource "aws_iam_role_policy" "codebuild" {
           "arn:aws:s3:::trading-analysis-tfstate/*"
         ]
       },
-      # ECR in Tokyo — push image
+      # ECR — push image
       {
         Effect = "Allow"
         Action = [
@@ -403,7 +388,13 @@ resource "aws_iam_role_policy" "codebuild" {
         ]
         Resource = "*"
       },
-      # ECS in Tokyo — update service
+      # CodeStar Connections
+      {
+        Effect   = "Allow"
+        Action   = ["codestar-connections:UseConnection"]
+        Resource = local.connection_arn
+      },
+      # ECS — update service
       {
         Effect = "Allow"
         Action = [
@@ -413,7 +404,7 @@ resource "aws_iam_role_policy" "codebuild" {
         ]
         Resource = "*"
       },
-      # IAM PassRole — needed for ECS task definition registration
+      # IAM PassRole
       {
         Effect   = "Allow"
         Action   = "iam:PassRole"
@@ -424,7 +415,7 @@ resource "aws_iam_role_policy" "codebuild" {
           }
         }
       },
-      # Secrets Manager — ClickHouse credentials
+      # Secrets Manager
       {
         Effect   = "Allow"
         Action   = ["secretsmanager:GetSecretValue"]
@@ -433,7 +424,7 @@ resource "aws_iam_role_policy" "codebuild" {
           aws_secretsmanager_secret.dagster_pg.arn,
         ]
       },
-      # Full Terraform permissions (ECS, ECR, MSK, VPC, IAM for this project)
+      # Terraform permissions
       {
         Effect   = "Allow"
         Action   = [
@@ -454,25 +445,22 @@ resource "aws_iam_role_policy" "codebuild" {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CloudWatch Log Groups for CodeBuild (in us-east-1)
+# CloudWatch Log Groups for CodeBuild
 # ─────────────────────────────────────────────────────────────────────────────
 
 resource "aws_cloudwatch_log_group" "codebuild_test" {
-  provider          = aws.us_east_1
   name              = "/codebuild/${local.name_prefix}-test"
   retention_in_days = 14
   tags              = local.common_tags
 }
 
 resource "aws_cloudwatch_log_group" "codebuild_build" {
-  provider          = aws.us_east_1
   name              = "/codebuild/${local.name_prefix}-build"
   retention_in_days = 14
   tags              = local.common_tags
 }
 
 resource "aws_cloudwatch_log_group" "codebuild_deploy" {
-  provider          = aws.us_east_1
   name              = "/codebuild/${local.name_prefix}-deploy"
   retention_in_days = 14
   tags              = local.common_tags
@@ -480,11 +468,11 @@ resource "aws_cloudwatch_log_group" "codebuild_deploy" {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Variable: GitHub repo (e.g. "your-org/trading-analysis")
+# Variable: GitHub repo
 # ─────────────────────────────────────────────────────────────────────────────
 
 variable "github_repo" {
-  description = "GitHub repository in org/repo format, e.g. 'williamwxz/trading-analysis'"
+  description = "GitHub repository in org/repo format"
   type        = string
   default     = "williamwxz/trading-analysis"
 }
@@ -499,5 +487,5 @@ output "codepipeline_name" {
 }
 
 output "codepipeline_url" {
-  value = "https://us-east-1.console.aws.amazon.com/codesuite/codepipeline/pipelines/${aws_codepipeline.main.name}/view"
+  value = "https://${local.deploy_region}.console.aws.amazon.com/codesuite/codepipeline/pipelines/${aws_codepipeline.main.name}/view"
 }
