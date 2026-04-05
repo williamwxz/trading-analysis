@@ -356,35 +356,40 @@ resource "aws_iam_role_policy" "codebuild" {
       # Logs
       {
         Effect   = "Allow"
-        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-        Resource = "arn:aws:logs:${local.deploy_region}:${data.aws_caller_identity.current.account_id}:*"
+        Action   = [
+          "logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents",
+          "logs:DescribeLogGroups", "logs:DescribeLogStreams"
+        ]
+        Resource = "*"
       },
       # Pipeline artifact bucket
       {
         Effect   = "Allow"
-        Action   = ["s3:GetObject", "s3:PutObject", "s3:GetObjectVersion"]
+        Action   = ["s3:GetObject", "s3:PutObject", "s3:GetObjectVersion", "s3:GetBucketVersioning", "s3:GetLifecycleConfiguration"]
         Resource = [
           aws_s3_bucket.pipeline_artifacts.arn,
-          "${aws_s3_bucket.pipeline_artifacts.arn}/*"
+          "${aws_s3_bucket.pipeline_artifacts.arn}/*",
+          aws_s3_bucket.data.arn,
+          "${aws_s3_bucket.data.arn}/*"
         ]
       },
       # Terraform state bucket
       {
         Effect   = "Allow"
-        Action   = ["s3:GetObject", "s3:PutObject", "s3:ListBucket", "s3:DeleteObject"]
+        Action   = ["s3:GetObject", "s3:PutObject", "s3:ListBucket", "s3:DeleteObject", "s3:GetBucketVersioning"]
         Resource = [
           "arn:aws:s3:::trading-analysis-tfstate",
           "arn:aws:s3:::trading-analysis-tfstate/*"
         ]
       },
-      # ECR — push image
+      # ECR — push image and read
       {
         Effect = "Allow"
         Action = [
           "ecr:GetAuthorizationToken",
           "ecr:BatchCheckLayerAvailability", "ecr:GetDownloadUrlForLayer",
           "ecr:BatchGetImage", "ecr:InitiateLayerUpload", "ecr:UploadLayerPart",
-          "ecr:CompleteLayerUpload", "ecr:PutImage"
+          "ecr:CompleteLayerUpload", "ecr:PutImage", "ecr:DescribeRepositories"
         ]
         Resource = "*"
       },
@@ -394,13 +399,13 @@ resource "aws_iam_role_policy" "codebuild" {
         Action   = ["codestar-connections:UseConnection"]
         Resource = local.connection_arn
       },
-      # ECS — update service
+      # ECS — update service and read
       {
         Effect = "Allow"
         Action = [
           "ecs:DescribeServices", "ecs:UpdateService",
           "ecs:DescribeTaskDefinition", "ecs:RegisterTaskDefinition",
-          "ecs:DescribeTasks", "ecs:ListTasks"
+          "ecs:DescribeTasks", "ecs:ListTasks", "ecs:DescribeClusters"
         ]
         Resource = "*"
       },
@@ -418,13 +423,13 @@ resource "aws_iam_role_policy" "codebuild" {
       # Secrets Manager
       {
         Effect   = "Allow"
-        Action   = ["secretsmanager:GetSecretValue"]
+        Action   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret", "secretsmanager:PutSecretValue"]
         Resource = [
           aws_secretsmanager_secret.clickhouse.arn,
           aws_secretsmanager_secret.dagster_pg.arn,
         ]
       },
-      # Terraform permissions
+      # Terraform permissions (EC2, MSK, IAM, etc.)
       {
         Effect   = "Allow"
         Action   = [
@@ -435,7 +440,7 @@ resource "aws_iam_role_policy" "codebuild" {
           "iam:CreateInstanceProfile", "iam:DeleteInstanceProfile",
           "iam:AddRoleToInstanceProfile", "iam:RemoveRoleFromInstanceProfile",
           "iam:GetInstanceProfile", "iam:ListInstanceProfilesForRole",
-          "kafka:*", "msk:*"
+          "kafka:*", "msk:*", "rds:*"
         ]
         Resource = "*"
       }
