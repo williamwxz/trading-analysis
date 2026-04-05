@@ -178,6 +178,56 @@ resource "aws_ecs_cluster_capacity_providers" "main" {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# RDS — Postgres for Dagster Metadata
+# ─────────────────────────────────────────────────────────────────────────────
+
+resource "aws_db_instance" "dagster" {
+  identifier           = "${local.name_prefix}-db"
+  allocated_storage    = 20
+  engine               = "postgres"
+  engine_version       = "16.1"
+  instance_class       = "db.t4g.micro" # Arm-based, cost-effective
+  db_name              = "dagster"
+  username             = "dagster"
+  password             = "changeme123" # Placeholder, will be managed in Secrets Manager
+  parameter_group_name = "default.postgres16"
+  skip_final_snapshot  = true
+  publicly_accessible  = false
+  vpc_security_group_ids = [aws_security_group.db.id]
+  db_subnet_group_name   = aws_db_subnet_group.main.name
+
+  tags = local.common_tags
+}
+
+resource "aws_db_subnet_group" "main" {
+  name       = "${local.name_prefix}-db-subnets"
+  subnet_ids = data.aws_subnets.default.ids
+  tags       = local.common_tags
+}
+
+resource "aws_security_group" "db" {
+  name_prefix = "${local.name_prefix}-db-"
+  vpc_id      = data.aws_vpc.default.id
+
+  ingress {
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.ecs_tasks.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = local.common_tags
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ECS Task Definition — Dagster
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -212,12 +262,12 @@ resource "aws_ecs_task_definition" "dagster" {
         { name = "DAGSTER_PG_USERNAME", value = "dagster" },
         { name = "DAGSTER_PG_PORT",     value = "5432" },
         { name = "DAGSTER_PG_DATABASE", value = "dagster" },
+        { name = "DAGSTER_PG_HOST",     value = aws_db_instance.dagster.address },
       ]
 
       secrets = [
         { name = "CLICKHOUSE_HOST",     valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
         { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
-        { name = "DAGSTER_PG_HOST",     valueFrom = "${aws_secretsmanager_secret.dagster_pg.arn}:host::" },
         { name = "DAGSTER_PG_PASSWORD", valueFrom = "${aws_secretsmanager_secret.dagster_pg.arn}:password::" },
       ]
 
@@ -244,12 +294,12 @@ resource "aws_ecs_task_definition" "dagster" {
         { name = "DAGSTER_PG_USERNAME", value = "dagster" },
         { name = "DAGSTER_PG_PORT",     value = "5432" },
         { name = "DAGSTER_PG_DATABASE", value = "dagster" },
+        { name = "DAGSTER_PG_HOST",     value = aws_db_instance.dagster.address },
       ]
 
       secrets = [
         { name = "CLICKHOUSE_HOST",     valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
         { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
-        { name = "DAGSTER_PG_HOST",     valueFrom = "${aws_secretsmanager_secret.dagster_pg.arn}:host::" },
         { name = "DAGSTER_PG_PASSWORD", valueFrom = "${aws_secretsmanager_secret.dagster_pg.arn}:password::" },
       ]
 
