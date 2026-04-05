@@ -1,0 +1,45 @@
+# Dagster instance configuration — trading-analysis
+# Runs on ECS Fargate with ClickHouse Cloud as analytics DB.
+
+storage:
+  postgres:
+    postgres_db:
+      hostname:
+        env: DAGSTER_PG_HOST
+      port:
+        env: DAGSTER_PG_PORT
+      username:
+        env: DAGSTER_PG_USERNAME
+      password:
+        env: DAGSTER_PG_PASSWORD
+      db_name:
+        env: DAGSTER_PG_DATABASE
+
+run_launcher:
+  module: dagster.core.launcher
+  class: DefaultRunLauncher
+
+compute_logs:
+  module: dagster.core.storage.noop_compute_log_manager
+  class: NoOpComputeLogManager
+
+local_artifact_storage:
+  module: dagster.core.storage.root
+  class: LocalArtifactStorage
+  config:
+    base_dir: /app/.dagster_storage/storage
+
+concurrency:
+  default_op_concurrency_limit: 5
+
+retention:
+  schedule:
+    purge_after_days:
+      skipped: 30
+  sensor:
+    purge_after_days:
+      skipped: 30
+
+python_logs:
+  managed_python_loggers:
+    - trading_dagster

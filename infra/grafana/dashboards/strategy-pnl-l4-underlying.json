@@ -1,0 +1,544 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "title": "L2 Strategy+Underlying",
+      "url": "/d/strategy-pnl-l2",
+      "type": "link",
+      "targetBlank": false
+    },
+    {
+      "title": "L3 Strategy ID",
+      "url": "/d/strategy-pnl-l3",
+      "type": "link",
+      "targetBlank": false
+    },
+    {
+      "title": "L5 Portfolio",
+      "url": "/d/strategy-pnl-l5",
+      "type": "link",
+      "targetBlank": false
+    }
+  ],
+  "liveNow": false,
+  "refresh": "1m",
+  "panels": [
+    {
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
+      "title": "Aggregate PnL (from backtest day 0) — ${underlying}",
+      "description": "All strategies combined for this underlying, PnL normalised from strategy inception (not the selected time range). Production vs Backtest overlaid.",
+      "type": "timeseries",
+      "id": 2,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 3,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "percentunit",
+          "decimals": 4
+        }
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "min"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse"
+          },
+          "rawSql": "SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(cumulative_pnl * weighting) WHEN '${mode}' = 'equal' THEN avg(cumulative_pnl) ELSE sum(cumulative_pnl * weighting) / nullIf(sum(weighting), 0) END AS `Production PnL` FROM analytics.strategy_pnl_${resolution}_prod FINAL WHERE underlying = '${underlying}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
+          "refId": "A",
+          "format": 1,
+          "queryType": "sql",
+          "meta": {
+            "builderOptions": {
+              "mode": 0
+            }
+          }
+        },
+        {
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse"
+          },
+          "rawSql": "SELECT time, `Backtest PnL`, `Benchmark` FROM (SELECT time, `Backtest PnL`, `Benchmark`, n_strats, max(n_strats) OVER (ORDER BY time ROWS BETWEEN 8640 PRECEDING AND 1 PRECEDING) AS trailing_max FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(cumulative_pnl * weighting) WHEN '${mode}' = 'equal' THEN avg(cumulative_pnl) ELSE sum(cumulative_pnl * weighting) / nullIf(sum(weighting), 0) END AS `Backtest PnL`, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(benchmark * weighting) WHEN '${mode}' = 'equal' THEN avg(benchmark) ELSE sum(benchmark * weighting) / nullIf(sum(weighting), 0) END AS `Benchmark`, uniq(strategy_table_name) AS n_strats FROM analytics.strategy_pnl_${resolution}_bt FINAL WHERE underlying = '${underlying}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time)) WHERE n_strats >= trailing_max * 0.65 ORDER BY time",
+          "refId": "B",
+          "format": 1,
+          "queryType": "sql",
+          "meta": {
+            "builderOptions": {
+              "mode": 0
+            }
+          },
+          "hide": false
+        },
+        {
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse"
+          },
+          "rawSql": "SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(cumulative_pnl * weighting) WHEN '${mode}' = 'equal' THEN avg(cumulative_pnl) ELSE sum(cumulative_pnl * weighting) / nullIf(sum(weighting), 0) END AS `Real Trade PnL` FROM analytics.strategy_pnl_${resolution}_real_trade FINAL WHERE underlying = '${underlying}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
+          "refId": "C",
+          "format": 1
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
+      "title": "Aggregate PnL (from 0%) — ${underlying}",
+      "description": "All strategies combined for this underlying. Production vs Backtest overlaid. PnL normalised to 0% at the start of the selected time range.",
+      "type": "timeseries",
+      "id": 3,
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 24,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 3,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisSoftMin": 0
+          },
+          "unit": "percentunit",
+          "decimals": 4
+        }
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "min"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse"
+          },
+          "rawSql": "SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(p * weighting) WHEN '${mode}' = 'equal' THEN avg(p) ELSE sum(p * weighting) / nullIf(sum(weighting), 0) END AS `Production PnL` FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts) AS p FROM analytics.strategy_pnl_${resolution}_prod FINAL WHERE underlying = '${underlying}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) GROUP BY time ORDER BY time",
+          "refId": "A",
+          "format": 1,
+          "queryType": "sql",
+          "meta": {
+            "builderOptions": {
+              "mode": 0
+            }
+          }
+        },
+        {
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse"
+          },
+          "rawSql": "SELECT time, `Backtest PnL`, `Benchmark` FROM (SELECT time, `Backtest PnL`, `Benchmark`, n_strats, max(n_strats) OVER (ORDER BY time ROWS BETWEEN 30 PRECEDING AND 1 PRECEDING) AS trailing_max FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(p * weighting) WHEN '${mode}' = 'equal' THEN avg(p) ELSE sum(p * weighting) / nullIf(sum(weighting), 0) END AS `Backtest PnL`, sum(b * weighting) / nullIf(sum(weighting), 0) AS `Benchmark`, uniq(strategy_table_name) AS n_strats FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts) AS p, benchmark - first_value(benchmark) OVER (PARTITION BY strategy_table_name ORDER BY ts) AS b FROM analytics.strategy_pnl_${resolution}_bt FINAL WHERE underlying = '${underlying}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) AS bt_data GROUP BY time ORDER BY time)) WHERE n_strats >= trailing_max * 0.65 ORDER BY time",
+          "refId": "B",
+          "format": 1,
+          "queryType": "sql",
+          "meta": {
+            "builderOptions": {
+              "mode": 0
+            }
+          },
+          "hide": false
+        },
+        {
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse"
+          },
+          "rawSql": "SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(p * weighting) WHEN '${mode}' = 'equal' THEN avg(p) ELSE sum(p * weighting) / nullIf(sum(weighting), 0) END AS `Real Trade PnL` FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts) AS p FROM analytics.strategy_pnl_${resolution}_real_trade FINAL WHERE underlying = '${underlying}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) AS rt_data GROUP BY time ORDER BY time",
+          "refId": "C",
+          "format": 1
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
+      "title": "${underlying} — Drawdown",
+      "description": "Drawdown from peak for the combined strategy return on this underlying.",
+      "type": "timeseries",
+      "id": 4,
+      "gridPos": {
+        "x": 0,
+        "y": 15,
+        "w": 24,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "percentunit"
+        }
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "min"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "asc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse"
+          },
+          "rawSql": "SELECT time, agg_pnl - max(agg_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Production Drawdown` FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(p * weighting) WHEN '${mode}' = 'equal' THEN avg(p) ELSE sum(p * weighting) / nullIf(sum(weighting), 0) END AS agg_pnl FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts) AS p FROM analytics.strategy_pnl_${resolution}_prod FINAL WHERE underlying = '${underlying}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) GROUP BY time) ORDER BY time",
+          "refId": "A",
+          "format": 1,
+          "queryType": "sql",
+          "meta": {
+            "builderOptions": {
+              "mode": 0
+            }
+          }
+        },
+        {
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse"
+          },
+          "rawSql": "SELECT time, agg_pnl - max(agg_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Backtest Drawdown`, agg_bm - max(agg_bm) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Benchmark Drawdown` FROM (SELECT time, agg_pnl, agg_bm FROM (SELECT time, agg_pnl, agg_bm, n_strats, max(n_strats) OVER (ORDER BY time ROWS BETWEEN 30 PRECEDING AND 1 PRECEDING) AS trailing_max FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(p * weighting) WHEN '${mode}' = 'equal' THEN avg(p) ELSE sum(p * weighting) / nullIf(sum(weighting), 0) END AS agg_pnl, sum(b * weighting) / nullIf(sum(weighting), 0) AS agg_bm, uniq(strategy_table_name) AS n_strats FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts) AS p, benchmark - first_value(benchmark) OVER (PARTITION BY strategy_table_name ORDER BY ts) AS b FROM analytics.strategy_pnl_${resolution}_bt FINAL WHERE underlying = '${underlying}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) AS bt_data GROUP BY time ORDER BY time)) WHERE n_strats >= trailing_max * 0.65) ORDER BY time",
+          "refId": "B",
+          "format": 1,
+          "queryType": "sql",
+          "meta": {
+            "builderOptions": {
+              "mode": 0
+            }
+          },
+          "hide": false
+        },
+        {
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse"
+          },
+          "rawSql": "SELECT time, agg_pnl - max(agg_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Real Trade Drawdown` FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(p * weighting) WHEN '${mode}' = 'equal' THEN avg(p) ELSE sum(p * weighting) / nullIf(sum(weighting), 0) END AS agg_pnl FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts) AS p FROM analytics.strategy_pnl_${resolution}_real_trade FINAL WHERE underlying = '${underlying}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) GROUP BY time) ORDER BY time",
+          "refId": "C",
+          "format": 1,
+          "queryType": "sql",
+          "meta": {
+            "builderOptions": {
+              "mode": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
+      "title": "Aggregate Position — ${underlying}",
+      "description": "Aggregated position across all strategies trading this underlying. Aggregation follows the selected PnL mode.",
+      "type": "timeseries",
+      "id": 5,
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 24,
+        "h": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 5,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "short",
+          "decimals": 6
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse"
+          },
+          "rawSql": "SELECT $__timeInterval(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(position * weighting) WHEN '${mode}' = 'equal' THEN avg(position) ELSE sum(position * weighting) / nullIf(sum(weighting), 0) END AS `Production Position` FROM analytics.strategy_pnl_${resolution}_prod FINAL WHERE underlying = '${underlying}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
+          "refId": "A",
+          "format": 1,
+          "queryType": "sql",
+          "meta": {
+            "builderOptions": {
+              "mode": 0
+            }
+          }
+        },
+        {
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse"
+          },
+          "rawSql": "SELECT time, `Backtest Position` FROM (SELECT time, `Backtest Position`, n_strats, max(n_strats) OVER (ORDER BY time ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING) AS trailing_max FROM (SELECT $__timeInterval(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(position * weighting) WHEN '${mode}' = 'equal' THEN avg(position) ELSE sum(position * weighting) / nullIf(sum(weighting), 0) END AS `Backtest Position`, uniq(strategy_table_name) AS n_strats FROM analytics.strategy_pnl_${resolution}_bt FINAL WHERE underlying = '${underlying}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time)) WHERE n_strats >= trailing_max * 0.65 ORDER BY time",
+          "refId": "B",
+          "format": 1,
+          "queryType": "sql",
+          "meta": {
+            "builderOptions": {
+              "mode": 0
+            }
+          }
+        },
+        {
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse"
+          },
+          "rawSql": "SELECT $__timeInterval(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(position * weighting) WHEN '${mode}' = 'equal' THEN avg(position) ELSE sum(position * weighting) / nullIf(sum(weighting), 0) END AS `Real Trade Position` FROM analytics.strategy_pnl_${resolution}_real_trade FINAL WHERE underlying = '${underlying}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
+          "refId": "C",
+          "format": 1,
+          "queryType": "sql",
+          "meta": {
+            "builderOptions": {
+              "mode": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
+      "title": "Per-Instance Position — ${underlying}",
+      "description": "Individual position for each strategy instance trading this underlying. Each line is one strategy_table_name.",
+      "type": "timeseries",
+      "id": 6,
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 24,
+        "h": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "short",
+          "decimals": 6
+        }
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "transformations": [
+        {
+          "id": "partitionByValues",
+          "options": {
+            "fields": [
+              "strategy_table_name"
+            ],
+            "keepFields": false
+          }
+        }
+      ],
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse"
+          },
+          "rawSql": "SELECT toStartOfFiveMinutes(ts) AS time, strategy_table_name, argMax(position, ts) AS position FROM analytics.strategy_pnl_${resolution}_prod FINAL WHERE underlying = '${underlying}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time, strategy_table_name ORDER BY time",
+          "refId": "A",
+          "format": 0,
+          "queryType": "sql",
+          "meta": {
+            "builderOptions": {
+              "mode": 0
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "underlying",
+        "label": "Underlying",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "clickhouse"
+        },
+        "definition": "SELECT DISTINCT underlying FROM analytics.strategy_output_history_v2 ORDER BY underlying",
+        "query": "SELECT DISTINCT underlying FROM analytics.strategy_output_history_v2 ORDER BY underlying",
+        "refresh": 1,
+        "sort": 1,
+        "multi": false,
+        "includeAll": false
+      },
+      {
+        "name": "mode",
+        "label": "PnL Mode",
+        "type": "custom",
+        "query": "Rescaled : rescaled,Raw Weighted : raw_weighted,Equal Weighted : equal",
+        "current": {
+          "text": "Rescaled",
+          "value": "rescaled"
+        },
+        "options": [
+          {
+            "text": "Rescaled",
+            "value": "rescaled",
+            "selected": true
+          },
+          {
+            "text": "Raw Weighted",
+            "value": "raw_weighted",
+            "selected": false
+          },
+          {
+            "text": "Equal Weighted",
+            "value": "equal",
+            "selected": false
+          }
+        ],
+        "hide": 0,
+        "multi": false,
+        "includeAll": false,
+        "description": "Rescaled: sum(pnl*w)/sum(w) — normalized to 100%. Raw Weighted: sum(pnl*w) — actual portfolio contribution. Equal Weighted: avg(pnl) — every instance equal."
+      },
+      {
+        "name": "resolution",
+        "label": "Resolution",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "clickhouse"
+        },
+        "query": "SELECT multiIf(${__to} - ${__from} < 604800000, '1min', ${__to} - ${__from} < 7776000000, '1hour', '1day')",
+        "refresh": 2,
+        "sort": 0,
+        "hide": 2,
+        "multi": false,
+        "includeAll": false,
+        "current": {},
+        "options": [],
+        "description": "Auto-selected resolution based on time range: 1min (< 7d), 1hour (7-90d), 1day (> 90d)."
+      }
+    ]
+  },
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "timezone": "utc",
+  "title": "Strategy PnL — L4 Underlying",
+  "uid": "strategy-pnl-l4",
+  "version": 7
+}
