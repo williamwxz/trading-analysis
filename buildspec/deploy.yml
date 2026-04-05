@@ -38,7 +38,7 @@ phases:
       # Fetch ClickHouse host from Secrets Manager
       - |
         CH_SECRET=$(aws secretsmanager get-secret-value \
-          --secret-id trading-analysis-production/clickhouse \
+          --secret-id trading-analysis/clickhouse \
           --region $DEPLOY_REGION \
           --query SecretString --output text)
         export CLICKHOUSE_HOST=$(echo $CH_SECRET | python3 -c "import sys,json; print(json.load(sys.stdin)['host'])")
@@ -50,9 +50,9 @@ phases:
       - echo "=== Terraform Apply ==="
       - cd infra/terraform
       - terraform init -input=false
-      - terraform apply -auto-approve -input=false
-          -var="aws_region=$DEPLOY_REGION"
-          -var="environment=production"
+      - terraform apply -auto-approve -input=false \
+          -var="aws_region=$DEPLOY_REGION" \
+          -var="environment=default" \
           -var="github_repo=${GITHUB_REPO:-williamwxz/trading-analysis}"
       - cd ../..
 
