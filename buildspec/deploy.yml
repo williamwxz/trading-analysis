@@ -2,39 +2,36 @@ version: 0.2
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage: Deploy
-# 1. Terraform apply (infra/terraform) — idempotent, safe to run every push
-# 2. Apply ClickHouse schema — only if schemas/clickhouse_cloud.sql changed
-# 3. Update ECS service with new image
 # ─────────────────────────────────────────────────────────────────────────────
 
 phases:
   install:
     commands:
-      - TF_VERSION=1.5.7
-      - curl -sSL https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip -o tf.zip
-      - unzip tf.zip && mv terraform /usr/local/bin/ && rm tf.zip
-      - terraform version
-      - curl -fsSL https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key | gpg --dearmor -o /usr/share/keyrings/clickhouse-keyring.gpg
-      - echo "deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg] https://packages.clickhouse.com/deb stable main" | tee /etc/apt/sources.list.d/clickhouse.list
-      - apt-get update -q && apt-get install -y -q clickhouse-client
+      - 'TF_VERSION=1.5.7'
+      - 'curl -sSL https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip -o tf.zip'
+      - 'unzip tf.zip && mv terraform /usr/local/bin/ && rm tf.zip'
+      - 'terraform version'
+      - 'curl -fsSL https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key | gpg --dearmor -o /usr/share/keyrings/clickhouse-keyring.gpg'
+      - 'echo "deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg] https://packages.clickhouse.com/deb stable main" | tee /etc/apt/sources.list.d/clickhouse.list'
+      - 'apt-get update -q && apt-get install -y -q clickhouse-client'
 
   pre_build:
     commands:
-      - IMAGE_URI=$(cat $CODEBUILD_SRC_DIR_built/image_uri.txt)
-      - echo "Deploying image: $IMAGE_URI"
-      - SCHEMA_CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -c "schemas/clickhouse_cloud.sql" || true)
-      - echo "Schema changed: $SCHEMA_CHANGED"
-      - CH_SECRET=$(aws secretsmanager get-secret-value --secret-id trading-analysis/clickhouse --region $DEPLOY_REGION --query SecretString --output text)
-      - export CLICKHOUSE_HOST=$(echo $CH_SECRET | python3 -c "import sys,json; print(json.load(sys.stdin)['host'])")
-      - export CLICKHOUSE_PASSWORD=$(echo $CH_SECRET | python3 -c "import sys,json; print(json.load(sys.stdin)['password'])")
+      - 'IMAGE_URI=$(cat $CODEBUILD_SRC_DIR_built/image_uri.txt)'
+      - 'echo "Deploying image: $IMAGE_URI"'
+      - 'SCHEMA_CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -c "schemas/clickhouse_cloud.sql" || true)'
+      - 'echo "Schema changed: $SCHEMA_CHANGED"'
+      - 'CH_SECRET=$(aws secretsmanager get-secret-value --secret-id trading-analysis/clickhouse --region $DEPLOY_REGION --query SecretString --output text)'
+      - 'export CLICKHOUSE_HOST=$(echo $CH_SECRET | python3 -c "import sys,json; print(json.load(sys.stdin)['host'])")'
+      - 'export CLICKHOUSE_PASSWORD=$(echo $CH_SECRET | python3 -c "import sys,json; print(json.load(sys.stdin)['password'])")'
 
   build:
     commands:
-      - echo "=== Terraform Apply ==="
-      - cd infra/terraform
-      - terraform init -input=false
-      - terraform apply -auto-approve -input=false -var="aws_region=$DEPLOY_REGION" -var="environment=default" -var="github_repo=${GITHUB_REPO:-williamwxz/trading-analysis}"
-      - cd ../..
+      - 'echo "=== Terraform Apply ==="'
+      - 'cd infra/terraform'
+      - 'terraform init -input=false'
+      - 'terraform apply -auto-approve -input=false -var="aws_region=$DEPLOY_REGION" -var="environment=default" -var="github_repo=${GITHUB_REPO:-williamwxz/trading-analysis}"'
+      - 'cd ../..'
       - |
         if [ "$SCHEMA_CHANGED" -gt "0" ]; then
           echo "=== Applying ClickHouse schema ==="
@@ -43,7 +40,7 @@ phases:
         else
           echo "=== Schema unchanged — skipping ==="
         fi
-      - echo "=== Updating ECS service ==="
+      - 'echo "=== Updating ECS service ==="'
       - |
         TASK_DEF=$(aws ecs describe-task-definition --task-definition $ECS_SERVICE --region $DEPLOY_REGION --query taskDefinition --output json)
         NEW_TASK=$(echo "$TASK_DEF" | python3 -c "import sys, json, os; td = json.load(sys.stdin); img = os.environ['IMAGE_URI']; [c.__setitem__('image', img) for c in td['containerDefinitions'] if c['name'] in ('dagster-webserver', 'dagster-daemon')]; [td.pop(k, None) for k in ('taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy')]; print(json.dumps(td))")
@@ -53,7 +50,7 @@ phases:
 
   post_build:
     commands:
-      - echo "=== Waiting for ECS service to stabilize ==="
-      - aws ecs wait services-stable --cluster $ECS_CLUSTER --services $ECS_SERVICE --region $DEPLOY_REGION
-      - echo "=== Deploy complete ==="
-      - aws ecs describe-services --cluster $ECS_CLUSTER --services $ECS_SERVICE --region $DEPLOY_REGION --query 'services[0].{Status:status,Running:runningCount,Desired:desiredCount}' --output table
+      - 'echo "=== Waiting for ECS service to stabilize ==="'
+      - 'aws ecs wait services-stable --cluster $ECS_CLUSTER --services $ECS_SERVICE --region $DEPLOY_REGION'
+      - 'echo "=== Deploy complete ==="'
+      - 'aws ecs describe-services --cluster $ECS_CLUSTER --services $ECS_SERVICE --region $DEPLOY_REGION --query ''services[0].{Status:status,Running:runningCount,Desired:desiredCount}'' --output table'
