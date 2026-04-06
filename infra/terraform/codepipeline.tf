@@ -358,16 +358,17 @@ resource "aws_iam_role_policy" "codebuild" {
         Action   = [
           "logs:*",
           "s3:*",
+          "codebuild:*",
+          "codepipeline:*",
           "ecr:*",
           "ecs:*",
           "rds:*",
+          "elasticloadbalancing:*",
           "secretsmanager:*",
           "iam:*",
           "kafka:*",
           "msk:*",
           "ec2:*",
-          "codebuild:*",
-          "codepipeline:*",
           "codestar-connections:UseConnection"
         ]
         Resource = "*"
