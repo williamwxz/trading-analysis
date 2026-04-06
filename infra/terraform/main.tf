@@ -388,6 +388,8 @@ resource "aws_ecs_task_definition" "grafana" {
         { name = "GF_SERVER_HTTP_PORT",        value = "3000" },
         { name = "GF_SERVER_ROOT_URL",         value = "http://${aws_lb.main.dns_name}/grafana" },
         { name = "GF_SERVER_SERVE_FROM_SUB_PATH", value = "true" },
+        { name = "GF_AUTH_ANONYMOUS_ENABLED",  value = "true" },
+        { name = "GF_AUTH_ANONYMOUS_ORG_ROLE", value = "Admin" },
       ]
 
       mountPoints = [
