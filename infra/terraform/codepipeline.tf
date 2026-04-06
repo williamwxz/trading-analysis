@@ -358,6 +358,7 @@ resource "aws_iam_role_policy" "codebuild" {
         Action   = [
           "logs:*",
           "s3:*",
+          "codebuild:*",
           "ecr:*",
           "ecs:*",
           "rds:*",
