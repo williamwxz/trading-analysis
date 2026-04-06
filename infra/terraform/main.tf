@@ -259,7 +259,7 @@ resource "aws_ecs_task_definition" "dagster" {
       name      = "dagster-webserver"
       image     = "${aws_ecr_repository.dagster.repository_url}:latest"
       essential = true
-      command   = ["dagster-webserver", "-h", "0.0.0.0", "-p", "3000"]
+      command   = ["dagster-webserver", "-h", "0.0.0.0", "-p", "3000", "-m", "trading_dagster"]
 
       portMappings = [
         {
@@ -298,7 +298,7 @@ resource "aws_ecs_task_definition" "dagster" {
       name      = "dagster-daemon"
       image     = "${aws_ecr_repository.dagster.repository_url}:latest"
       essential = true
-      command   = ["dagster-daemon", "run"]
+      command   = ["dagster-daemon", "run", "-m", "trading_dagster"]
 
       environment = [
         { name = "DAGSTER_HOME",    value = "/app" },
@@ -364,7 +364,7 @@ resource "aws_ecs_task_definition" "grafana" {
   container_definitions = jsonencode([
     {
       name      = "grafana"
-      image     = "grafana/grafana:11.0.0"
+      image     = "grafana/grafana-oss:11.0.0"
       essential = true
 
       portMappings = [
@@ -377,6 +377,7 @@ resource "aws_ecs_task_definition" "grafana" {
       environment = [
         { name = "GF_SECURITY_ADMIN_PASSWORD", value = "changeme" },
         { name = "GF_INSTALL_PLUGINS",         value = "grafana-clickhouse-datasource" },
+        { name = "GF_SERVER_HTTP_PORT",        value = "3000" },
       ]
 
       mountPoints = [
