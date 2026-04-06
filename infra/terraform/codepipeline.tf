@@ -353,79 +353,27 @@ resource "aws_iam_role_policy" "codebuild" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      # Logs
       {
         Effect   = "Allow"
-        Action   = ["logs:*"]
-        Resource = "*"
-      },
-      # S3
-      {
-        Effect   = "Allow"
-        Action   = ["s3:*"]
-        Resource = "*"
-      },
-      # ECR — push image and read
-      {
-        Effect = "Allow"
-        Action = [
-          "ecr:GetAuthorizationToken",
-          "ecr:BatchCheckLayerAvailability", "ecr:GetDownloadUrlForLayer",
-          "ecr:BatchGetImage", "ecr:InitiateLayerUpload", "ecr:UploadLayerPart",
-          "ecr:CompleteLayerUpload", "ecr:PutImage", "ecr:DescribeRepositories"
+        Action   = [
+          "logs:*",
+          "s3:*",
+          "ecr:*",
+          "ecs:*",
+          "rds:*",
+          "secretsmanager:*",
+          "iam:GetRole",
+          "iam:PassRole",
+          "kafka:*",
+          "msk:*",
+          "ec2:*"
         ]
         Resource = "*"
       },
-      # CodeStar Connections
       {
         Effect   = "Allow"
         Action   = ["codestar-connections:UseConnection"]
         Resource = local.connection_arn
-      },
-      # ECS — update service and read
-      {
-        Effect = "Allow"
-        Action = [
-          "ecs:DescribeServices", "ecs:UpdateService",
-          "ecs:DescribeTaskDefinition", "ecs:RegisterTaskDefinition",
-          "ecs:DescribeTasks", "ecs:ListTasks", "ecs:DescribeClusters"
-        ]
-        Resource = "*"
-      },
-      # IAM PassRole
-      {
-        Effect   = "Allow"
-        Action   = "iam:PassRole"
-        Resource = "*"
-        Condition = {
-          StringLike = {
-            "iam:PassedToService" = "ecs-tasks.amazonaws.com"
-          }
-        }
-      },
-      # Secrets Manager
-      {
-        Effect   = "Allow"
-        Action   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret", "secretsmanager:PutSecretValue"]
-        Resource = [
-          aws_secretsmanager_secret.clickhouse.arn,
-          aws_secretsmanager_secret.dagster_pg.arn,
-        ]
-      },
-      # Terraform permissions (EC2, MSK, IAM, etc.)
-      {
-        Effect   = "Allow"
-        Action   = [
-          "ec2:*", "elasticloadbalancing:*",
-          "iam:GetRole", "iam:CreateRole", "iam:DeleteRole", "iam:AttachRolePolicy",
-          "iam:DetachRolePolicy", "iam:PutRolePolicy", "iam:DeleteRolePolicy",
-          "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies",
-          "iam:CreateInstanceProfile", "iam:DeleteInstanceProfile",
-          "iam:AddRoleToInstanceProfile", "iam:RemoveRoleFromInstanceProfile",
-          "iam:GetInstanceProfile", "iam:ListInstanceProfilesForRole",
-          "kafka:*", "msk:*", "rds:*"
-        ]
-        Resource = "*"
       }
     ]
   })
