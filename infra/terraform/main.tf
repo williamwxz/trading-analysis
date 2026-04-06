@@ -338,6 +338,14 @@ resource "aws_ecs_service" "dagster" {
   desired_count   = 1
   launch_type     = "FARGATE"
 
+  health_check_grace_period_seconds = 60
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.dagster.arn
+    container_name   = "dagster-webserver"
+    container_port   = 3000
+  }
+
   network_configuration {
     subnets          = data.aws_subnets.default.ids
     security_groups  = [aws_security_group.ecs_tasks.id]
@@ -378,6 +386,8 @@ resource "aws_ecs_task_definition" "grafana" {
         { name = "GF_SECURITY_ADMIN_PASSWORD", value = "changeme" },
         { name = "GF_INSTALL_PLUGINS",         value = "grafana-clickhouse-datasource" },
         { name = "GF_SERVER_HTTP_PORT",        value = "3000" },
+        { name = "GF_SERVER_ROOT_URL",         value = "http://${aws_lb.main.dns_name}/grafana" },
+        { name = "GF_SERVER_SERVE_FROM_SUB_PATH", value = "true" },
       ]
 
       mountPoints = [
@@ -412,6 +422,14 @@ resource "aws_ecs_service" "grafana" {
   desired_count   = 1
   launch_type     = "FARGATE"
 
+  health_check_grace_period_seconds = 60
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.grafana.arn
+    container_name   = "grafana"
+    container_port   = 3000
+  }
+
   network_configuration {
     subnets          = data.aws_subnets.default.ids
     security_groups  = [aws_security_group.ecs_tasks.id]
@@ -423,20 +441,118 @@ resource "aws_ecs_service" "grafana" {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Application Load Balancer (ALB)
+# ─────────────────────────────────────────────────────────────────────────────
+
+resource "aws_lb" "main" {
+  name               = local.name_prefix
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb.id]
+  subnets            = data.aws_subnets.default.ids
+
+  tags = local.common_tags
+}
+
+resource "aws_lb_target_group" "dagster" {
+  name        = "${local.name_prefix}-dagster"
+  port        = 3000
+  protocol    = "HTTP"
+  vpc_id      = data.aws_vpc.default.id
+  target_type = "ip"
+
+  health_check {
+    path                = "/server_info"
+    healthy_threshold   = 2
+    unhealthy_threshold = 10
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_lb_target_group" "grafana" {
+  name        = "${local.name_prefix}-grafana"
+  port        = 3000
+  protocol    = "HTTP"
+  vpc_id      = data.aws_vpc.default.id
+  target_type = "ip"
+
+  health_check {
+    path                = "/api/health"
+    healthy_threshold   = 2
+    unhealthy_threshold = 10
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.main.arn
+  port              = "80"
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.dagster.arn
+  }
+}
+
+resource "aws_lb_listener_rule" "grafana" {
+  listener_arn = aws_lb_listener.http.arn
+  priority     = 10
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.grafana.arn
+  }
+
+  condition {
+    path_pattern {
+      values = ["/grafana*"]
+    }
+  }
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Security Groups
 # ─────────────────────────────────────────────────────────────────────────────
+
+resource "aws_security_group" "alb" {
+  name_prefix = "${local.name_prefix}-alb-"
+  vpc_id      = data.aws_vpc.default.id
+
+  # Public HTTP access
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = local.common_tags
+}
 
 resource "aws_security_group" "ecs_tasks" {
   name_prefix = "${local.name_prefix}-ecs-"
   vpc_id      = data.aws_vpc.default.id
 
+  # Allow port 3000 only from the ALB
   ingress {
-    from_port   = 3000
-    to_port     = 3000
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    from_port       = 3000
+    to_port         = 3000
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
   }
 
+  # All outbound
   egress {
     from_port   = 0
     to_port     = 0
@@ -608,4 +724,8 @@ output "s3_bucket" {
 
 output "msk_cluster_arn" {
   value = aws_msk_serverless_cluster.main.arn
+}
+
+output "alb_dns_name" {
+  value = "http://${aws_lb.main.dns_name}"
 }
