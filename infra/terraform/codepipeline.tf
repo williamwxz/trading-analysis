@@ -362,8 +362,7 @@ resource "aws_iam_role_policy" "codebuild" {
           "ecs:*",
           "rds:*",
           "secretsmanager:*",
-          "iam:GetRole",
-          "iam:PassRole",
+          "iam:*",
           "kafka:*",
           "msk:*",
           "ec2:*"
