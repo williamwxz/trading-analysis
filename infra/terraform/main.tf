@@ -191,7 +191,7 @@ resource "aws_db_instance" "dagster" {
   identifier           = "${local.name_prefix}-db"
   allocated_storage    = 20
   engine               = "postgres"
-  engine_version       = "16.1"
+  engine_version       = "16.6"
   instance_class       = "db.t4g.micro"
   db_name              = "dagster"
   username             = "dagster"
