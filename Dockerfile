@@ -2,7 +2,8 @@
 # trading-analysis Dagster — Multi-stage production build
 # ============================================================================
 
-FROM python:3.11-slim AS builder
+# Use ECR Public to avoid Docker Hub rate limits (429 Too Many Requests)
+FROM public.ecr.aws/docker/library/python:3.11-slim AS builder
 
 WORKDIR /build
 COPY pyproject.toml .
@@ -13,7 +14,7 @@ ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install --no-cache-dir .
 
 
-FROM python:3.11-slim AS runtime
+FROM public.ecr.aws/docker/library/python:3.11-slim AS runtime
 
 WORKDIR /app
 
