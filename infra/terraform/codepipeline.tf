@@ -355,7 +355,21 @@ resource "aws_iam_role_policy" "codebuild" {
     Statement = [
       {
         Effect   = "Allow"
-        Action   = "*"
+        Action   = [
+          "logs:*",
+          "s3:*",
+          "ecr:*",
+          "ecs:*",
+          "rds:*",
+          "secretsmanager:*",
+          "iam:*",
+          "kafka:*",
+          "msk:*",
+          "ec2:*",
+          "codebuild:*",
+          "codepipeline:*",
+          "codestar-connections:UseConnection"
+        ]
         Resource = "*"
       }
     ]
