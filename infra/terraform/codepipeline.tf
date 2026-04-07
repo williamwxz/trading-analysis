@@ -366,9 +366,9 @@ resource "aws_iam_role_policy" "codebuild" {
           "elasticloadbalancing:*",
           "secretsmanager:*",
           "iam:*",
-          "kafka:*",
-          "msk:*",
-          "ec2:*",
+          "kinesis:*",
+          "ec2:*"
+,
           "codestar-connections:UseConnection"
         ]
         Resource = "*"

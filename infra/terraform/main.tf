@@ -106,44 +106,21 @@ resource "aws_s3_bucket_lifecycle_configuration" "data" {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Amazon MSK Serverless
+# Amazon Kinesis Data Stream (Cost-effective alternative to MSK)
 # ─────────────────────────────────────────────────────────────────────────────
 
-resource "aws_msk_serverless_cluster" "main" {
-  cluster_name = "${local.name_prefix}-msk"
+resource "aws_kinesis_stream" "main" {
+  name             = "${local.name_prefix}-stream"
+  shard_count      = 1
+  retention_period = 24
 
-  vpc_config {
-    subnet_ids = slice(data.aws_subnets.default.ids, 0, min(3, length(data.aws_subnets.default.ids)))
-    security_group_ids = [aws_security_group.msk.id]
-  }
+  shard_level_metrics = [
+    "IncomingBytes",
+    "OutgoingBytes",
+  ]
 
-  client_authentication {
-    sasl {
-      iam {
-        enabled = true
-      }
-    }
-  }
-
-  tags = local.common_tags
-}
-
-resource "aws_security_group" "msk" {
-  name_prefix = "${local.name_prefix}-msk-"
-  vpc_id      = data.aws_vpc.default.id
-
-  ingress {
-    from_port       = 9098
-    to_port         = 9098
-    protocol        = "tcp"
-    security_groups = [aws_security_group.ecs_tasks.id]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+  stream_mode_details {
+    stream_mode = "PROVISIONED"
   }
 
   tags = local.common_tags
@@ -683,8 +660,8 @@ resource "aws_iam_role" "ecs_task" {
   tags = local.common_tags
 }
 
-resource "aws_iam_role_policy" "ecs_task_s3" {
-  name = "s3-access"
+resource "aws_iam_role_policy" "ecs_task_policy" {
+  name = "task-access"
   role = aws_iam_role.ecs_task.id
 
   policy = jsonencode({
@@ -702,6 +679,18 @@ resource "aws_iam_role_policy" "ecs_task_s3" {
           aws_s3_bucket.data.arn,
           "${aws_s3_bucket.data.arn}/*",
         ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "kinesis:PutRecord",
+          "kinesis:PutRecords",
+          "kinesis:GetRecords",
+          "kinesis:GetShardIterator",
+          "kinesis:DescribeStream",
+          "kinesis:ListStreams"
+        ]
+        Resource = [aws_kinesis_stream.main.arn]
       }
     ]
   })
@@ -724,8 +713,8 @@ output "s3_bucket" {
   value = aws_s3_bucket.data.id
 }
 
-output "msk_cluster_arn" {
-  value = aws_msk_serverless_cluster.main.arn
+output "kinesis_stream_name" {
+  value = aws_kinesis_stream.main.name
 }
 
 output "alb_dns_name" {

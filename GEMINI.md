@@ -15,7 +15,7 @@
 | **Orchestrator** | **ECS Fargate** | Dagster Webserver & Daemon (Runs `trading_dagster` module) |
 | **Metadata DB** | **RDS Postgres** | `db.t4g.micro` - Stores run history & event logs |
 | **Analytics DB** | **ClickHouse Cloud** | External managed service (Trade data storage) |
-| **Stream Buffer** | **MSK Serverless** | Kafka for real-time ingestion |
+| **Stream Buffer** | **Amazon Kinesis** | Cost-effective alternative to MSK for real-time ingestion |
 | **Data Lake** | **S3** | Raw data storage (`trading-analysis-data-v2`) |
 | **Visualization**| **ECS Fargate** | Grafana (Provisioned with ClickHouse datasource) |
 
@@ -28,12 +28,12 @@
 
 | Service | Estimated Cost | Notes |
 | :--- | :--- | :--- |
-| **MSK Serverless** | ~$540.00 | **Primary driver**: $0.75/hr base charge. |
 | **ALB** | ~$16.00 | Stable entry point for all services. |
 | **RDS Postgres** | ~$20.00 | Managed metadata storage. |
 | **ECS Fargate** | ~$18.00 | Using **Fargate Spot** for tasks. |
+| **Amazon Kinesis** | ~$15.00 | 1 Shard, low-volume ingestion. |
 | **Other (S3/Logs/Secrets)** | ~$10.00 | Variable usage. |
-| **Total** | **~$604.00** | |
+| **Total** | **~$79.00** | **Massive Savings**: Removed MSK Serverless (~$540/mo). |
 
 ## Key Configurations & Automation
 
