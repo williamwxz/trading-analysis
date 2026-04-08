@@ -16,6 +16,10 @@ phases:
       - 'echo "Logging in to ECR in $DEPLOY_REGION..."'
       - 'aws ecr get-login-password --region $DEPLOY_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$DEPLOY_REGION.amazonaws.com'
       
+      # Set Defaults if variables are missing (handles bootstrap issues)
+      - 'IMAGE_NAME=${IMAGE_NAME:-trading-analysis-dagster}'
+      - 'GRAFANA_IMAGE_NAME=${GRAFANA_IMAGE_NAME:-trading-analysis-grafana}'
+      
       # Dagster Image Vars
       - 'IMAGE_URI=$AWS_ACCOUNT_ID.dkr.ecr.$DEPLOY_REGION.amazonaws.com/$IMAGE_NAME:$CODEBUILD_RESOLVED_SOURCE_VERSION'
       - 'IMAGE_LATEST=$AWS_ACCOUNT_ID.dkr.ecr.$DEPLOY_REGION.amazonaws.com/$IMAGE_NAME:latest'
