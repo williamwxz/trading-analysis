@@ -55,6 +55,10 @@ def execute(sql: str, client: Optional[Client] = None) -> None:
     c.command(sql)
 
 
+# Alias for backward/internal compatibility
+execute_query = execute
+
+
 def insert_rows(
     table: str,
     columns: List[str],
