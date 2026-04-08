@@ -105,6 +105,10 @@ resource "aws_codebuild_project" "build" {
       name  = "IMAGE_NAME"
       value = "trading-analysis-dagster"
     }
+    environment_variable {
+      name  = "GRAFANA_IMAGE_NAME"
+      value = "trading-analysis-grafana"
+    }
   }
 
   source {

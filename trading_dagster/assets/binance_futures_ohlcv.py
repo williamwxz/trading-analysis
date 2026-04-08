@@ -1,18 +1,15 @@
 """
 Binance Futures OHLCV 1-min Polling Asset
 
-Polls Binance Futures API for 1-minute klines and inserts into
-analytics.futures_price_1min in ClickHouse Cloud.
-
-Replaces the Amber Data → Redpanda → Kafka MV pipeline from falcon-lakehouse
-with simple REST API polling — minimal infrastructure, same result.
+Polls Binance Futures API via ccxt ExchangePriceDataService for 1-minute klines
+and inserts into analytics.futures_price_1min in ClickHouse Cloud.
 """
 
 import time
 from datetime import datetime, timedelta, timezone
 from typing import List
+import pandas as pd
 
-import requests
 from dagster import (
     AutomationCondition,
     AssetExecutionContext,
@@ -22,10 +19,10 @@ from dagster import (
 )
 
 from ..utils.clickhouse_client import get_client, insert_rows, query_scalar
+from ..utils.exchange_price_service import ExchangePriceDataService
 
-BINANCE_FAPI = "https://fapi.binance.com"
-
-# Instruments to poll — all USDT perpetual futures used by strategies
+# Instruments to poll — all USDT perpetual futures used by strategies 
+# Clickhouse format: "BTCUSDT"
 INSTRUMENTS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
     "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
@@ -33,38 +30,30 @@ INSTRUMENTS = [
 
 INSERT_COLUMNS = ["exchange", "instrument", "ts", "open", "high", "low", "close", "volume"]
 
-
-def _fetch_klines(instrument: str, start_ms: int, limit: int = 1000) -> List[list]:
-    """Fetch 1m klines from Binance Futures API."""
-    resp = requests.get(
-        f"{BINANCE_FAPI}/fapi/v1/klines",
-        params={
-            "symbol": instrument,
-            "interval": "1m",
-            "startTime": start_ms,
-            "limit": limit,
-        },
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json()
+def _get_ccxt_symbol(instrument: str) -> str:
+    """Convert 'BTCUSDT' to 'BTC/USDT'."""
+    if "/" in instrument:
+        return instrument
+    if instrument.endswith("USDT"):
+        return f"{instrument[:-4]}/USDT"
+    return instrument
 
 
-def _klines_to_rows(instrument: str, klines: list) -> List[list]:
-    """Convert Binance kline response to ClickHouse rows."""
+def _df_to_rows(instrument: str, df: pd.DataFrame) -> List[list]:
+    """Convert ExchangePriceDataService DataFrame to ClickHouse rows."""
     rows = []
-    for k in klines:
-        ts = datetime.fromtimestamp(k[0] / 1000, tz=timezone.utc)
-        ts_str = ts.strftime("%Y-%m-%d %H:%M:%S")
+    # df columns expected: ['open', 'high', 'low', 'close', 'volume', 'timestamp']
+    for _, row in df.iterrows():
+        ts_str = row['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
         rows.append([
             "binance",
             instrument,
             ts_str,
-            float(k[1]),  # open
-            float(k[2]),  # high
-            float(k[3]),  # low
-            float(k[4]),  # close
-            float(k[5]),  # volume
+            float(row['open']),
+            float(row['high']),
+            float(row['low']),
+            float(row['close']),
+            float(row['volume']),
         ])
     return rows
 
@@ -73,13 +62,13 @@ def _klines_to_rows(instrument: str, klines: list) -> List[list]:
     name="binance_futures_ohlcv_1min",
     group_name="market_data",
     automation_condition=(
-        AutomationCondition.on_cron("*/2 * * * *") & ~AutomationCondition.in_progress()
+        AutomationCondition.on_cron("*/5 * * * *") & ~AutomationCondition.in_progress()
     ),
     description=(
-        "Polls Binance Futures API for 1-min OHLCV klines and inserts into "
+        "Polls Binance Futures API via CCXT for 1-min OHLCV klines and inserts into "
         "analytics.futures_price_1min. Incremental — starts from last known ts per instrument."
     ),
-    compute_kind="binance_api",
+    compute_kind="exchange_price_service",
 )
 def binance_futures_ohlcv_1min_asset(
     context: AssetExecutionContext,
@@ -89,7 +78,7 @@ def binance_futures_ohlcv_1min_asset(
     instruments_updated = []
 
     for instrument in INSTRUMENTS:
-        # Find last known timestamp
+        # Find last known timestamp in Clickhouse
         last_ts = query_scalar(
             f"SELECT max(ts) FROM analytics.futures_price_1min "
             f"WHERE exchange = 'binance' AND instrument = '{instrument}'",
@@ -97,20 +86,37 @@ def binance_futures_ohlcv_1min_asset(
         )
 
         if last_ts and str(last_ts) != "1970-01-01 00:00:00":
-            start_ms = int(last_ts.timestamp() * 1000) + 60_000  # next minute
+            # Add 1 minute to start_time to avoid inserting duplicate row for the same minute
+            start_dt = last_ts.replace(tzinfo=timezone.utc) + timedelta(minutes=1)
         else:
             # Bootstrap: start from 7 days ago
-            start_ms = int((datetime.now(tz=timezone.utc) - timedelta(days=7)).timestamp() * 1000)
+            start_dt = datetime.now(tz=timezone.utc) - timedelta(days=7)
 
-        context.log.info(f"[{instrument}] Polling from {datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)}")
+        # To avoid querying Future data
+        if start_dt > datetime.now(tz=timezone.utc):
+            context.log.info(f"[{instrument}] Data is fully up to date")
+            continue
+
+        start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        context.log.info(f"[{instrument}] Polling from {start_iso}")
 
         try:
-            klines = _fetch_klines(instrument, start_ms, limit=1000)
-            if not klines:
+            ccxt_symbol = _get_ccxt_symbol(instrument)
+            df = ExchangePriceDataService.fetch_ohlcv_times_series_df(
+                symbol=ccxt_symbol,
+                exchange_name="binance_perp",
+                timeframe="1m",
+                date_since=start_iso,
+                limit=1000
+            )
+
+            if df is None or df.empty:
                 context.log.info(f"[{instrument}] No new klines")
                 continue
 
-            rows = _klines_to_rows(instrument, klines)
+            rows = _df_to_rows(instrument, df)
+            
+            # Clickhouse insertion
             insert_rows("analytics.futures_price_1min", INSERT_COLUMNS, rows, client)
             total_inserted += len(rows)
             instruments_updated.append(f"{instrument}({len(rows)})")
@@ -118,8 +124,8 @@ def binance_futures_ohlcv_1min_asset(
         except Exception as exc:
             context.log.warning(f"[{instrument}] Failed: {exc}")
 
-        # Rate limit: 100ms between instruments
-        time.sleep(0.1)
+        # Rate limit between instruments
+        time.sleep(0.5)
 
     return MaterializeResult(
         metadata={
@@ -130,3 +136,4 @@ def binance_futures_ohlcv_1min_asset(
 
 
 __all__ = ["binance_futures_ohlcv_1min_asset"]
+

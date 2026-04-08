@@ -84,69 +84,6 @@ def _write_watermark(underlying: str, last_revision_ts: str) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Tail fill (pure SQL — correct for single-row anchor)
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def _tail_fill_sql(underlying: str) -> str:
-    instrument = f"concat(upper('{underlying}'), 'USDT')"
-    return f"""\
-INSERT INTO analytics.{TARGET_TABLE}
-WITH
-max_ts AS (
-    SELECT strategy_table_name, max(ts) AS anchor_ts
-    FROM analytics.{TARGET_TABLE}
-    WHERE underlying = '{underlying}'
-    GROUP BY strategy_table_name
-),
-anchor AS (
-    SELECT
-        t.strategy_table_name,
-        argMax(t.strategy_id, t.updated_at) AS strategy_id,
-        argMax(t.strategy_name, t.updated_at) AS strategy_name,
-        t.underlying,
-        argMax(t.config_timeframe, t.updated_at) AS config_timeframe,
-        argMax(t.source, t.updated_at) AS source,
-        argMax(t.weighting, t.updated_at) AS weighting,
-        argMax(t.position, t.updated_at) AS position,
-        argMax(t.price, t.updated_at) AS anchor_price,
-        argMax(t.cumulative_pnl, t.updated_at) AS anchor_pnl,
-        argMax(t.final_signal, t.updated_at) AS final_signal,
-        argMax(t.benchmark, t.updated_at) AS benchmark,
-        m.anchor_ts,
-        toStartOfMinute(now()) AS last_gap_ts
-    FROM analytics.{TARGET_TABLE} t
-    INNER JOIN max_ts m
-        ON t.strategy_table_name = m.strategy_table_name AND t.ts = m.anchor_ts
-    WHERE t.underlying = '{underlying}'
-    GROUP BY t.strategy_table_name, t.underlying, m.anchor_ts
-    HAVING m.anchor_ts < toStartOfMinute(now())
-),
-expanded AS (
-    SELECT *,
-        anchor_ts + toIntervalMinute(n + 1) AS ts_1min
-    FROM anchor
-    ARRAY JOIN range(0, least(toUInt32(dateDiff('minute', anchor_ts, last_gap_ts)), 1440)) AS n
-)
-SELECT
-    e.strategy_table_name, e.strategy_id, e.strategy_name,
-    e.underlying, e.config_timeframe, e.source,
-    'v2' AS version,
-    e.ts_1min AS ts,
-    e.anchor_pnl + e.position * (coalesce(p.close, e.anchor_price) - e.anchor_price)
-        / nullIf(e.anchor_price, 0) AS cumulative_pnl,
-    e.benchmark, e.position, coalesce(p.close, e.anchor_price) AS price,
-    e.final_signal, e.weighting, now() AS updated_at
-FROM expanded e
-LEFT JOIN (
-    SELECT instrument, ts, close FROM analytics.futures_price_1min
-    WHERE exchange = 'binance' AND instrument = {instrument}
-) p ON p.instrument = {instrument} AND e.ts_1min = p.ts
-SETTINGS join_use_nulls = 1
-"""
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Core refresh logic
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -235,21 +172,10 @@ def pnl_prod_v2_refresh_asset(
     if failed:
         raise RuntimeError(f"Failed underlyings: {failed}")
 
-    # Tail fill
-    context.log.info("Starting tail fill...")
-    tail_filled: List[str] = []
-    for underlying in underlyings:
-        try:
-            execute(_tail_fill_sql(underlying))
-            tail_filled.append(underlying)
-        except Exception as exc:
-            context.log.warning(f"[{underlying}] Tail fill failed: {exc}")
-
     return MaterializeResult(
         metadata={
             "underlyings_refreshed": MetadataValue.int(len(refreshed)),
             "underlyings_skipped": MetadataValue.int(len(skipped)),
-            "underlyings_tail_filled": MetadataValue.int(len(tail_filled)),
             "refreshed": MetadataValue.text(", ".join(refreshed) or "none"),
             "elapsed_seconds": MetadataValue.float(round(total_elapsed, 1)),
         }

@@ -99,15 +99,14 @@ class TestComputeProdPnl:
                 "bar_benchmark": 110.0,
             }
         ]
-        anchors = {"test_strategy": (0.05, 105.0)}  # 5% PnL at price 105
+        anchors = {"test_strategy": (0.05, 105.0, 1.0)}  # 5% PnL at price 105, pos 1.0
         prices = {}
 
         rows = compute_prod_pnl(bars, anchors, prices, source_label="production")
 
         assert len(rows) == 5
-        # First row: cpnl = 0.05 + 1.0 * (110.0 - 105.0) / 105.0
-        expected_cpnl = 0.05 + 1.0 * (110.0 - 105.0) / 105.0
-        assert abs(rows[0][8] - expected_cpnl) < 1e-10
+        # First row uses anchor_price 105.0 as fallback, so PnL stays 0.05
+        assert abs(rows[0][8] - 0.05) < 1e-10
 
 
 class TestComputeRealTradePnl:

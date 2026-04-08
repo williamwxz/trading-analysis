@@ -349,7 +349,7 @@ resource "aws_ecs_task_definition" "grafana" {
   container_definitions = jsonencode([
     {
       name      = "grafana"
-      image     = "grafana/grafana-oss:11.0.0"
+      image     = "${aws_ecr_repository.grafana.repository_url}:latest"
       essential = true
 
       portMappings = [
@@ -367,13 +367,12 @@ resource "aws_ecs_task_definition" "grafana" {
         { name = "GF_SERVER_SERVE_FROM_SUB_PATH", value = "true" },
         { name = "GF_AUTH_ANONYMOUS_ENABLED",  value = "true" },
         { name = "GF_AUTH_ANONYMOUS_ORG_ROLE", value = "Admin" },
+        { name = "CLICKHOUSE_USER",            value = "dev_ro3" },
       ]
 
-      mountPoints = [
-        {
-          sourceVolume  = "grafana-dashboards"
-          containerPath = "/etc/grafana/provisioning/dashboards"
-        }
+      secrets = [
+        { name = "CLICKHOUSE_HOST",     valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
+        { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
       ]
 
       logConfiguration = {
@@ -386,10 +385,6 @@ resource "aws_ecs_task_definition" "grafana" {
       }
     }
   ])
-
-  volume {
-    name = "grafana-dashboards"
-  }
 
   tags = local.common_tags
 }
@@ -549,6 +544,19 @@ resource "aws_security_group" "ecs_tasks" {
 
 resource "aws_ecr_repository" "dagster" {
   name                 = "${local.name_prefix}-dagster"
+  image_tag_mutability = "MUTABLE"
+  force_delete         = true
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  tags = local.common_tags
+}
+
+
+resource "aws_ecr_repository" "grafana" {
+  name                 = "${local.name_prefix}-grafana"
   image_tag_mutability = "MUTABLE"
   force_delete         = true
 

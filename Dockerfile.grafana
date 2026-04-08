@@ -1,0 +1,12 @@
+FROM grafana/grafana-oss:11.0.0
+
+# Copy provisioning configurations
+COPY infra/grafana/provisioning/ /etc/grafana/provisioning/
+
+# Copy dashboards
+COPY infra/grafana/dashboards/ /var/lib/grafana/dashboards/
+
+# Ensure the dashboards are readable
+USER root
+RUN chown -R grafana:grafana /etc/grafana/provisioning /var/lib/grafana/dashboards
+USER grafana
