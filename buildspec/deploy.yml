@@ -31,7 +31,7 @@ phases:
         export CLICKHOUSE_PASSWORD=$(echo $CH_SECRET | python3 -c "import sys,json; print(json.load(sys.stdin)['password'])")
         
         # Save to file for persistence across phases
-        echo "export IMAGE_URI=$IMAGE_URI" >> deploy_env.sh
+        echo "export IMAGE_URI=$IMAGE_URI" > deploy_env.sh
         echo "export GRAFANA_IMAGE_URI=$GRAFANA_IMAGE_URI" >> deploy_env.sh
         echo "export SCHEMA_CHANGED=$SCHEMA_CHANGED" >> deploy_env.sh
         echo "export CLICKHOUSE_HOST=$CLICKHOUSE_HOST" >> deploy_env.sh
