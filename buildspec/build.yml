@@ -15,6 +15,8 @@ phases:
     commands:
       - 'echo "Logging in to ECR in $DEPLOY_REGION..."'
       - 'aws ecr get-login-password --region $DEPLOY_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$DEPLOY_REGION.amazonaws.com'
+      - 'docker pull public.ecr.aws/docker/library/python:3.11-slim'
+      - 'docker pull public.ecr.aws/grafana/grafana:11.0.0'
       - |
         # Set Defaults and Export variables so they persist in the shell environment
         export IMAGE_NAME=${IMAGE_NAME:-trading-analysis-dagster}
@@ -29,6 +31,9 @@ phases:
         
         export GRAFANA_IMAGE_URI=$AWS_ACCOUNT_ID.dkr.ecr.$DEPLOY_REGION.amazonaws.com/$GRAFANA_IMAGE_NAME:$TAG
         export GRAFANA_IMAGE_LATEST=$AWS_ACCOUNT_ID.dkr.ecr.$DEPLOY_REGION.amazonaws.com/$GRAFANA_IMAGE_NAME:latest
+        
+        echo "Dagster URI: $IMAGE_URI"
+        echo "Grafana URI: $GRAFANA_IMAGE_URI"
         
         # Write to a file to be safe if shells are not shared
         echo "export IMAGE_URI=$IMAGE_URI" > build_env.sh
