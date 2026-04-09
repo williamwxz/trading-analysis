@@ -1,12 +1,16 @@
-FROM public.ecr.aws/grafana/grafana:11.0.0
+FROM public.ecr.aws/bitnami/grafana:11
+
+# Bitnami paths are different
+# Config: /opt/bitnami/grafana/conf/provisioning/
+# Dashboards: /opt/bitnami/grafana/dashboards/
 
 # Copy provisioning configurations
-COPY infra/grafana/provisioning/ /etc/grafana/provisioning/
+COPY infra/grafana/provisioning/ /opt/bitnami/grafana/conf/provisioning/
 
 # Copy dashboards
-COPY infra/grafana/dashboards/ /var/lib/grafana/dashboards/
+COPY infra/grafana/dashboards/ /opt/bitnami/grafana/dashboards/
 
-# Ensure the dashboards are readable
+# Ensure permissions
 USER root
-RUN chown -R grafana:grafana /etc/grafana/provisioning /var/lib/grafana/dashboards
-USER grafana
+RUN chown -R 1001:1001 /opt/bitnami/grafana/conf/provisioning /opt/bitnami/grafana/dashboards
+USER 1001
