@@ -1,4 +1,4 @@
-FROM public.ecr.aws/grafana/grafana:11.0.0
+FROM public.ecr.aws/docker/library/grafana:11.0.0
 
 # Copy provisioning configurations
 COPY infra/grafana/provisioning/ /etc/grafana/provisioning/
