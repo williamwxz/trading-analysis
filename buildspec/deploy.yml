@@ -17,24 +17,36 @@ phases:
 
   pre_build:
     commands:
-      - IMAGE_URI=$(cat $CODEBUILD_SRC_DIR_built/image_uri.txt)
-      - GRAFANA_IMAGE_URI=$(cat $CODEBUILD_SRC_DIR_built/grafana_image_uri.txt)
-      - echo "Deploying Dagster image $IMAGE_URI"
-      - echo "Deploying Grafana image $GRAFANA_IMAGE_URI"
-      - SCHEMA_CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -c "schemas/clickhouse_cloud.sql" || true)
-      - echo "Schema changed $SCHEMA_CHANGED"
-      - CH_SECRET=$(aws secretsmanager get-secret-value --secret-id trading-analysis/clickhouse --region $DEPLOY_REGION --query SecretString --output text)
-      - export CLICKHOUSE_HOST=$(echo $CH_SECRET | python3 -c "import sys,json; print(json.load(sys.stdin)['host'])")
-      - export CLICKHOUSE_PASSWORD=$(echo $CH_SECRET | python3 -c "import sys,json; print(json.load(sys.stdin)['password'])")
+      - |
+        export IMAGE_URI=$(cat $CODEBUILD_SRC_DIR_built/image_uri.txt)
+        export GRAFANA_IMAGE_URI=$(cat $CODEBUILD_SRC_DIR_built/grafana_image_uri.txt)
+        echo "Deploying Dagster image $IMAGE_URI"
+        echo "Deploying Grafana image $GRAFANA_IMAGE_URI"
+        
+        export SCHEMA_CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -c "schemas/clickhouse_cloud.sql" || true)
+        echo "Schema changed $SCHEMA_CHANGED"
+        
+        export CH_SECRET=$(aws secretsmanager get-secret-value --secret-id trading-analysis/clickhouse --region $DEPLOY_REGION --query SecretString --output text)
+        export CLICKHOUSE_HOST=$(echo $CH_SECRET | python3 -c "import sys,json; print(json.load(sys.stdin)['host'])")
+        export CLICKHOUSE_PASSWORD=$(echo $CH_SECRET | python3 -c "import sys,json; print(json.load(sys.stdin)['password'])")
+        
+        # Save to file for persistence across phases
+        echo "export IMAGE_URI=$IMAGE_URI" >> deploy_env.sh
+        echo "export GRAFANA_IMAGE_URI=$GRAFANA_IMAGE_URI" >> deploy_env.sh
+        echo "export SCHEMA_CHANGED=$SCHEMA_CHANGED" >> deploy_env.sh
+        echo "export CLICKHOUSE_HOST=$CLICKHOUSE_HOST" >> deploy_env.sh
+        echo "export CLICKHOUSE_PASSWORD=$CLICKHOUSE_PASSWORD" >> deploy_env.sh
 
   build:
     commands:
+      - . ./deploy_env.sh
       - echo "=== Terraform Apply ==="
       - cd infra/terraform
       - terraform init -input=false
       - terraform apply -auto-approve -input=false -var="aws_region=$DEPLOY_REGION" -var="environment=default" -var="github_repo=${GITHUB_REPO:-williamwxz/trading-analysis}"
       - cd ../..
       - |
+        . ./deploy_env.sh
         if [ "$SCHEMA_CHANGED" -gt "0" ]; then
           echo "=== Applying ClickHouse schema ==="
           clickhouse-client --host "$CLICKHOUSE_HOST" --port 9440 --secure --user default --password "$CLICKHOUSE_PASSWORD" --multiquery < schemas/clickhouse_cloud.sql
@@ -45,16 +57,18 @@ phases:
       
       - echo "=== Updating Dagster service ==="
       - |
+        . ./deploy_env.sh
         TASK_DEF=$(aws ecs describe-task-definition --task-definition trading-analysis-dagster --region $DEPLOY_REGION --query taskDefinition --output json)
-        NEW_TASK=$(echo "$TASK_DEF" | python3 -c "import sys, json, os; td = json.load(sys.stdin); img = '$IMAGE_URI'; [c.__setitem__('image', img) for c in td['containerDefinitions'] if c['name'] in ('dagster-webserver', 'dagster-daemon')]; [td.pop(k, None) for k in ('taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy')]; print(json.dumps(td))")
+        NEW_TASK=$(echo "$TASK_DEF" | python3 -c "import sys, json, os; td = json.load(sys.stdin); img = os.environ['IMAGE_URI']; [c.__setitem__('image', img) for c in td['containerDefinitions'] if c['name'] in ('dagster-webserver', 'dagster-daemon')]; [td.pop(k, None) for k in ('taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy')]; print(json.dumps(td))")
         NEW_ARN=$(aws ecs register-task-definition --cli-input-json "$NEW_TASK" --region $DEPLOY_REGION --query taskDefinition.taskDefinitionArn --output text)
         echo "Registered Dagster: $NEW_ARN"
         aws ecs update-service --cluster $ECS_CLUSTER --service trading-analysis-dagster --task-definition "$NEW_ARN" --force-new-deployment --region $DEPLOY_REGION --output json > /dev/null
 
       - echo "=== Updating Grafana service ==="
       - |
+        . ./deploy_env.sh
         TASK_DEF_G=$(aws ecs describe-task-definition --task-definition trading-analysis-grafana --region $DEPLOY_REGION --query taskDefinition --output json)
-        NEW_TASK_G=$(echo "$TASK_DEF_G" | python3 -c "import sys, json, os; td = json.load(sys.stdin); img = '$GRAFANA_IMAGE_URI'; [c.__setitem__('image', img) for c in td['containerDefinitions'] if c['name'] == 'grafana']; [td.pop(k, None) for k in ('taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy')]; print(json.dumps(td))")
+        NEW_TASK_G=$(echo "$TASK_DEF_G" | python3 -c "import sys, json, os; td = json.load(sys.stdin); img = os.environ['GRAFANA_IMAGE_URI']; [c.__setitem__('image', img) for c in td['containerDefinitions'] if c['name'] == 'grafana']; [td.pop(k, None) for k in ('taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy')]; print(json.dumps(td))")
         NEW_ARN_G=$(aws ecs register-task-definition --cli-input-json "$NEW_TASK_G" --region $DEPLOY_REGION --query taskDefinition.taskDefinitionArn --output text)
         echo "Registered Grafana: $NEW_ARN_G"
         aws ecs update-service --cluster $ECS_CLUSTER --service trading-analysis-grafana --task-definition "$NEW_ARN_G" --force-new-deployment --region $DEPLOY_REGION --output json > /dev/null
