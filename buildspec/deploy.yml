@@ -43,6 +43,15 @@ phases:
       - echo "=== Terraform Apply ==="
       - cd infra/terraform
       - terraform init -input=false
+      - |
+        # Self-healing: Import Grafana repo if it exists but is not in state
+        if ! terraform state show aws_ecr_repository.grafana >/dev/null 2>&1; then
+          echo "Checking if Grafana ECR repo exists..."
+          if aws ecr describe-repositories --repository-names trading-analysis-grafana --region $DEPLOY_REGION >/dev/null 2>&1; then
+            echo "Repo exists, importing into state..."
+            terraform import -input=false aws_ecr_repository.grafana trading-analysis-grafana || true
+          fi
+        fi
       - terraform apply -auto-approve -input=false -var="aws_region=$DEPLOY_REGION" -var="environment=default" -var="github_repo=${GITHUB_REPO:-williamwxz/trading-analysis}"
       - cd ../..
       - |
