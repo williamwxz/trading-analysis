@@ -365,6 +365,7 @@ resource "aws_iam_role_policy" "codebuild" {
           "codebuild:*",
           "codepipeline:*",
           "ecr:*",
+          "ecr-public:*",
           "ecs:*",
           "rds:*",
           "elasticloadbalancing:*",
