@@ -234,7 +234,7 @@ resource "aws_db_instance" "dagster" {
 }
 
 resource "aws_db_subnet_group" "main" {
-  name       = "${local.name_prefix}-db-subnets"
+  name       = "${local.name_prefix}-db-subnets-v2"
   subnet_ids = aws_subnet.private[*].id # Database lives in private subnets
   tags       = local.common_tags
 }
@@ -423,6 +423,8 @@ resource "aws_ecs_service" "dagster" {
   lifecycle {
     create_before_destroy = true
   }
+
+  depends_on = [aws_lb_listener.http]
 }
 
 
@@ -512,6 +514,8 @@ resource "aws_ecs_service" "grafana" {
   lifecycle {
     create_before_destroy = true
   }
+
+  depends_on = [aws_lb_listener.http]
 }
 
 
@@ -520,7 +524,7 @@ resource "aws_ecs_service" "grafana" {
 # ─────────────────────────────────────────────────────────────────────────────
 
 resource "aws_lb" "main" {
-  name               = local.name_prefix
+  name               = "${local.name_prefix}-v2"
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
