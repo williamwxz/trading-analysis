@@ -100,13 +100,7 @@ def _refresh_underlying(underlying: str, since: str, context) -> int:
     name="pnl_real_trade_v2_refresh",
     group_name="strategy_pnl",
     deps=["binance_futures_ohlcv_minutely"],
-    automation_condition=(
-        AutomationCondition.any_deps_updated()
-        | (
-            AutomationCondition.on_cron("*/5 * * * *")
-            & ~AutomationCondition.in_progress()
-        )
-    ),
+    automation_condition=AutomationCondition.any_deps_updated(),
     description=(
         "Incrementally refreshes analytics.strategy_pnl_1min_real_trade_v2 every 5 minutes. "
         "Uses Python-based anchor chaining with execution_ts filtering."
