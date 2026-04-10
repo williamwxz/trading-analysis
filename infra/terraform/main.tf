@@ -212,7 +212,7 @@ resource "random_password" "db_password" {
 }
 
 resource "aws_db_instance" "dagster" {
-  identifier           = "${local.name_prefix}-db"
+  identifier           = "${local.name_prefix}-db-v2"
   allocated_storage    = 20
   engine               = "postgres"
   engine_version       = "16.6"
