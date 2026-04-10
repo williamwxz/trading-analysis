@@ -1,8 +1,7 @@
 # ============================================================================
-# trading-analysis Infrastructure — ECS Fargate + S3 + MSK
+# trading-analysis Infrastructure — VPC + NAT + ECS + RDS + Kinesis
 # ============================================================================
-# Simplified: only one environment, everything in ap-northeast-1.
-# ClickHouse Cloud is external.
+# Consolidated in ap-northeast-1 (Tokyo).
 # ============================================================================
 
 terraform {
@@ -13,16 +12,19 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.0"
+    }
   }
 
   backend "s3" {
     bucket = "trading-analysis-tfstate"
     key    = "infra/terraform.tfstate"
-    region = "ap-northeast-1"  # Tokyo
+    region = "ap-northeast-1"
   }
 }
 
-# Primary provider — Tokyo (all resources)
 provider "aws" {
   region = var.aws_region
 }
@@ -55,18 +57,86 @@ locals {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# VPC
+# VPC & Networking (Replacing Default VPC with NAT setup)
 # ─────────────────────────────────────────────────────────────────────────────
 
-data "aws_vpc" "default" {
-  default = true
+resource "aws_vpc" "main" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+  tags                 = merge(local.common_tags, { Name = local.name_prefix })
 }
 
-data "aws_subnets" "default" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
+data "aws_availability_zones" "available" {}
+
+# Public Subnets (for ALB and NAT GW)
+resource "aws_subnet" "public" {
+  count                   = 2
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = "10.0.${count.index + 1}.0/24"
+  availability_zone       = data.aws_availability_zones.available.names[count.index]
+  map_public_ip_on_launch = true
+  tags                    = merge(local.common_tags, { Name = "${local.name_prefix}-public-${count.index}" })
+}
+
+# Private Subnets (for ECS and RDS)
+resource "aws_subnet" "private" {
+  count             = 2
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.${count.index + 10}.0/24"
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+  tags              = merge(local.common_tags, { Name = "${local.name_prefix}-private-${count.index}" })
+}
+
+# Internet Gateway
+resource "aws_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id
+  tags   = local.common_tags
+}
+
+# NAT Gateway & Elastic IP
+resource "aws_eip" "nat" {
+  domain = "vpc"
+  tags   = local.common_tags
+}
+
+resource "aws_nat_gateway" "main" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public[0].id # Place NAT in the first public subnet
+  tags          = merge(local.common_tags, { Name = "${local.name_prefix}-nat" })
+  depends_on    = [aws_internet_gateway.main]
+}
+
+# Routing for Public Subnets (to IGW)
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.main.id
   }
+  tags = merge(local.common_tags, { Name = "${local.name_prefix}-rt-public" })
+}
+
+resource "aws_route_table_association" "public" {
+  count          = 2
+  subnet_id      = aws_subnet.public[count.index].id
+  route_table_id = aws_route_table.public.id
+}
+
+# Routing for Private Subnets (to NAT Gateway)
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.main.id
+  }
+  tags = merge(local.common_tags, { Name = "${local.name_prefix}-rt-private" })
+}
+
+resource "aws_route_table_association" "private" {
+  count          = 2
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private.id
 }
 
 
@@ -106,7 +176,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "data" {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Amazon Kinesis Data Stream (Cost-effective alternative to MSK)
+# Amazon Kinesis Data Stream
 # ─────────────────────────────────────────────────────────────────────────────
 
 resource "aws_kinesis_stream" "main" {
@@ -124,33 +194,6 @@ resource "aws_kinesis_stream" "main" {
   }
 
   tags = local.common_tags
-}
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ECS Cluster
-# ─────────────────────────────────────────────────────────────────────────────
-
-resource "aws_ecs_cluster" "main" {
-  name = local.name_prefix
-
-  setting {
-    name  = "containerInsights"
-    value = "enabled"
-  }
-
-  tags = local.common_tags
-}
-
-resource "aws_ecs_cluster_capacity_providers" "main" {
-  cluster_name = aws_ecs_cluster.main.name
-
-  capacity_providers = ["FARGATE", "FARGATE_SPOT"]
-
-  default_capacity_provider_strategy {
-    capacity_provider = "FARGATE_SPOT"
-    weight            = 1
-  }
 }
 
 
@@ -182,23 +225,15 @@ resource "aws_db_instance" "dagster" {
   tags = local.common_tags
 }
 
-# Automatically sync the generated password to Secrets Manager
-resource "aws_secretsmanager_secret_version" "dagster_pg" {
-  secret_id = aws_secretsmanager_secret.dagster_pg.id
-  secret_string = jsonencode({
-    password = random_password.db_password.result
-  })
-}
-
 resource "aws_db_subnet_group" "main" {
   name       = "${local.name_prefix}-db-subnets"
-  subnet_ids = data.aws_subnets.default.ids
+  subnet_ids = aws_subnet.private[*].id # Database lives in private subnets
   tags       = local.common_tags
 }
 
 resource "aws_security_group" "db" {
   name_prefix = "${local.name_prefix}-db-"
-  vpc_id      = data.aws_vpc.default.id
+  vpc_id      = aws_vpc.main.id
 
   ingress {
     from_port       = 5432
@@ -215,6 +250,40 @@ resource "aws_security_group" "db" {
   }
 
   tags = local.common_tags
+}
+
+resource "aws_secretsmanager_secret_version" "dagster_pg" {
+  secret_id = aws_secretsmanager_secret.dagster_pg.id
+  secret_string = jsonencode({
+    password = random_password.db_password.result
+  })
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ECS Cluster (Fargate)
+# ─────────────────────────────────────────────────────────────────────────────
+
+resource "aws_ecs_cluster" "main" {
+  name = local.name_prefix
+
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_ecs_cluster_capacity_providers" "main" {
+  cluster_name = aws_ecs_cluster.main.name
+
+  capacity_providers = ["FARGATE", "FARGATE_SPOT"]
+
+  default_capacity_provider_strategy {
+    capacity_provider = "FARGATE_SPOT"
+    weight            = 1
+  }
 }
 
 
@@ -324,9 +393,9 @@ resource "aws_ecs_service" "dagster" {
   }
 
   network_configuration {
-    subnets          = data.aws_subnets.default.ids
+    subnets          = aws_subnet.private[*].id # Tasks move to private subnets
     security_groups  = [aws_security_group.ecs_tasks.id]
-    assign_public_ip = true
+    assign_public_ip = false # No longer need public IPs
   }
 
   tags = local.common_tags
@@ -405,9 +474,9 @@ resource "aws_ecs_service" "grafana" {
   }
 
   network_configuration {
-    subnets          = data.aws_subnets.default.ids
+    subnets          = aws_subnet.private[*].id # Tasks move to private subnets
     security_groups  = [aws_security_group.ecs_tasks.id]
-    assign_public_ip = true
+    assign_public_ip = false # No longer need public IPs
   }
 
   tags = local.common_tags
@@ -423,7 +492,7 @@ resource "aws_lb" "main" {
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
-  subnets            = data.aws_subnets.default.ids
+  subnets            = aws_subnet.public[*].id # ALB lives in public subnets
 
   tags = local.common_tags
 }
@@ -432,7 +501,7 @@ resource "aws_lb_target_group" "dagster" {
   name        = "${local.name_prefix}-dagster"
   port        = 3000
   protocol    = "HTTP"
-  vpc_id      = data.aws_vpc.default.id
+  vpc_id      = aws_vpc.main.id
   target_type = "ip"
 
   health_check {
@@ -448,7 +517,7 @@ resource "aws_lb_target_group" "grafana" {
   name        = "${local.name_prefix}-grafana"
   port        = 3000
   protocol    = "HTTP"
-  vpc_id      = data.aws_vpc.default.id
+  vpc_id      = aws_vpc.main.id
   target_type = "ip"
 
   health_check {
@@ -494,7 +563,7 @@ resource "aws_lb_listener_rule" "grafana" {
 
 resource "aws_security_group" "alb" {
   name_prefix = "${local.name_prefix}-alb-"
-  vpc_id      = data.aws_vpc.default.id
+  vpc_id      = aws_vpc.main.id
 
   # Public HTTP access
   ingress {
@@ -516,7 +585,7 @@ resource "aws_security_group" "alb" {
 
 resource "aws_security_group" "ecs_tasks" {
   name_prefix = "${local.name_prefix}-ecs-"
-  vpc_id      = data.aws_vpc.default.id
+  vpc_id      = aws_vpc.main.id
 
   # Allow port 3000 only from the ALB
   ingress {
@@ -553,7 +622,6 @@ resource "aws_ecr_repository" "dagster" {
 
   tags = local.common_tags
 }
-
 
 resource "aws_ecr_repository" "grafana" {
   name                 = "${local.name_prefix}-grafana"
@@ -727,4 +795,8 @@ output "kinesis_stream_name" {
 
 output "alb_dns_name" {
   value = "http://${aws_lb.main.dns_name}"
+}
+
+output "nat_static_ip" {
+  value = aws_eip.nat.public_ip
 }
