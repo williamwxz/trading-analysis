@@ -194,6 +194,10 @@ resource "aws_kinesis_stream" "main" {
   }
 
   tags = local.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 
@@ -223,6 +227,10 @@ resource "aws_db_instance" "dagster" {
   db_subnet_group_name   = aws_db_subnet_group.main.name
 
   tags = local.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_db_subnet_group" "main" {
@@ -250,6 +258,10 @@ resource "aws_security_group" "db" {
   }
 
   tags = local.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_secretsmanager_secret_version" "dagster_pg" {
@@ -273,6 +285,10 @@ resource "aws_ecs_cluster" "main" {
   }
 
   tags = local.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_ecs_cluster_capacity_providers" "main" {
@@ -375,6 +391,10 @@ resource "aws_ecs_task_definition" "dagster" {
   ])
 
   tags = local.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_ecs_service" "dagster" {
@@ -399,6 +419,10 @@ resource "aws_ecs_service" "dagster" {
   }
 
   tags = local.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 
@@ -456,6 +480,10 @@ resource "aws_ecs_task_definition" "grafana" {
   ])
 
   tags = local.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_ecs_service" "grafana" {
@@ -480,6 +508,10 @@ resource "aws_ecs_service" "grafana" {
   }
 
   tags = local.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 
@@ -495,10 +527,14 @@ resource "aws_lb" "main" {
   subnets            = aws_subnet.public[*].id # ALB lives in public subnets
 
   tags = local.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_lb_target_group" "dagster" {
-  name        = "${local.name_prefix}-dagster"
+  name        = "${local.name_prefix}-dagster-v2"
   port        = 3000
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
@@ -510,11 +546,19 @@ resource "aws_lb_target_group" "dagster" {
     unhealthy_threshold = 10
   }
 
+  lifecycle {
+    create_before_destroy = true
+  }
+
   tags = local.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_lb_target_group" "grafana" {
-  name        = "${local.name_prefix}-grafana"
+  name        = "${local.name_prefix}-grafana-v2"
   port        = 3000
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
@@ -526,7 +570,15 @@ resource "aws_lb_target_group" "grafana" {
     unhealthy_threshold = 10
   }
 
+  lifecycle {
+    create_before_destroy = true
+  }
+
   tags = local.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_lb_listener" "http" {
@@ -581,6 +633,10 @@ resource "aws_security_group" "alb" {
   }
 
   tags = local.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_security_group" "ecs_tasks" {
@@ -604,6 +660,10 @@ resource "aws_security_group" "ecs_tasks" {
   }
 
   tags = local.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 
@@ -621,6 +681,10 @@ resource "aws_ecr_repository" "dagster" {
   }
 
   tags = local.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_ecr_repository" "grafana" {
@@ -633,6 +697,10 @@ resource "aws_ecr_repository" "grafana" {
   }
 
   tags = local.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 
@@ -660,11 +728,19 @@ resource "aws_cloudwatch_log_group" "grafana" {
 resource "aws_secretsmanager_secret" "clickhouse" {
   name = "${local.name_prefix}/clickhouse"
   tags = local.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_secretsmanager_secret" "dagster_pg" {
   name = "${local.name_prefix}/dagster-pg"
   tags = local.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 
@@ -689,6 +765,10 @@ resource "aws_iam_role" "ecs_execution" {
   })
 
   tags = local.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_iam_role_policy_attachment" "ecs_execution" {
@@ -734,6 +814,10 @@ resource "aws_iam_role" "ecs_task" {
   })
 
   tags = local.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_iam_role_policy" "ecs_task_policy" {
