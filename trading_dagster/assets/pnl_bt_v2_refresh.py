@@ -92,9 +92,9 @@ def _refresh_underlying(underlying: str, since: str, context) -> int:
 @asset(
     name="pnl_bt_v2_refresh",
     group_name="strategy_pnl",
-    deps=["binance_futures_ohlcv_1min"],
+    deps=["binance_futures_ohlcv_minutely"],
     automation_condition=(
-        AutomationCondition.any_downstream_conditions_met()
+        AutomationCondition.any_deps_updated()
         | (
             AutomationCondition.on_cron("*/5 * * * *")
             & ~AutomationCondition.in_progress()

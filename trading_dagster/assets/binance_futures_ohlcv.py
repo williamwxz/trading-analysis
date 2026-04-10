@@ -15,6 +15,7 @@ from dagster import (
     AssetExecutionContext,
     MaterializeResult,
     MetadataValue,
+    AutomationCondition,
     asset,
 )
 
@@ -60,7 +61,7 @@ def _df_to_rows(instrument: str, df: pd.DataFrame) -> List[list]:
 
 
 @asset(
-    name="binance_futures_ohlcv_1min",
+    name="binance_futures_ohlcv_minutely",
     group_name="market_data",
     partitions_def=DailyPartitionsDefinition(start_date=START_DATE),
     automation_condition=AutomationCondition.on_cron("*/5 * * * *") & ~AutomationCondition.in_progress(),
