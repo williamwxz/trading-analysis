@@ -176,32 +176,6 @@ resource "aws_s3_bucket_lifecycle_configuration" "data" {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Amazon Kinesis Data Stream
-# ─────────────────────────────────────────────────────────────────────────────
-
-resource "aws_kinesis_stream" "main" {
-  name             = "${local.name_prefix}-stream"
-  shard_count      = 1
-  retention_period = 24
-
-  shard_level_metrics = [
-    "IncomingBytes",
-    "OutgoingBytes",
-  ]
-
-  stream_mode_details {
-    stream_mode = "PROVISIONED"
-  }
-
-  tags = local.common_tags
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # RDS — Postgres for Dagster Metadata
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -835,18 +809,6 @@ resource "aws_iam_role_policy" "ecs_task_policy" {
           aws_s3_bucket.data.arn,
           "${aws_s3_bucket.data.arn}/*",
         ]
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "kinesis:PutRecord",
-          "kinesis:PutRecords",
-          "kinesis:GetRecords",
-          "kinesis:GetShardIterator",
-          "kinesis:DescribeStream",
-          "kinesis:ListStreams"
-        ]
-        Resource = [aws_kinesis_stream.main.arn]
       }
     ]
   })
@@ -867,10 +829,6 @@ output "ecr_repository_url" {
 
 output "s3_bucket" {
   value = aws_s3_bucket.data.id
-}
-
-output "kinesis_stream_name" {
-  value = aws_kinesis_stream.main.name
 }
 
 output "alb_dns_name" {

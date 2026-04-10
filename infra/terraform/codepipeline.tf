@@ -376,7 +376,6 @@ resource "aws_iam_role_policy" "codebuild" {
           "elasticloadbalancing:*",
           "secretsmanager:*",
           "iam:*",
-          "kinesis:*",
           "ec2:*"
 ,
           "codestar-connections:UseConnection"
