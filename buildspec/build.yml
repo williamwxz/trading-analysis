@@ -42,11 +42,15 @@ phases:
   build:
     commands:
       - . ./build_env.sh
+      - 'echo "Pulling latest images for cache..."'
+      - 'docker pull $IMAGE_LATEST || true'
+      - 'docker pull $GRAFANA_IMAGE_LATEST || true'
+      
       - 'echo "Building Dagster image..."'
       - 'docker build --cache-from $IMAGE_LATEST --build-arg BUILDKIT_INLINE_CACHE=1 -t $IMAGE_URI -t $IMAGE_LATEST .'
       
       - 'echo "Building Grafana image..."'
-      - 'docker build -f Dockerfile.grafana -t $GRAFANA_IMAGE_URI -t $GRAFANA_IMAGE_LATEST .'
+      - 'docker build --cache-from $GRAFANA_IMAGE_LATEST --build-arg BUILDKIT_INLINE_CACHE=1 -f Dockerfile.grafana -t $GRAFANA_IMAGE_URI -t $GRAFANA_IMAGE_LATEST .'
 
   post_build:
     commands:
