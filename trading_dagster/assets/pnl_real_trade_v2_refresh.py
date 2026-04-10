@@ -99,8 +99,13 @@ def _refresh_underlying(underlying: str, since: str, context) -> int:
 @asset(
     name="pnl_real_trade_v2_refresh",
     group_name="strategy_pnl",
+    deps=["binance_futures_ohlcv_1min"],
     automation_condition=(
-        AutomationCondition.on_cron("*/5 * * * *") & ~AutomationCondition.in_progress()
+        AutomationCondition.any_downstream_conditions_met()
+        | (
+            AutomationCondition.on_cron("*/5 * * * *")
+            & ~AutomationCondition.in_progress()
+        )
     ),
     description=(
         "Incrementally refreshes analytics.strategy_pnl_1min_real_trade_v2 every 5 minutes. "

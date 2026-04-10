@@ -92,9 +92,15 @@ def _refresh_underlying(underlying: str, since: str, context) -> int:
 @asset(
     name="pnl_bt_v2_refresh",
     group_name="strategy_pnl",
+    deps=["binance_futures_ohlcv_1min"],
     automation_condition=(
-        AutomationCondition.on_cron("*/10 * * * *") & ~AutomationCondition.in_progress()
+        AutomationCondition.any_downstream_conditions_met()
+        | (
+            AutomationCondition.on_cron("*/5 * * * *")
+            & ~AutomationCondition.in_progress()
+        )
     ),
+
     description=(
         "Incrementally refreshes analytics.strategy_pnl_1min_bt_v2 every 10 minutes. "
         "Uses Python-based anchor chaining for correct bar-to-bar PnL continuity."

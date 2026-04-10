@@ -63,6 +63,7 @@ def _df_to_rows(instrument: str, df: pd.DataFrame) -> List[list]:
     name="binance_futures_ohlcv_1min",
     group_name="market_data",
     partitions_def=DailyPartitionsDefinition(start_date=START_DATE),
+    automation_condition=AutomationCondition.on_cron("*/5 * * * *") & ~AutomationCondition.in_progress(),
     description=(
         "Fetches daily partitions of 1-min OHLCV klines from Binance Futures. "
         "Each partition covers 24 hours of data."
