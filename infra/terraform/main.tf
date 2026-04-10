@@ -546,10 +546,6 @@ resource "aws_lb_target_group" "dagster" {
     unhealthy_threshold = 10
   }
 
-  lifecycle {
-    create_before_destroy = true
-  }
-
   tags = local.common_tags
 
   lifecycle {
@@ -568,10 +564,6 @@ resource "aws_lb_target_group" "grafana" {
     path                = "/api/health"
     healthy_threshold   = 2
     unhealthy_threshold = 10
-  }
-
-  lifecycle {
-    create_before_destroy = true
   }
 
   tags = local.common_tags
