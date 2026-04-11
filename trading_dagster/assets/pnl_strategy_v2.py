@@ -95,7 +95,7 @@ def pnl_prod_v2_daily_asset(context: AssetExecutionContext) -> MaterializeResult
 )
 def pnl_bt_v2_live_asset(context: AssetExecutionContext) -> MaterializeResult:
     """Live backtest PnL refresh (incremental)."""
-    return _refresh_pnl_generic(context, "strategy_pnl_1min_bt_v2", "strategy_bt_output_history_v2", "backtest")
+    return _refresh_pnl_generic(context, "strategy_pnl_1min_bt_v2", "strategy_output_history_bt_v2", "backtest")
 
 @asset(
     name="pnl_bt_v2_daily",
@@ -106,7 +106,7 @@ def pnl_bt_v2_live_asset(context: AssetExecutionContext) -> MaterializeResult:
 )
 def pnl_bt_v2_daily_asset(context: AssetExecutionContext) -> MaterializeResult:
     """Daily partitioned backtest PnL backfill."""
-    return _refresh_pnl_partitioned(context, "strategy_pnl_1min_bt_v2", "strategy_bt_output_history_v2", "backtest")
+    return _refresh_pnl_partitioned(context, "strategy_pnl_1min_bt_v2", "strategy_output_history_bt_v2", "backtest")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. Real Trade PnL (Live + Daily)
