@@ -2,7 +2,7 @@ version: 0.2
 
 # -----------------------------------------------------------------------------
 # Stage: AppDeploy
-# 1. Apply ClickHouse schema — only if schemas/clickhouse_cloud.sql changed
+# 1. Apply ClickHouse schema — always synced
 # 2. Update ECS services with new image tags
 # -----------------------------------------------------------------------------
 
@@ -16,8 +16,11 @@ phases:
   pre_build:
     commands:
       - |
-        . ./deploy_env.sh
-        export SCHEMA_CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -c "schemas/clickhouse_cloud.sql" || true)
+        # Source variables from the 'built' artifact
+        . $CODEBUILD_SRC_DIR_built/deploy_env.sh
+        echo "Deploying Dagster image $IMAGE_URI"
+        echo "Deploying Grafana image $GRAFANA_IMAGE_URI"
+        
         export CH_SECRET=$(aws secretsmanager get-secret-value --secret-id trading-analysis/clickhouse --region $DEPLOY_REGION --query SecretString --output text)
         export CLICKHOUSE_HOST=$(echo $CH_SECRET | python3 -c "import sys,json; print(json.load(sys.stdin)['host'])")
         export CLICKHOUSE_PASSWORD=$(echo $CH_SECRET | python3 -c "import sys,json; print(json.load(sys.stdin)['password'])")
@@ -25,18 +28,14 @@ phases:
   build:
     commands:
       - |
-        . ./deploy_env.sh
-        if [ "$SCHEMA_CHANGED" -gt "0" ]; then
-          echo "=== Applying ClickHouse schema ==="
-          clickhouse-client --host "$CLICKHOUSE_HOST" --port 9440 --secure --user default --password "$CLICKHOUSE_PASSWORD" --multiquery < schemas/clickhouse_cloud.sql
-          echo "Schema applied."
-        else
-          echo "=== Schema unchanged - skipping ==="
-        fi
+        . $CODEBUILD_SRC_DIR_built/deploy_env.sh
+        echo "=== Applying ClickHouse schema ==="
+        clickhouse-client --host "$CLICKHOUSE_HOST" --port 9440 --secure --user default --password "$CLICKHOUSE_PASSWORD" --multiquery < $CODEBUILD_SRC_DIR/schemas/clickhouse_cloud.sql
+        echo "Schema applied."
       
       - echo "=== Updating Dagster service ==="
       - |
-        . ./deploy_env.sh
+        . $CODEBUILD_SRC_DIR_built/deploy_env.sh
         TASK_DEF=$(aws ecs describe-task-definition --task-definition trading-analysis-dagster --region $DEPLOY_REGION --query taskDefinition --output json)
         NEW_TASK=$(echo "$TASK_DEF" | python3 -c "import sys, json, os; td = json.load(sys.stdin); img = os.environ['IMAGE_URI']; [c.__setitem__('image', img) for c in td['containerDefinitions'] if c['name'] in ('dagster-webserver', 'dagster-daemon')]; [td.pop(k, None) for k in ('taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy')]; print(json.dumps(td))")
         NEW_ARN=$(aws ecs register-task-definition --cli-input-json "$NEW_TASK" --region $DEPLOY_REGION --query taskDefinition.taskDefinitionArn --output text)
@@ -45,7 +44,7 @@ phases:
 
       - echo "=== Updating Grafana service ==="
       - |
-        . ./deploy_env.sh
+        . $CODEBUILD_SRC_DIR_built/deploy_env.sh
         TASK_DEF_G=$(aws ecs describe-task-definition --task-definition trading-analysis-grafana --region $DEPLOY_REGION --query taskDefinition --output json)
         NEW_TASK_G=$(echo "$TASK_DEF_G" | python3 -c "import sys, json, os; td = json.load(sys.stdin); img = os.environ['GRAFANA_IMAGE_URI']; [c.__setitem__('image', img) for c in td['containerDefinitions'] if c['name'] == 'grafana']; [td.pop(k, None) for k in ('taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy')]; print(json.dumps(td))")
         NEW_ARN_G=$(aws ecs register-task-definition --cli-input-json "$NEW_TASK_G" --region $DEPLOY_REGION --query taskDefinition.taskDefinitionArn --output text)

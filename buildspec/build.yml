@@ -33,15 +33,13 @@ phases:
         echo "Dagster URI: $IMAGE_URI"
         echo "Grafana URI: $GRAFANA_IMAGE_URI"
         
-        # Write to a file to be safe if shells are not shared
-        echo "export IMAGE_URI=$IMAGE_URI" > build_env.sh
-        echo "export IMAGE_LATEST=$IMAGE_LATEST" >> build_env.sh
-        echo "export GRAFANA_IMAGE_URI=$GRAFANA_IMAGE_URI" >> build_env.sh
-        echo "export GRAFANA_IMAGE_LATEST=$GRAFANA_IMAGE_LATEST" >> build_env.sh
+        # Write to a file to be shared with Deploy stage
+        echo "export IMAGE_URI=$IMAGE_URI" > deploy_env.sh
+        echo "export GRAFANA_IMAGE_URI=$GRAFANA_IMAGE_URI" >> deploy_env.sh
 
   build:
     commands:
-      - . ./build_env.sh
+      - . ./deploy_env.sh
       - 'echo "Pulling latest images for cache..."'
       - 'docker pull $IMAGE_LATEST || true'
       - 'docker pull $GRAFANA_IMAGE_LATEST || true'
@@ -54,7 +52,7 @@ phases:
 
   post_build:
     commands:
-      - . ./build_env.sh
+      - . ./deploy_env.sh
       - 'echo "Pushing images to ECR..."'
       - 'docker push $IMAGE_URI'
       - 'docker push $IMAGE_LATEST'
@@ -71,3 +69,4 @@ artifacts:
     - image_uri.txt
     - grafana_image_uri.txt
     - imageDetail.json
+    - deploy_env.sh
