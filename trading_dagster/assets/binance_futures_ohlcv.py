@@ -110,18 +110,25 @@ def binance_futures_ohlcv_minutely_asset(context: AssetExecutionContext) -> Mate
 
     for instrument in INSTRUMENTS:
         # Find latest timestamp in DB
+        # Cast to String to avoid any type issues with query_scalar
         max_ts = query_scalar(
             f"SELECT toString(max(ts)) FROM {TARGET_TABLE} WHERE instrument = '{instrument}'", client
         )
         
-        if not max_ts or max_ts == "1970-01-01 00:00:00" or max_ts == "None":
-            # Default to last 1 hour if DB is empty
-            start_dt = datetime.now(timezone.utc) - timedelta(hours=1)
+        # Check if max_ts is valid. CCXT 'date_since' will use this.
+        if not max_ts or str(max_ts) in ["1970-01-01 00:00:00", "None", "0000-00-00 00:00:00"]:
+            # Default to last 10 minutes if DB is empty or has placeholder
+            start_dt = datetime.now(timezone.utc) - timedelta(minutes=10)
+            context.log.info(f"[{instrument}] No valid data found in DB. Bootstrapping from 10 mins ago.")
         else:
             # Start 1 minute after the latest record
-            start_dt = datetime.strptime(max_ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc) + timedelta(minutes=1)
+            try:
+                start_dt = datetime.strptime(str(max_ts), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc) + timedelta(minutes=1)
+            except Exception as e:
+                context.log.warning(f"[{instrument}] Error parsing max_ts '{max_ts}': {e}. Falling back to 10 mins.")
+                start_dt = datetime.now(timezone.utc) - timedelta(minutes=10)
 
-        context.log.info(f"[{instrument}] Polling from {start_dt}")
+        context.log.info(f"[{instrument}] Live poll from {start_dt}")
 
         df = ExchangePriceDataService.fetch_ohlcv_times_series_df(
             symbol=_get_ccxt_symbol(instrument), exchange_name="binance_perp",

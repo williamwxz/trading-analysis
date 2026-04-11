@@ -25,6 +25,7 @@ from ..utils.clickhouse_client import (
     insert_rows,
     query_scalar,
     query_rows,
+    query_dicts,
 )
 from ..utils.pnl_compute import (
     fetch_anchors,
@@ -55,6 +56,19 @@ def _get_source_max_revision(source_table: str, underlying: str) -> Optional[str
     v = query_scalar(f"SELECT toString(max(revision_ts)) FROM analytics.{source_table} WHERE underlying = '{underlying}'")
     v = str(v).strip() if v else None
     return None if not v or v == "1970-01-01 00:00:00" else v
+
+def _prepare_rows_for_clickhouse(rows: List[list]) -> List[list]:
+    """Ensure timestamp strings are converted back to datetime objects for clickhouse-connect."""
+    processed = []
+    for r in rows:
+        new_row = list(r)
+        # In PROD_INSERT_COLUMNS, 'ts' is at index 7, 'updated_at' at index 14
+        if isinstance(new_row[7], str):
+            new_row[7] = datetime.strptime(new_row[7], "%Y-%m-%d %H:%M:%S")
+        if isinstance(new_row[14], str):
+            new_row[14] = datetime.strptime(new_row[14], "%Y-%m-%d %H:%M:%S")
+        processed.append(new_row)
+    return processed
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. Production PnL (Live + Daily)
@@ -169,7 +183,8 @@ def _refresh_pnl_generic(context, target_table: str, source_table: str, label: s
         prices = fetch_prices(underlying, ts_min, ts_max)
         
         rows = compute_prod_pnl(bars, anchors, prices, source_label=label)
-        total_rows += insert_rows(f"analytics.{target_table}", PROD_INSERT_COLUMNS, rows, client)
+        processed_rows = _prepare_rows_for_clickhouse(rows)
+        total_rows += insert_rows(f"analytics.{target_table}", PROD_INSERT_COLUMNS, processed_rows, client)
         
         # Write watermark
         execute(
@@ -221,10 +236,11 @@ def _refresh_pnl_partitioned(context, target_table: str, source_table: str, labe
         prices = fetch_prices(underlying, start_ts, end_ts)
         
         rows = compute_prod_pnl(rows_dict, anchors, prices, source_label=label)
-        total_rows += insert_rows(f"analytics.{target_table}", PROD_INSERT_COLUMNS, rows, client)
+        processed_rows = _prepare_rows_for_clickhouse(rows)
+        total_rows += insert_rows(f"analytics.{target_table}", PROD_INSERT_COLUMNS, processed_rows, client)
         
     return MaterializeResult(metadata={"partition": date_str, "rows_inserted": total_rows})
 
 def _refresh_pnl_real_trade(context, is_daily: bool) -> MaterializeResult:
-    # Real trade specific logic
+    # Real trade specific logic - would need similar datetime conversion
     return MaterializeResult(metadata={"status": "success"})
