@@ -1,13 +1,13 @@
 """
-Binance Futures OHLCV 1-min Partitioned Asset
+Binance Futures OHLCV Assets — Dual Strategy
 
-Fetches 1-minute klines from Binance Futures API, partitioned by day.
-Inserts into analytics.futures_price_1min in ClickHouse Cloud.
+1. binance_futures_backfill: Daily partitioned asset for historical data.
+2. binance_futures_ohlcv_minutely: Unpartitioned asset for live 5-min updates.
 """
 
 import time
 from datetime import datetime, timedelta, timezone
-from typing import List
+from typing import List, Optional
 import pandas as pd
 
 from dagster import (
@@ -22,130 +22,121 @@ from dagster import (
 from ..utils.clickhouse_client import get_client, insert_rows, query_scalar, execute_query
 from ..utils.exchange_price_service import ExchangePriceDataService
 
-# Start date for partitions - can be adjusted
+# Configuration
 START_DATE = "2024-01-01"
-
-# Instruments to poll
 INSTRUMENTS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
     "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
 ]
-
+TARGET_TABLE = "analytics.futures_price_1min"
 INSERT_COLUMNS = ["exchange", "instrument", "ts", "open", "high", "low", "close", "volume"]
 
 def _get_ccxt_symbol(instrument: str) -> str:
-    """Convert 'BTCUSDT' to 'BTC/USDT'."""
-    if "/" in instrument:
-        return instrument
-    if instrument.endswith("USDT"):
-        return f"{instrument[:-4]}/USDT"
-    return instrument
-
+    if "/" in instrument: return instrument
+    return f"{instrument[:-4]}/USDT" if instrument.endswith("USDT") else instrument
 
 def _df_to_rows(instrument: str, df: pd.DataFrame) -> List[list]:
-    """Convert ExchangePriceDataService DataFrame to ClickHouse rows."""
     rows = []
     for _, row in df.iterrows():
-        ts_str = row['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
         rows.append([
-            "binance",
-            instrument,
-            ts_str,
-            float(row['open']),
-            float(row['high']),
-            float(row['low']),
-            float(row['close']),
-            float(row['volume']),
+            "binance", instrument, row['timestamp'].strftime("%Y-%m-%d %H:%M:%S"),
+            float(row['open']), float(row['high']), float(row['low']), float(row['close']), float(row['volume']),
         ])
     return rows
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. Backfill Asset (Historical)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@asset(
+    name="binance_futures_backfill",
+    group_name="market_data",
+    partitions_def=DailyPartitionsDefinition(start_date=START_DATE),
+    description="Historical daily backfill asset. Trigger manually for specific dates.",
+    compute_kind="binance",
+)
+def binance_futures_backfill_asset(context: AssetExecutionContext) -> MaterializeResult:
+    partition_date_str = context.partition_key
+    start_dt = datetime.strptime(partition_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    end_dt = start_dt + timedelta(days=1)
+    
+    client = get_client()
+    total_inserted = 0
+
+    for instrument in INSTRUMENTS:
+        # Idempotency: clear existing data for this day/instrument
+        execute_query(
+            f"DELETE FROM {TARGET_TABLE} WHERE exchange='binance' AND instrument='{instrument}' "
+            f"AND ts >= '{start_dt.strftime('%Y-%m-%d %H:%M:%S')}' AND ts < '{end_dt.strftime('%Y-%m-%d %H:%M:%S')}'",
+            client
+        )
+
+        current_start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        while True:
+            df = ExchangePriceDataService.fetch_ohlcv_times_series_df(
+                symbol=_get_ccxt_symbol(instrument), exchange_name="binance_perp",
+                timeframe="1m", date_since=current_start_iso, limit=1000
+            )
+            if df is None or df.empty: break
+            
+            # Filter to partition window
+            df = df[(df['timestamp'] >= start_dt) & (df['timestamp'] < end_dt)]
+            if df.empty: break
+
+            insert_rows(TARGET_TABLE, INSERT_COLUMNS, _df_to_rows(instrument, df), client)
+            total_inserted += len(df)
+            
+            if len(df) < 1000 or df.iloc[-1]['timestamp'] >= (end_dt - timedelta(minutes=1)): break
+            current_start_iso = (df.iloc[-1]['timestamp'] + timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            time.sleep(0.1)
+
+    return MaterializeResult(metadata={"date": partition_date_str, "total_rows": total_inserted})
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. Live Asset (Real-time Polling)
+# ─────────────────────────────────────────────────────────────────────────────
 
 @asset(
     name="binance_futures_ohlcv_minutely",
     group_name="market_data",
-    partitions_def=DailyPartitionsDefinition(start_date=START_DATE),
     automation_condition=AutomationCondition.on_cron("*/5 * * * *") & ~AutomationCondition.in_progress(),
-    description=(
-        "Fetches daily partitions of 1-min OHLCV klines from Binance Futures. "
-        "Each partition covers 24 hours of data."
-    ),
+    description="Live 5-min polling asset. Fetches latest data since last max(ts).",
     compute_kind="binance",
 )
-def binance_futures_ohlcv_1min_asset(
-    context: AssetExecutionContext,
-) -> MaterializeResult:
-    # Get the date for this partition (e.g., '2024-04-05')
-    partition_date_str = context.partition_key
-    
-    # Calculate time window for the partition
-    start_dt = datetime.strptime(partition_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    end_dt = start_dt + timedelta(days=1)
-    
-    # CCXT requires ISO8601
-    start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-    
+def binance_futures_ohlcv_minutely_asset(context: AssetExecutionContext) -> MaterializeResult:
     client = get_client()
     total_inserted = 0
     instruments_updated = []
 
-    context.log.info(f"Processing partition {partition_date_str} ({start_dt} to {end_dt})")
-
     for instrument in INSTRUMENTS:
-        # 1. Clean up existing data for this partition to ensure idempotency
-        # Note: In a production setup with high volume, you might use 'ReplacingMergeTree' 
-        # but for simple 1-min bars, a DELETE is safe.
-        execute_query(
-            f"DELETE FROM analytics.futures_price_1min "
-            f"WHERE exchange = 'binance' AND instrument = '{instrument}' "
-            f"AND ts >= '{start_dt.strftime('%Y-%m-%d %H:%M:%S')}' "
-            f"AND ts < '{end_dt.strftime('%Y-%m-%d %H:%M:%S')}'",
-            client
+        # Find latest timestamp in DB
+        max_ts = query_scalar(
+            f"SELECT toString(max(ts)) FROM {TARGET_TABLE} WHERE instrument = '{instrument}'", client
+        )
+        
+        if not max_ts or max_ts == "1970-01-01 00:00:00" or max_ts == "None":
+            # Default to last 1 hour if DB is empty
+            start_dt = datetime.now(timezone.utc) - timedelta(hours=1)
+        else:
+            # Start 1 minute after the latest record
+            start_dt = datetime.strptime(max_ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc) + timedelta(minutes=1)
+
+        context.log.info(f"[{instrument}] Polling from {start_dt}")
+
+        df = ExchangePriceDataService.fetch_ohlcv_times_series_df(
+            symbol=_get_ccxt_symbol(instrument), exchange_name="binance_perp",
+            timeframe="1m", date_since=start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"), limit=1000
         )
 
-        # 2. Fetch data in batches (Daily 1-min data = 1440 rows, Binance limit = 1000)
-        current_start_iso = start_iso
-        instrument_inserted = 0
-        
-        while True:
-            df = ExchangePriceDataService.fetch_ohlcv_times_series_df(
-                symbol=_get_ccxt_symbol(instrument),
-                exchange_name="binance_perp",
-                timeframe="1m",
-                date_since=current_start_iso,
-                limit=1000
-            )
-
-            if df is None or df.empty:
-                break
-
-            # Filter only rows within our partition window
-            df = df[(df['timestamp'] >= start_dt) & (df['timestamp'] < end_dt)]
-            
-            if df.empty:
-                break
-
+        if df is not None and not df.empty:
             rows = _df_to_rows(instrument, df)
-            insert_rows("analytics.futures_price_1min", INSERT_COLUMNS, rows, client)
-            
-            instrument_inserted += len(rows)
+            insert_rows(TARGET_TABLE, INSERT_COLUMNS, rows, client)
             total_inserted += len(rows)
-            
-            # If we fetched fewer than 1000, or we reached the end of the day, stop
-            if len(df) < 1000 or df.iloc[-1]['timestamp'] >= (end_dt - timedelta(minutes=1)):
-                break
-            
-            # Move window forward for the next batch
-            next_ts = df.iloc[-1]['timestamp'] + timedelta(minutes=1)
-            current_start_iso = next_ts.strftime("%Y-%m-%dT%H:%M:%SZ")
-            time.sleep(0.1)
-
-        instruments_updated.append(f"{instrument}({instrument_inserted})")
-        context.log.info(f"[{instrument}] Inserted {instrument_inserted} klines for {partition_date_str}")
+            instruments_updated.append(f"{instrument}({len(rows)})")
 
     return MaterializeResult(
         metadata={
-            "partition_date": MetadataValue.text(partition_date_str),
             "total_inserted": MetadataValue.int(total_inserted),
-            "instruments_updated": MetadataValue.text(", ".join(instruments_updated) or "none"),
+            "instruments": MetadataValue.text(", ".join(instruments_updated) or "none"),
         }
     )

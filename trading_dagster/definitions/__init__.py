@@ -11,7 +11,10 @@ Simplified from falcon-lakehouse:
 
 from dagster import Definitions
 
-from ..assets.binance_futures_ohlcv import binance_futures_ohlcv_1min_asset
+from ..assets.binance_futures_ohlcv import (
+    binance_futures_backfill_asset,
+    binance_futures_ohlcv_minutely_asset,
+)
 from ..assets.pnl_prod_v2_refresh import pnl_prod_v2_refresh_asset
 from ..assets.pnl_bt_v2_refresh import pnl_bt_v2_refresh_asset
 from ..assets.pnl_real_trade_v2_refresh import pnl_real_trade_v2_refresh_asset
@@ -22,7 +25,8 @@ from ..sensors.automation_sensors import build_automation_sensors
 
 all_assets = [
     # Market data
-    binance_futures_ohlcv_1min_asset,
+    binance_futures_backfill_asset,
+    binance_futures_ohlcv_minutely_asset,
     # Strategy PnL v2
     pnl_prod_v2_refresh_asset,
     pnl_bt_v2_refresh_asset,
