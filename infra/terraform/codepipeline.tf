@@ -78,6 +78,39 @@ resource "aws_codebuild_project" "test" {
 # CodeBuild — Build (Docker image → ECR)
 # ─────────────────────────────────────────────────────────────────────────────
 
+resource "aws_codebuild_project" "infra" {
+  name         = "${local.name_prefix}-infra"
+  service_role = aws_iam_role.codebuild.arn
+  tags         = local.common_tags
+
+  artifacts {
+    type = "CODEPIPELINE"
+  }
+
+  environment {
+    compute_type = "BUILD_GENERAL1_SMALL"
+    image        = "aws/codebuild/standard:7.0"
+    type         = "LINUX_CONTAINER"
+
+    environment_variable {
+      name  = "DEPLOY_REGION"
+      value = local.deploy_region
+    }
+  }
+
+  source {
+    type      = "CODEPIPELINE"
+    buildspec = "buildspec/infra.yml"
+  }
+
+  logs_config {
+    cloudwatch_logs {
+      group_name  = "/codebuild/${local.name_prefix}-infra"
+      stream_name = "build"
+    }
+  }
+}
+
 resource "aws_codebuild_project" "build" {
   name         = "${local.name_prefix}-build"
   service_role = aws_iam_role.codebuild.arn
@@ -245,6 +278,24 @@ resource "aws_codepipeline" "main" {
   }
 
   stage {
+    name = "Infra"
+
+    action {
+      name             = "TerraformApply"
+      category         = "Build"
+      owner            = "AWS"
+      provider         = "CodeBuild"
+      version          = "1"
+      input_artifacts  = ["source"]
+      output_artifacts = ["infra"]
+
+      configuration = {
+        ProjectName = aws_codebuild_project.infra.name
+      }
+    }
+  }
+
+  stage {
     name = "Build"
 
     action {
@@ -323,6 +374,7 @@ resource "aws_iam_role_policy" "codepipeline" {
         Action   = ["codebuild:BatchGetBuilds", "codebuild:StartBuild"]
         Resource = [
           aws_codebuild_project.test.arn,
+          aws_codebuild_project.infra.arn,
           aws_codebuild_project.build.arn,
           aws_codebuild_project.deploy.arn,
         ]
@@ -393,6 +445,12 @@ resource "aws_iam_role_policy" "codebuild" {
 
 resource "aws_cloudwatch_log_group" "codebuild_test" {
   name              = "/codebuild/${local.name_prefix}-test"
+  retention_in_days = 14
+  tags              = local.common_tags
+}
+
+resource "aws_cloudwatch_log_group" "codebuild_infra" {
+  name              = "/codebuild/${local.name_prefix}-infra"
   retention_in_days = 14
   tags              = local.common_tags
 }
