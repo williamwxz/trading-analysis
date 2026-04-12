@@ -72,6 +72,7 @@ def binance_futures_backfill_asset(context: AssetExecutionContext) -> Materializ
         )
 
         current_start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        instrument_inserted = 0
         while True:
             df = ExchangePriceDataService.fetch_ohlcv_times_series_df(
                 symbol=_get_ccxt_symbol(instrument), exchange_name="binance_perp",
@@ -85,10 +86,13 @@ def binance_futures_backfill_asset(context: AssetExecutionContext) -> Materializ
 
             insert_rows(TARGET_TABLE, INSERT_COLUMNS, _df_to_rows(instrument, df), client)
             total_inserted += len(df)
+            instrument_inserted += len(df)
             
             if len(df) < 1000 or df.iloc[-1]['timestamp'] >= (end_dt - timedelta(minutes=1)): break
             current_start_iso = (df.iloc[-1]['timestamp'] + timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
             time.sleep(0.1)
+        
+        context.log.info(f"[{instrument}] Finished partition {partition_date_str}, inserted {instrument_inserted} rows.")
 
     return MaterializeResult(metadata={"date": partition_date_str, "total_rows": total_inserted})
 
