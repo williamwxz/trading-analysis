@@ -33,7 +33,10 @@ INSERT_COLUMNS = ["exchange", "instrument", "ts", "open", "high", "low", "close"
 
 def _get_ccxt_symbol(instrument: str) -> str:
     if "/" in instrument: return instrument
-    return f"{instrument[:-4]}/USDT" if instrument.endswith("USDT") else instrument
+    # For Binance USDM Futures, CCXT v2+ uses 'BTC/USDT:USDT' unified format
+    if instrument.endswith("USDT"):
+        return f"{instrument[:-4]}/USDT:USDT"
+    return instrument
 
 def _df_to_rows(instrument: str, df: pd.DataFrame) -> List[list]:
     rows = []

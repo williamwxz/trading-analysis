@@ -63,6 +63,8 @@ class ExchangePriceDataService:
         """
         for attempt in range(1, max_retries + 1):
             try:
+                if not exchange.markets:
+                    exchange.load_markets()
                 ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
                 return ohlcv
             except (ccxt.NetworkError, ccxt.ExchangeError) as e:

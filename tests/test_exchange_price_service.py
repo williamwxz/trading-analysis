@@ -6,9 +6,9 @@ import trading_dagster.utils.exchange_price_service as price_service
 from trading_dagster.assets.binance_futures_ohlcv import _get_ccxt_symbol
 
 def test_get_ccxt_symbol():
-    assert _get_ccxt_symbol("BTCUSDT") == "BTC/USDT"
+    assert _get_ccxt_symbol("BTCUSDT") == "BTC/USDT:USDT"
     assert _get_ccxt_symbol("ETH/USDT") == "ETH/USDT"
-    assert _get_ccxt_symbol("SOLUSDT") == "SOL/USDT"
+    assert _get_ccxt_symbol("SOLUSDT") == "SOL/USDT:USDT"
 
 def test_fetch_ohlcv_logic():
     # Setup mock data (3 minutes of 1-min candles)

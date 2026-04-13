@@ -17,8 +17,12 @@ def test_binance_perp_fetch_live_ohlcv():
     
     # Use a recent timestamp (1 hour ago)
     since_dt = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    symbol = "BTC/USDT"
+    
     exchange_name = "binance_perp"
+    
+    # In CCXT v2+, USDM futures often prefer 'BTC/USDT:USDT' 
+    # though it should handle 'BTC/USDT' if markets are loaded.
+    symbol = "BTC/USDT:USDT" if exchange_name == "binance_perp" else "BTC/USDT"
     
     print(f"\nAttempting to fetch {symbol} from {exchange_name}...")
     
