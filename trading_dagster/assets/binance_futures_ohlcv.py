@@ -39,6 +39,10 @@ def _get_ccxt_symbol(instrument: str) -> str:
     return instrument
 
 def _df_to_rows(instrument: str, df: pd.DataFrame) -> List[list]:
+    # Ensure timestamp is datetime objects
+    if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
+        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+    
     rows = []
     for _, row in df.iterrows():
         rows.append([

@@ -49,7 +49,11 @@ daily_partitions = DailyPartitionsDefinition(start_date=START_DATE)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _get_underlyings(source_table: str) -> List[str]:
-    rows = query_rows(f"SELECT DISTINCT underlying FROM analytics.{source_table} ORDER BY underlying")
+    rows = query_rows(
+        f"SELECT DISTINCT underlying FROM analytics.{source_table} "
+        f"WHERE underlying IS NOT NULL AND underlying != '' "
+        f"ORDER BY underlying"
+    )
     return [str(r[0]) for r in rows]
 
 def _get_source_max_revision(source_table: str, underlying: str) -> Optional[str]:
