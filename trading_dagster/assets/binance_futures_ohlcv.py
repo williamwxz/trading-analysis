@@ -42,11 +42,15 @@ def _df_to_rows(instrument: str, df: pd.DataFrame) -> List[list]:
     # Ensure timestamp is datetime objects
     if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
         df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
-    
+
     rows = []
     for _, row in df.iterrows():
+        ts = row['timestamp']
+        # clickhouse-connect requires a datetime object for DateTime columns, not a string
+        if not isinstance(ts, datetime):
+            ts = ts.to_pydatetime()
         rows.append([
-            "binance", instrument, row['timestamp'].strftime("%Y-%m-%d %H:%M:%S"),
+            "binance", instrument, ts,
             float(row['open']), float(row['high']), float(row['low']), float(row['close']), float(row['volume']),
         ])
     return rows
