@@ -53,12 +53,13 @@ Rollup asset (hourly, argMax aggregation)
 
 ### Dagster Entry Point
 
-`pyproject.toml` sets `[tool.dagster] module_name = "trading_dagster"`. Dagster discovers assets via `trading_dagster/definitions/__init__.py`, which imports all `*_asset` variables and registers them with two `AutomationConditionSensorDefinition` sensors (60s interval each):
+`pyproject.toml` sets `[tool.dagster] module_name = "trading_dagster"`. Dagster discovers assets via `trading_dagster/definitions/__init__.py`, which imports all `*_asset` variables and registers them with a single `AutomationConditionSensorDefinition` sensor (30s interval):
 
 | Sensor | Asset Groups |
 |--------|-------------|
-| `market_data_automation_sensor` | `market_data` |
-| `strategy_pnl_automation_sensor` | `strategy_pnl` |
+| `trading_analysis_automation_sensor` | all assets (market_data + strategy_pnl) |
+
+Note: `pnl_bt_v2_live_asset` and `pnl_bt_v2_daily_asset` are defined in `pnl_strategy_v2.py` but **commented out** in `definitions/__init__.py` — backtest PnL is not currently active.
 
 ### Dual Asset Strategy
 
@@ -74,7 +75,6 @@ Example: `binance_futures_backfill` (daily partitions from 2024-01-01) + `binanc
 2. **Skip if up to date**: compare source `max(revision_ts)` against watermark
 3. **Python PnL computation**: `fetch_new_bars_*` → `fetch_anchors` → `fetch_prices` → `compute_*_pnl` → `insert_rows`
 4. **Write watermark**: update `analytics.pnl_refresh_watermarks` after successful insert
-5. **Tail fill**: pure SQL fills gap from last bar to `now()` using current position + live price
 
 ### Why Python for PnL (not SQL)
 
@@ -84,15 +84,18 @@ PnL formula: `cumulative_pnl = anchor_pnl + position * (live_price - anchor_pric
 
 ### Real Trade vs Prod/Bt
 
-`real_trade` bars have multiple revisions per bar (live updates). `fetch_new_bars_real_trade` uses a window function to select the latest revision per `execution_ts = toStartOfMinute(revision_ts + 59s)`. Prod/bt use `argMin(row_json, revision_ts)` (first revision wins).
+`real_trade` bars have multiple revisions per bar (live updates). `fetch_new_bars_real_trade` uses a ClickHouse window function (`lagInFrame`/`leadInFrame`) to group revisions by `execution_ts = toStartOfMinute(revision_ts + 59s)` and keeps only the latest revision per group. `compute_real_trade_pnl` advances `active_position` as each `execution_ts` is reached while iterating 1-min intervals. Prod/bt use `argMin(row_json, revision_ts)` (first revision wins) and a simpler `compute_prod_pnl`.
+
+**Note**: `_refresh_pnl_real_trade` in `pnl_strategy_v2.py` is currently a stub — it returns an empty `MaterializeResult` without running the actual computation.
 
 ### ClickHouse Patterns
 
 - **All queries through** `trading_dagster/utils/clickhouse_client.py`: `get_client()`, `query_rows()`, `query_dicts()`, `query_scalar()`, `execute()`, `insert_rows()`
-- **No connection pooling**: each call creates a new connection unless a `client=` is passed explicitly. Pass a shared client when doing multiple operations in one asset run.
+- **No connection pooling**: each call creates a new connection unless a `client=` is passed explicitly. Pass a shared client when doing multiple operations in one asset run to avoid redundant connections.
 - **ReplacingMergeTree(updated_at)**: re-inserting rows replaces older ones after background merge. Use `FINAL` in SELECT to get deduplicated results immediately.
 - **Idempotent upserts**: partitioned assets DELETE the day+instrument partition before inserting; unpartitioned assets rely on ReplacingMergeTree.
 - **Batch insert**: `insert_rows()` defaults to 200k rows per batch.
+- **Datetime types**: ClickHouse-connect requires Python `datetime` objects for DateTime columns. `_prepare_rows_for_clickhouse()` in `pnl_strategy_v2.py` handles string→datetime conversion for PnL rows (ts at index 7, updated_at at index 14 of PROD_INSERT_COLUMNS).
 
 ### ClickHouse Cloud Connection
 

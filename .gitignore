@@ -25,6 +25,7 @@ env/
 
 # Dagster
 .dagster_storage/
+local_dagster_home/
 storage/
 runs/
 schedules/

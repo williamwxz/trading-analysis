@@ -43,6 +43,7 @@ class ExchangePriceDataService:
 
         return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    @staticmethod
     def safe_fetch_ohlcv(
         exchange: Exchange,
         symbol: str,
