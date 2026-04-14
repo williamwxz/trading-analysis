@@ -87,6 +87,10 @@ def binance_futures_backfill_asset(context: AssetExecutionContext) -> Materializ
             )
             if df is None or df.empty: break
             
+            # Ensure timestamp is datetime
+            if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
+                df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+
             # Filter to partition window
             df = df[(df['timestamp'] >= start_dt) & (df['timestamp'] < end_dt)]
             if df.empty: break
@@ -147,6 +151,10 @@ def binance_futures_ohlcv_minutely_asset(context: AssetExecutionContext) -> Mate
         )
 
         if df is not None and not df.empty:
+            # Ensure timestamp is datetime
+            if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
+                df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+            
             rows = _df_to_rows(instrument, df)
             insert_rows(TARGET_TABLE, INSERT_COLUMNS, rows, client)
             total_inserted += len(rows)
