@@ -244,18 +244,34 @@ ORDER BY strategy_table_name, closing_ts, revision_ts
     ]
 
 
+def _underlying_to_instrument(underlying: str) -> str:
+    """Derive futures_price_1min instrument from underlying.
+
+    Handles cases where underlying is already 'ADAUSDT', 'ada', 'ADA', etc.
+    Always returns uppercase e.g. 'ADAUSDT'.
+    """
+    u = underlying.upper()
+    if u.endswith("USDT"):
+        return u
+    return f"{u}USDT"
+
+
 def fetch_prices(
     underlying: str, ts_min: str, ts_max: str,
 ) -> Dict[str, float]:
-    """Read 1-min open prices for a time window. Returns {ts_string: open}."""
-    instrument = f"{underlying.upper()}USDT"
+    """Read 1-min open prices for a time window. Returns {ts_string: open}.
+
+    The window extends 2 timeframe-lengths (max 1d) past ts_max to cover
+    the last bar's expansion into 1-min intervals.
+    """
+    instrument = _underlying_to_instrument(underlying)
     sql = f"""\
 SELECT toString(ts), open
 FROM analytics.futures_price_1min
 WHERE exchange = 'binance'
   AND instrument = '{instrument}'
   AND ts >= toDateTime('{ts_min}')
-  AND ts < toDateTime('{ts_max}') + toIntervalMinute(2880)
+  AND ts < toDateTime('{ts_max}') + toIntervalMinute(1440)
 """
     rows = query_rows(sql)
     return {str(r[0]): float(r[1]) for r in rows}

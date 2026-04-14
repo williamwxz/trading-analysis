@@ -7,6 +7,7 @@ Supports both:
 """
 
 import time
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
@@ -156,6 +157,9 @@ def pnl_real_trade_v2_daily_asset(context: AssetExecutionContext) -> Materialize
 # Generic Refresh Logic
 # ─────────────────────────────────────────────────────────────────────────────
 
+_CHUNK_DAYS = 7  # process bars in weekly chunks to cap memory usage
+
+
 def _refresh_pnl_generic(context, target_table: str, source_table: str, label: str) -> MaterializeResult:
     underlyings = _get_underlyings(source_table)
     client = get_client()
@@ -170,34 +174,61 @@ def _refresh_pnl_generic(context, target_table: str, source_table: str, label: s
         # Find watermark in target
         watermark = query_scalar(
             f"SELECT toString(max(last_revision_ts)) FROM analytics.pnl_refresh_watermarks "
-            f"WHERE underlying = '{underlying}' AND target_table = '{target_table}'", 
+            f"WHERE underlying = '{underlying}' AND target_table = '{target_table}'",
             client
         )
         watermark = str(watermark).strip() if watermark else "2020-01-01 00:00:00"
-        
+
         if source_max <= watermark: continue
 
         context.log.info(f"[{underlying}] Incremental refresh since {watermark}")
+
+        # Fetch all new bars, then process in weekly chunks to avoid OOM.
+        # Each chunk loads only that window's prices into memory.
         bars = fetch_new_bars_prod(source_table, underlying, watermark)
         if not bars: continue
-        
+
+        # Group bars into _CHUNK_DAYS-day buckets by bar ts
+        chunks: dict = defaultdict(list)
+        for b in bars:
+            bar_dt = datetime.strptime(b["ts"], "%Y-%m-%d %H:%M:%S")
+            # bucket key = start of chunk window (truncated to _CHUNK_DAYS boundary)
+            days_since_epoch = (bar_dt - datetime(1970, 1, 1)).days
+            bucket = days_since_epoch // _CHUNK_DAYS
+            chunks[bucket].append(b)
+
         anchors = fetch_anchors(target_table, underlying)
-        ts_min = min(b["ts"] for b in bars)
-        ts_max = max(b["ts"] for b in bars)
-        prices = fetch_prices(underlying, ts_min, ts_max)
-        
-        rows = compute_prod_pnl(bars, anchors, prices, source_label=label)
-        processed_rows = _prepare_rows_for_clickhouse(rows)
-        total_rows += insert_rows(f"analytics.{target_table}", PROD_INSERT_COLUMNS, processed_rows, client)
-        
-        # Write watermark
+        underlying_rows = 0
+
+        for bucket in sorted(chunks.keys()):
+            chunk_bars = chunks[bucket]
+            ts_min = min(b["ts"] for b in chunk_bars)
+            ts_max = max(b["ts"] for b in chunk_bars)
+            prices = fetch_prices(underlying, ts_min, ts_max)
+
+            rows = compute_prod_pnl(chunk_bars, anchors, prices, source_label=label)
+            processed_rows = _prepare_rows_for_clickhouse(rows)
+            n = insert_rows(f"analytics.{target_table}", PROD_INSERT_COLUMNS, processed_rows, client)
+            underlying_rows += n
+
+            # Update anchors from the last inserted row so next chunk chains correctly
+            if rows:
+                last = rows[-1]
+                # PROD_INSERT_COLUMNS: ts=7, cumulative_pnl=8, price=11, position=10
+                stn = last[0]
+                anchors[stn] = (last[8], last[11], last[10])
+
+        total_rows += underlying_rows
+
+        # Write watermark after all chunks for this underlying
         execute(
             f"INSERT INTO analytics.pnl_refresh_watermarks (underlying, target_table, last_revision_ts, updated_at) "
             f"VALUES ('{underlying}', '{target_table}', toDateTime('{source_max}'), now())",
             client
         )
         refreshed.append(underlying)
-        
+        context.log.info(f"[{underlying}] Inserted {underlying_rows} rows")
+
     return MaterializeResult(metadata={"total_inserted": total_rows, "underlyings": ", ".join(refreshed)})
 
 def _refresh_pnl_partitioned(context, target_table: str, source_table: str, label: str) -> MaterializeResult:
