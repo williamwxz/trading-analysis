@@ -16,7 +16,7 @@ phases:
     commands:
       - echo "=== Updating Grafana service ==="
       - |
-        set -euo pipefail
+        set -eu
         . $CODEBUILD_SRC_DIR_built/deploy_env.sh
         TASK_DEF_G=$(aws ecs describe-task-definition --task-definition trading-analysis-grafana --region $DEPLOY_REGION --query taskDefinition --output json)
         NEW_TASK_G=$(echo "$TASK_DEF_G" | python3 -c "import sys, json, os; td = json.load(sys.stdin); img = os.environ['GRAFANA_IMAGE_URI']; [c.__setitem__('image', img) for c in td['containerDefinitions'] if c['name'] == 'grafana']; [td.pop(k, None) for k in ('taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy')]; print(json.dumps(td))")
