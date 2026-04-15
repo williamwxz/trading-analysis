@@ -33,7 +33,7 @@
         "type": "grafana-clickhouse-datasource",
         "uid": "clickhouse"
       },
-      "title": "Aggregate PnL (from backtest day 0) — ${underlying}",
+      "title": "Aggregate PnL (from backtest day 0) \u2014 ${underlying}",
       "description": "All strategies combined for this underlying, PnL normalised from strategy inception (not the selected time range). Production vs Backtest overlaid.",
       "type": "timeseries",
       "id": 2,
@@ -122,7 +122,7 @@
         "type": "grafana-clickhouse-datasource",
         "uid": "clickhouse"
       },
-      "title": "Aggregate PnL (from 0%) — ${underlying}",
+      "title": "Aggregate PnL (from 0%) \u2014 ${underlying}",
       "description": "All strategies combined for this underlying. Production vs Backtest overlaid. PnL normalised to 0% at the start of the selected time range.",
       "type": "timeseries",
       "id": 3,
@@ -212,7 +212,7 @@
         "type": "grafana-clickhouse-datasource",
         "uid": "clickhouse"
       },
-      "title": "${underlying} — Drawdown",
+      "title": "${underlying} \u2014 Drawdown",
       "description": "Drawdown from peak for the combined strategy return on this underlying.",
       "type": "timeseries",
       "id": 4,
@@ -305,7 +305,7 @@
         "type": "grafana-clickhouse-datasource",
         "uid": "clickhouse"
       },
-      "title": "Aggregate Position — ${underlying}",
+      "title": "Aggregate Position \u2014 ${underlying}",
       "description": "Aggregated position across all strategies trading this underlying. Aggregation follows the selected PnL mode.",
       "type": "timeseries",
       "id": 5,
@@ -395,7 +395,7 @@
         "type": "grafana-clickhouse-datasource",
         "uid": "clickhouse"
       },
-      "title": "Per-Instance Position — ${underlying}",
+      "title": "Per-Instance Position \u2014 ${underlying}",
       "description": "Individual position for each strategy instance trading this underlying. Each line is one strategy_table_name.",
       "type": "timeseries",
       "id": 6,
@@ -511,7 +511,7 @@
         "hide": 0,
         "multi": false,
         "includeAll": false,
-        "description": "Rescaled: sum(pnl*w)/sum(w) — normalized to 100%. Raw Weighted: sum(pnl*w) — actual portfolio contribution. Equal Weighted: avg(pnl) — every instance equal."
+        "description": "Rescaled: sum(pnl*w)/sum(w) \u2014 normalized to 100%. Raw Weighted: sum(pnl*w) \u2014 actual portfolio contribution. Equal Weighted: avg(pnl) \u2014 every instance equal."
       },
       {
         "name": "resolution",
@@ -521,7 +521,7 @@
           "type": "grafana-clickhouse-datasource",
           "uid": "clickhouse"
         },
-        "query": "SELECT multiIf(${__to} - ${__from} < 604800000, '1min', ${__to} - ${__from} < 7776000000, '1hour', '1day')",
+        "query": "SELECT multiIf(${__to} - ${__from} < 604800000, '1min', ${__to} - ${__from} < 7776000000, '1hour', '1day') FROM system.one",
         "refresh": 2,
         "sort": 0,
         "hide": 2,
@@ -538,7 +538,7 @@
     "to": "now"
   },
   "timezone": "utc",
-  "title": "Strategy PnL — L4 Underlying",
+  "title": "Strategy PnL \u2014 L4 Underlying",
   "uid": "strategy-pnl-l4",
   "version": 7
 }

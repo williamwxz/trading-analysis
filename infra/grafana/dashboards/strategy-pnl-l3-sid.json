@@ -33,7 +33,7 @@
         "type": "grafana-clickhouse-datasource",
         "uid": "clickhouse"
       },
-      "title": "Aggregate PnL (from backtest day 0) — Strategy ${strategy_id}",
+      "title": "Aggregate PnL (from backtest day 0) \u2014 Strategy ${strategy_id}",
       "description": "Absolute cumulative PnL (not window-rebased). Shows where the strategy currently stands from its origin.",
       "type": "timeseries",
       "id": 2,
@@ -122,7 +122,7 @@
         "type": "grafana-clickhouse-datasource",
         "uid": "clickhouse"
       },
-      "title": "Aggregate PnL (from 0%) — Strategy ${strategy_id}",
+      "title": "Aggregate PnL (from 0%) \u2014 Strategy ${strategy_id}",
       "description": "All instances combined, rebased to 0% at the left edge of the selected time window. Production vs Backtest vs Benchmark.",
       "type": "timeseries",
       "id": 3,
@@ -319,7 +319,7 @@
         "type": "grafana-clickhouse-datasource",
         "uid": "clickhouse"
       },
-      "title": "Aggregate Position — Strategy ${strategy_id}",
+      "title": "Aggregate Position \u2014 Strategy ${strategy_id}",
       "description": "Aggregated position across all instances of this strategy. Aggregation follows the selected PnL mode (rescaled/raw weighted/equal weighted).",
       "type": "timeseries",
       "id": 5,
@@ -409,7 +409,7 @@
         "type": "grafana-clickhouse-datasource",
         "uid": "clickhouse"
       },
-      "title": "Per-Instance Position — Strategy ${strategy_id}",
+      "title": "Per-Instance Position \u2014 Strategy ${strategy_id}",
       "description": "Individual position for each instance within this strategy. Each line is one strategy_table_name.",
       "type": "timeseries",
       "id": 6,
@@ -525,7 +525,7 @@
         "hide": 0,
         "multi": false,
         "includeAll": false,
-        "description": "Rescaled: sum(pnl*w)/sum(w) — normalized to 100%. Raw Weighted: sum(pnl*w) — actual portfolio contribution. Equal Weighted: avg(pnl) — every instance equal."
+        "description": "Rescaled: sum(pnl*w)/sum(w) \u2014 normalized to 100%. Raw Weighted: sum(pnl*w) \u2014 actual portfolio contribution. Equal Weighted: avg(pnl) \u2014 every instance equal."
       },
       {
         "name": "resolution",
@@ -535,7 +535,7 @@
           "type": "grafana-clickhouse-datasource",
           "uid": "clickhouse"
         },
-        "query": "SELECT multiIf(${__to} - ${__from} < 604800000, '1min', ${__to} - ${__from} < 7776000000, '1hour', '1day')",
+        "query": "SELECT multiIf(${__to} - ${__from} < 604800000, '1min', ${__to} - ${__from} < 7776000000, '1hour', '1day') FROM system.one",
         "refresh": 2,
         "sort": 0,
         "hide": 2,
@@ -552,7 +552,7 @@
     "to": "now"
   },
   "timezone": "utc",
-  "title": "Strategy PnL — L3 Strategy ID",
+  "title": "Strategy PnL \u2014 L3 Strategy ID",
   "uid": "strategy-pnl-l3",
   "version": 21
 }

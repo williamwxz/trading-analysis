@@ -897,7 +897,7 @@
           "type": "grafana-clickhouse-datasource",
           "uid": "clickhouse"
         },
-        "query": "SELECT multiIf(${__to} - ${__from} < 604800000, '1min', ${__to} - ${__from} < 7776000000, '1hour', '1day')",
+        "query": "SELECT multiIf(${__to} - ${__from} < 604800000, '1min', ${__to} - ${__from} < 7776000000, '1hour', '1day') FROM system.one",
         "refresh": 2,
         "sort": 0,
         "hide": 2,
