@@ -185,11 +185,6 @@ resource "aws_codebuild_project" "schema" {
       name  = "DEPLOY_REGION"
       value = local.deploy_region
     }
-    environment_variable {
-      name  = "CLICKHOUSE_HOST_SECRET"
-      value = aws_secretsmanager_secret.clickhouse.arn
-      type  = "SECRETS_MANAGER"
-    }
   }
 
   source {
