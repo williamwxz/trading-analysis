@@ -3,6 +3,14 @@ FROM public.ecr.aws/bitnami/grafana:11
 # Bitnami paths are different
 # Config: /opt/bitnami/grafana/conf/provisioning/
 # Dashboards: /opt/bitnami/grafana/dashboards/
+# Plugins:  /opt/bitnami/grafana/data/plugins/
+
+# Install plugin at build time so it's available immediately on startup
+# (avoids runtime download failures or slow cold starts)
+USER root
+RUN /opt/bitnami/grafana/bin/grafana-cli \
+    --pluginsDir /opt/bitnami/grafana/data/plugins \
+    plugins install grafana-clickhouse-datasource
 
 # Copy provisioning configurations
 COPY infra/grafana/provisioning/ /opt/bitnami/grafana/conf/provisioning/
@@ -11,6 +19,5 @@ COPY infra/grafana/provisioning/ /opt/bitnami/grafana/conf/provisioning/
 COPY infra/grafana/dashboards/ /opt/bitnami/grafana/dashboards/
 
 # Ensure permissions
-USER root
-RUN chown -R 1001:1001 /opt/bitnami/grafana/conf/provisioning /opt/bitnami/grafana/dashboards
+RUN chown -R 1001:1001 /opt/bitnami/grafana/conf/provisioning /opt/bitnami/grafana/dashboards /opt/bitnami/grafana/data/plugins
 USER 1001

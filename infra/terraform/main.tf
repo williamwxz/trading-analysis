@@ -430,7 +430,6 @@ resource "aws_ecs_task_definition" "grafana" {
 
       environment = [
         { name = "GF_SECURITY_ADMIN_PASSWORD", value = "changeme" },
-        { name = "GF_INSTALL_PLUGINS",         value = "grafana-clickhouse-datasource" },
         { name = "GF_SERVER_HTTP_PORT",        value = "3000" },
         { name = "GF_SERVER_ROOT_URL",         value = "http://${aws_lb.main.dns_name}/grafana" },
         { name = "GF_SERVER_SERVE_FROM_SUB_PATH", value = "true" },
@@ -539,7 +538,7 @@ resource "aws_lb_target_group" "grafana" {
   target_type = "ip"
 
   health_check {
-    path                = "/api/health"
+    path                = "/grafana/api/health"
     healthy_threshold   = 2
     unhealthy_threshold = 10
   }
