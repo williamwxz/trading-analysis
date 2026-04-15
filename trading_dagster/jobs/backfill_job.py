@@ -15,6 +15,10 @@ backfill_job = define_asset_job(
         "binance_futures_backfill",
         "pnl_prod_v2_daily",
         "pnl_real_trade_v2_daily",
+        # pnl_1hour_rollup is unpartitioned; it runs its internal watermark-based
+        # catch-up across all underlyings regardless of which partition dates are
+        # selected above. This is intentional — it brings hourly rollup tables
+        # up to date after each backfill run.
         "pnl_1hour_rollup",
     ),
     description=(
