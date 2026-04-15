@@ -405,16 +405,46 @@ resource "aws_codepipeline" "main" {
     name = "Deploy"
 
     action {
-      name            = "DeployToECS"
-      category        = "Build"
-      owner           = "AWS"
-      provider        = "CodeBuild"
-      version         = "1"
-      input_artifacts = ["source", "built"]
+      name             = "SchemaApply"
+      category         = "Build"
+      owner            = "AWS"
+      provider         = "CodeBuild"
+      version          = "1"
+      run_order        = 1
+      input_artifacts  = ["source"]
 
       configuration = {
-        ProjectName          = aws_codebuild_project.deploy.name
-        PrimarySource        = "source"
+        ProjectName = aws_codebuild_project.schema.name
+      }
+    }
+
+    action {
+      name             = "DeployDagster"
+      category         = "Build"
+      owner            = "AWS"
+      provider         = "CodeBuild"
+      version          = "1"
+      run_order        = 2
+      input_artifacts  = ["source", "built"]
+
+      configuration = {
+        ProjectName   = aws_codebuild_project.deploy_dagster.name
+        PrimarySource = "source"
+      }
+    }
+
+    action {
+      name             = "DeployGrafana"
+      category         = "Build"
+      owner            = "AWS"
+      provider         = "CodeBuild"
+      version          = "1"
+      run_order        = 2
+      input_artifacts  = ["source", "built"]
+
+      configuration = {
+        ProjectName   = aws_codebuild_project.deploy_grafana.name
+        PrimarySource = "source"
       }
     }
   }
@@ -464,7 +494,9 @@ resource "aws_iam_role_policy" "codepipeline" {
           aws_codebuild_project.test.arn,
           aws_codebuild_project.infra.arn,
           aws_codebuild_project.build.arn,
-          aws_codebuild_project.deploy.arn,
+          aws_codebuild_project.schema.arn,
+          aws_codebuild_project.deploy_dagster.arn,
+          aws_codebuild_project.deploy_grafana.arn,
         ]
       },
       {
