@@ -1,0 +1,31 @@
+version: 0.2
+
+# -----------------------------------------------------------------------------
+# Stage: Deploy / DeployDagster
+# Updates ECS Dagster service with the new image and waits for stability.
+# Reads IMAGE_URI from the 'built' secondary artifact (deploy_env.sh).
+# -----------------------------------------------------------------------------
+
+phases:
+  pre_build:
+    commands:
+      - . $CODEBUILD_SRC_DIR_built/deploy_env.sh
+      - echo "Deploying Dagster image $IMAGE_URI"
+
+  build:
+    commands:
+      - echo "=== Updating Dagster service ==="
+      - |
+        . $CODEBUILD_SRC_DIR_built/deploy_env.sh
+        TASK_DEF=$(aws ecs describe-task-definition --task-definition trading-analysis-dagster --region $DEPLOY_REGION --query taskDefinition --output json)
+        NEW_TASK=$(echo "$TASK_DEF" | python3 -c "import sys, json, os; td = json.load(sys.stdin); img = os.environ['IMAGE_URI']; [c.__setitem__('image', img) for c in td['containerDefinitions'] if c['name'] in ('dagster-webserver', 'dagster-daemon')]; [td.pop(k, None) for k in ('taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy')]; print(json.dumps(td))")
+        NEW_ARN=$(aws ecs register-task-definition --cli-input-json "$NEW_TASK" --region $DEPLOY_REGION --query taskDefinition.taskDefinitionArn --output text)
+        echo "Registered Dagster: $NEW_ARN"
+        aws ecs update-service --cluster $ECS_CLUSTER --service trading-analysis-dagster --task-definition "$NEW_ARN" --force-new-deployment --region $DEPLOY_REGION --output json > /dev/null
+
+  post_build:
+    commands:
+      - echo "=== Waiting for Dagster service to stabilize ==="
+      - aws ecs wait services-stable --cluster $ECS_CLUSTER --services trading-analysis-dagster --region $DEPLOY_REGION
+      - echo "=== Dagster deploy complete ==="
+      - aws ecs describe-services --cluster $ECS_CLUSTER --services trading-analysis-dagster --region $DEPLOY_REGION --query 'services[*].{Name:serviceName,Status:status,Running:runningCount,Desired:desiredCount}' --output table
