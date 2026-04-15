@@ -13,5 +13,5 @@ datasources:
       username: dev_ro3
       defaultDatabase: analytics
     secureJsonData:
-      password: $__env{CLICKHOUSE_PASSWORD}
+      password: $CLICKHOUSE_PASSWORD
     editable: true
