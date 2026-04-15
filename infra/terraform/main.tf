@@ -811,6 +811,12 @@ resource "aws_iam_role_policy" "ecs_task_policy" {
           "${aws_s3_bucket.data.arn}/*",
         ]
       },
+      {
+        # DefaultRunLauncher introspects the current ECS task definition at startup
+        Effect   = "Allow"
+        Action   = ["ecs:DescribeTaskDefinition"]
+        Resource = "*"
+      },
     ]
   })
 }
