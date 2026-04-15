@@ -243,7 +243,7 @@ def _refresh_pnl_partitioned(context, target_table: str, source_table: str, labe
     context.log.info(f"Backfilling {label} PnL for {date_str}")
 
     # Idempotency: Clean partition
-    execute(f"DELETE FROM analytics.{target_table} WHERE ts >= '{start_ts}' AND ts < '{end_ts}' AND source='{label}'", client)
+    execute(f"DELETE FROM analytics.{target_table} WHERE ts >= toDateTime('{start_ts}') AND ts < toDateTime('{end_ts}') AND source='{label}'", client)
     
     underlyings = _get_underlyings(source_table)
     total_rows = 0
