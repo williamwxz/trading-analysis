@@ -16,23 +16,8 @@ storage:
         env: DAGSTER_PG_DATABASE
 
 run_launcher:
-  module: dagster_aws.ecs
-  class: EcsRunLauncher
-  config:
-    task_definition: trading-analysis-dagster-run
-    container_name: run
-    run_task_kwargs:
-      networkConfiguration:
-        awsvpcConfiguration:
-          assignPublicIp: DISABLED
-          securityGroups:
-            - env: ECS_SECURITY_GROUP_ID
-          subnets:
-            - env: ECS_SUBNET_ID_0
-            - env: ECS_SUBNET_ID_1
-    run_ecs_tags:
-      - key: "project"
-        value: "trading-analysis"
+  module: dagster.core.launcher
+  class: DefaultRunLauncher
 
 compute_logs:
   module: dagster.core.storage.noop_compute_log_manager
