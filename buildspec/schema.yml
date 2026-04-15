@@ -12,20 +12,14 @@ phases:
       - echo "deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg] https://packages.clickhouse.com/deb stable main" | tee /etc/apt/sources.list.d/clickhouse.list
       - apt-get update -q && apt-get install -y -q clickhouse-client
 
-  pre_build:
-    commands:
-      - |
-        export CH_SECRET=$(aws secretsmanager get-secret-value --secret-id trading-analysis/clickhouse --region $DEPLOY_REGION --query SecretString --output text)
-        export CLICKHOUSE_HOST=$(echo $CH_SECRET | python3 -c "import sys,json; print(json.load(sys.stdin)['host'])")
-        export CLICKHOUSE_PASSWORD=$(echo $CH_SECRET | python3 -c "import sys,json; print(json.load(sys.stdin)['password'])")
-        echo "CLICKHOUSE_HOST=$CLICKHOUSE_HOST"
-
   build:
     commands:
       - echo "=== Applying ClickHouse schema ==="
       - |
+        test -n "$DEPLOY_REGION" || { echo "ERROR: DEPLOY_REGION not set"; exit 1; }
         export CH_SECRET=$(aws secretsmanager get-secret-value --secret-id trading-analysis/clickhouse --region $DEPLOY_REGION --query SecretString --output text)
         export CLICKHOUSE_HOST=$(echo $CH_SECRET | python3 -c "import sys,json; print(json.load(sys.stdin)['host'])")
         export CLICKHOUSE_PASSWORD=$(echo $CH_SECRET | python3 -c "import sys,json; print(json.load(sys.stdin)['password'])")
+        unset CH_SECRET
         clickhouse-client --host "$CLICKHOUSE_HOST" --port 9440 --secure --user default --password "$CLICKHOUSE_PASSWORD" --multiquery < schemas/clickhouse_cloud.sql
         echo "Schema applied."
