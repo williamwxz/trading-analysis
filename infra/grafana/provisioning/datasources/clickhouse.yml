@@ -7,11 +7,11 @@ datasources:
     access: proxy
     isDefault: true
     jsonData:
-      host: $CLICKHOUSE_HOST
+      host: qu6o0w9hl8.ap-northeast-1.aws.clickhouse.cloud
       port: 8443
       protocol: https
-      username: $CLICKHOUSE_USER
+      username: dev_ro3
       defaultDatabase: analytics
     secureJsonData:
-      password: $CLICKHOUSE_PASSWORD
+      password: $__env{CLICKHOUSE_PASSWORD}
     editable: true
