@@ -285,8 +285,8 @@ resource "aws_ecs_task_definition" "dagster" {
   family                   = "${local.name_prefix}-dagster"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = 1024
-  memory                   = 2048
+  cpu                      = 8192
+  memory                   = 16384
   execution_role_arn       = aws_iam_role.ecs_execution.arn
   task_role_arn            = aws_iam_role.ecs_task.arn
 
