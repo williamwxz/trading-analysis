@@ -42,22 +42,20 @@ def fetch_anchors(
 
     Returns: {strategy_table_name: (anchor_pnl, anchor_price, anchor_position)}
     """
+    # Use LIMIT 1 BY to get the latest row per strategy without FINAL or a self-join.
+    # ORDER BY ts DESC, updated_at DESC aligns with the sort key (strategy_table_name, ts)
+    # so ClickHouse can skip to the last part per strategy rather than doing a full scan.
     sql = f"""\
-WITH max_ts AS (
-    SELECT strategy_table_name AS stn, max(ts) AS mts
-    FROM analytics.{target_table}
-    WHERE underlying = '{underlying}'
-    GROUP BY strategy_table_name
-)
 SELECT
-    m.stn AS strategy_table_name,
-    argMax(t.cumulative_pnl, t.updated_at) AS anchor_pnl,
-    argMax(t.price, t.updated_at) AS anchor_price,
-    argMax(t.position, t.updated_at) AS anchor_position
-FROM max_ts m
-INNER JOIN analytics.{target_table} t
-    ON t.strategy_table_name = m.stn AND t.ts = m.mts
-GROUP BY m.stn
+    strategy_table_name,
+    cumulative_pnl AS anchor_pnl,
+    price          AS anchor_price,
+    position       AS anchor_position
+FROM analytics.{target_table}
+WHERE underlying = '{underlying}'
+  AND ts >= now() - INTERVAL 2 HOUR
+ORDER BY strategy_table_name, ts DESC, updated_at DESC
+LIMIT 1 BY strategy_table_name
 """
     rows = query_dicts(sql)
     result = {}

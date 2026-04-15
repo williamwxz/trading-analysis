@@ -16,8 +16,20 @@ storage:
         env: DAGSTER_PG_DATABASE
 
 run_launcher:
-  module: dagster.core.launcher
-  class: DefaultRunLauncher
+  module: dagster_aws.ecs
+  class: EcsRunLauncher
+  config:
+    task_definition: trading-analysis-dagster-run
+    container_name: run
+    assign_public_ip: false
+    security_group_ids:
+      - env: ECS_SECURITY_GROUP_ID
+    subnets:
+      - env: ECS_SUBNET_ID_0
+      - env: ECS_SUBNET_ID_1
+    run_ecs_tags:
+      - key: "project"
+        value: "trading-analysis"
 
 compute_logs:
   module: dagster.core.storage.noop_compute_log_manager
@@ -28,6 +40,9 @@ local_artifact_storage:
   class: LocalArtifactStorage
   config:
     base_dir: /app/.dagster_storage/storage
+
+run_queue:
+  max_concurrent_runs: 10
 
 concurrency:
   default_op_concurrency_limit: 5

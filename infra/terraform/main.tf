@@ -286,7 +286,7 @@ resource "aws_ecs_task_definition" "dagster" {
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = 1024
-  memory                   = 4096
+  memory                   = 2048
   execution_role_arn       = aws_iam_role.ecs_execution.arn
   task_role_arn            = aws_iam_role.ecs_task.arn
 
@@ -305,14 +305,18 @@ resource "aws_ecs_task_definition" "dagster" {
       ]
 
       environment = [
-        { name = "DAGSTER_HOME",    value = "/app" },
-        { name = "CLICKHOUSE_USER",    value = "dev_ro3" },
-        { name = "CLICKHOUSE_PORT",    value = "8443" },
-        { name = "CLICKHOUSE_SECURE",  value = "true" },
+        { name = "DAGSTER_HOME",        value = "/app" },
+        { name = "CLICKHOUSE_USER",     value = "dev_ro3" },
+        { name = "CLICKHOUSE_PORT",     value = "8443" },
+        { name = "CLICKHOUSE_SECURE",   value = "true" },
         { name = "DAGSTER_PG_USERNAME", value = "dagster" },
         { name = "DAGSTER_PG_PORT",     value = "5432" },
         { name = "DAGSTER_PG_DATABASE", value = "dagster" },
         { name = "DAGSTER_PG_HOST",     value = aws_db_instance.dagster.address },
+        # EcsRunLauncher networking — run tasks launch into the same private subnets/SG
+        { name = "ECS_SECURITY_GROUP_ID", value = aws_security_group.ecs_tasks.id },
+        { name = "ECS_SUBNET_ID_0",       value = aws_subnet.private[0].id },
+        { name = "ECS_SUBNET_ID_1",       value = aws_subnet.private[1].id },
       ]
 
       secrets = [
@@ -489,6 +493,68 @@ resource "aws_ecs_service" "grafana" {
   }
 
   depends_on = [aws_lb_listener.http]
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ECS Task Definition — Dagster Runs (EcsRunLauncher)
+# Each Dagster run gets its own ephemeral Fargate task via EcsRunLauncher.
+# ─────────────────────────────────────────────────────────────────────────────
+
+resource "aws_ecs_task_definition" "dagster_run" {
+  family                   = "${local.name_prefix}-dagster-run"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = 1024
+  memory                   = 4096
+  execution_role_arn       = aws_iam_role.ecs_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "run"
+      image     = "${aws_ecr_repository.dagster.repository_url}:latest"
+      essential = true
+
+      environment = [
+        { name = "DAGSTER_HOME",        value = "/app" },
+        { name = "CLICKHOUSE_USER",     value = "dev_ro3" },
+        { name = "CLICKHOUSE_PORT",     value = "8443" },
+        { name = "CLICKHOUSE_SECURE",   value = "true" },
+        { name = "DAGSTER_PG_USERNAME", value = "dagster" },
+        { name = "DAGSTER_PG_PORT",     value = "5432" },
+        { name = "DAGSTER_PG_DATABASE", value = "dagster" },
+        { name = "DAGSTER_PG_HOST",     value = aws_db_instance.dagster.address },
+      ]
+
+      secrets = [
+        { name = "CLICKHOUSE_HOST",     valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
+        { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
+        { name = "DAGSTER_PG_PASSWORD", valueFrom = "${aws_secretsmanager_secret.dagster_pg.arn}:password::" },
+      ]
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.dagster_run.name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "run"
+        }
+      }
+    }
+  ])
+
+  tags = local.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_cloudwatch_log_group" "dagster_run" {
+  name              = "/ecs/${local.name_prefix}-dagster-run"
+  retention_in_days = 30
+  tags              = local.common_tags
 }
 
 
@@ -807,6 +873,25 @@ resource "aws_iam_role_policy" "ecs_task_policy" {
         Resource = [
           aws_s3_bucket.data.arn,
           "${aws_s3_bucket.data.arn}/*",
+        ]
+      },
+      {
+        # Required by EcsRunLauncher: daemon launches ephemeral run tasks
+        Effect = "Allow"
+        Action = [
+          "ecs:RunTask",
+          "ecs:StopTask",
+          "ecs:DescribeTasks",
+        ]
+        Resource = "*"
+      },
+      {
+        # EcsRunLauncher must pass the task/execution roles to the run task
+        Effect   = "Allow"
+        Action   = "iam:PassRole"
+        Resource = [
+          aws_iam_role.ecs_task.arn,
+          aws_iam_role.ecs_execution.arn,
         ]
       }
     ]
