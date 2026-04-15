@@ -1,0 +1,31 @@
+version: 0.2
+
+# -----------------------------------------------------------------------------
+# Stage: Deploy / SchemaApply
+# Applies ClickHouse schema. Runs before ECS deploys.
+# -----------------------------------------------------------------------------
+
+phases:
+  install:
+    commands:
+      - curl -fsSL https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key | gpg --dearmor -o /usr/share/keyrings/clickhouse-keyring.gpg
+      - echo "deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg] https://packages.clickhouse.com/deb stable main" | tee /etc/apt/sources.list.d/clickhouse.list
+      - apt-get update -q && apt-get install -y -q clickhouse-client
+
+  pre_build:
+    commands:
+      - |
+        export CH_SECRET=$(aws secretsmanager get-secret-value --secret-id trading-analysis/clickhouse --region $DEPLOY_REGION --query SecretString --output text)
+        export CLICKHOUSE_HOST=$(echo $CH_SECRET | python3 -c "import sys,json; print(json.load(sys.stdin)['host'])")
+        export CLICKHOUSE_PASSWORD=$(echo $CH_SECRET | python3 -c "import sys,json; print(json.load(sys.stdin)['password'])")
+        echo "CLICKHOUSE_HOST=$CLICKHOUSE_HOST"
+
+  build:
+    commands:
+      - echo "=== Applying ClickHouse schema ==="
+      - |
+        export CH_SECRET=$(aws secretsmanager get-secret-value --secret-id trading-analysis/clickhouse --region $DEPLOY_REGION --query SecretString --output text)
+        export CLICKHOUSE_HOST=$(echo $CH_SECRET | python3 -c "import sys,json; print(json.load(sys.stdin)['host'])")
+        export CLICKHOUSE_PASSWORD=$(echo $CH_SECRET | python3 -c "import sys,json; print(json.load(sys.stdin)['password'])")
+        clickhouse-client --host "$CLICKHOUSE_HOST" --port 9440 --secure --user default --password "$CLICKHOUSE_PASSWORD" --multiquery < schemas/clickhouse_cloud.sql
+        echo "Schema applied."
