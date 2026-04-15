@@ -9,5 +9,5 @@ providers:
     editable: true
     updateIntervalSeconds: 30
     options:
-      path: /opt/bitnami/grafana/dashboards
+      path: /var/lib/grafana/dashboards
       foldersFromFilesStructure: false
