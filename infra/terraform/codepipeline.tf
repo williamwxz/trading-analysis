@@ -545,7 +545,8 @@ resource "aws_iam_role_policy" "codebuild" {
           "iam:*",
           "ec2:*"
 ,
-          "codestar-connections:UseConnection"
+          "codestar-connections:UseConnection",
+          "codestar-connections:PassConnection"
         ]
         Resource = "*"
       }
