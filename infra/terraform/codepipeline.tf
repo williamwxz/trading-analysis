@@ -164,11 +164,54 @@ resource "aws_codebuild_project" "build" {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CodeBuild — Deploy
+# CodeBuild — Schema (ClickHouse migration)
 # ─────────────────────────────────────────────────────────────────────────────
 
-resource "aws_codebuild_project" "deploy" {
-  name         = "${local.name_prefix}-deploy"
+resource "aws_codebuild_project" "schema" {
+  name         = "${local.name_prefix}-schema"
+  service_role = aws_iam_role.codebuild.arn
+  tags         = local.common_tags
+
+  artifacts {
+    type = "CODEPIPELINE"
+  }
+
+  environment {
+    compute_type = "BUILD_GENERAL1_SMALL"
+    image        = "aws/codebuild/standard:7.0"
+    type         = "LINUX_CONTAINER"
+
+    environment_variable {
+      name  = "DEPLOY_REGION"
+      value = local.deploy_region
+    }
+    environment_variable {
+      name  = "CLICKHOUSE_HOST_SECRET"
+      value = aws_secretsmanager_secret.clickhouse.arn
+      type  = "SECRETS_MANAGER"
+    }
+  }
+
+  source {
+    type      = "CODEPIPELINE"
+    buildspec = "buildspec/schema.yml"
+  }
+
+  logs_config {
+    cloudwatch_logs {
+      group_name  = "/codebuild/${local.name_prefix}-schema"
+      stream_name = "build"
+    }
+  }
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CodeBuild — Deploy Dagster
+# ─────────────────────────────────────────────────────────────────────────────
+
+resource "aws_codebuild_project" "deploy_dagster" {
+  name         = "${local.name_prefix}-deploy-dagster"
   service_role = aws_iam_role.codebuild.arn
   tags         = local.common_tags
 
@@ -191,31 +234,76 @@ resource "aws_codebuild_project" "deploy" {
     }
     environment_variable {
       name  = "ECS_CLUSTER"
-      value = "${local.name_prefix}"
+      value = local.name_prefix
     }
     environment_variable {
       name  = "ECS_SERVICE"
-      value = "${local.name_prefix}-dagster"
+      value = "trading-analysis-dagster"
     }
     environment_variable {
       name  = "IMAGE_NAME"
       value = "trading-analysis-dagster"
     }
+  }
+
+  source {
+    type      = "CODEPIPELINE"
+    buildspec = "buildspec/deploy_dagster.yml"
+  }
+
+  logs_config {
+    cloudwatch_logs {
+      group_name  = "/codebuild/${local.name_prefix}-deploy-dagster"
+      stream_name = "build"
+    }
+  }
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CodeBuild — Deploy Grafana
+# ─────────────────────────────────────────────────────────────────────────────
+
+resource "aws_codebuild_project" "deploy_grafana" {
+  name         = "${local.name_prefix}-deploy-grafana"
+  service_role = aws_iam_role.codebuild.arn
+  tags         = local.common_tags
+
+  artifacts {
+    type = "CODEPIPELINE"
+  }
+
+  environment {
+    compute_type = "BUILD_GENERAL1_SMALL"
+    image        = "aws/codebuild/standard:7.0"
+    type         = "LINUX_CONTAINER"
+
     environment_variable {
-      name  = "CLICKHOUSE_HOST_SECRET"
-      value = aws_secretsmanager_secret.clickhouse.arn
-      type  = "SECRETS_MANAGER"
+      name  = "DEPLOY_REGION"
+      value = local.deploy_region
+    }
+    environment_variable {
+      name  = "AWS_ACCOUNT_ID"
+      value = data.aws_caller_identity.current.account_id
+    }
+    environment_variable {
+      name  = "ECS_CLUSTER"
+      value = local.name_prefix
+    }
+    environment_variable {
+      name  = "GRAFANA_IMAGE_NAME"
+      value = "trading-analysis-grafana"
     }
   }
 
   source {
     type      = "CODEPIPELINE"
-    buildspec = "buildspec/deploy.yml"
+    buildspec = "buildspec/deploy_grafana.yml"
   }
 
   logs_config {
     cloudwatch_logs {
-      group_name  = "/codebuild/${local.name_prefix}-deploy"
+      group_name  = "/codebuild/${local.name_prefix}-deploy-grafana"
       stream_name = "build"
     }
   }
@@ -461,8 +549,20 @@ resource "aws_cloudwatch_log_group" "codebuild_build" {
   tags              = local.common_tags
 }
 
-resource "aws_cloudwatch_log_group" "codebuild_deploy" {
-  name              = "/codebuild/${local.name_prefix}-deploy"
+resource "aws_cloudwatch_log_group" "codebuild_schema" {
+  name              = "/codebuild/${local.name_prefix}-schema"
+  retention_in_days = 14
+  tags              = local.common_tags
+}
+
+resource "aws_cloudwatch_log_group" "codebuild_deploy_dagster" {
+  name              = "/codebuild/${local.name_prefix}-deploy-dagster"
+  retention_in_days = 14
+  tags              = local.common_tags
+}
+
+resource "aws_cloudwatch_log_group" "codebuild_deploy_grafana" {
+  name              = "/codebuild/${local.name_prefix}-deploy-grafana"
   retention_in_days = 14
   tags              = local.common_tags
 }
