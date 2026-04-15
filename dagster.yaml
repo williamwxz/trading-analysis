@@ -21,12 +21,15 @@ run_launcher:
   config:
     task_definition: trading-analysis-dagster-run
     container_name: run
-    assign_public_ip: false
-    security_group_ids:
-      - env: ECS_SECURITY_GROUP_ID
-    subnets:
-      - env: ECS_SUBNET_ID_0
-      - env: ECS_SUBNET_ID_1
+    run_task_kwargs:
+      networkConfiguration:
+        awsvpcConfiguration:
+          assignPublicIp: DISABLED
+          securityGroups:
+            - env: ECS_SECURITY_GROUP_ID
+          subnets:
+            - env: ECS_SUBNET_ID_0
+            - env: ECS_SUBNET_ID_1
     run_ecs_tags:
       - key: "project"
         value: "trading-analysis"
