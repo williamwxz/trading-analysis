@@ -243,8 +243,10 @@ def _refresh_pnl_partitioned(context, target_table: str, source_table: str, labe
     context.log.info(f"Backfilling {label} PnL for {date_str}")
 
     # Idempotency: Clean partition
-    execute(f"DELETE FROM analytics.{target_table} WHERE ts >= toDateTime('{start_ts}') AND ts < toDateTime('{end_ts}') AND source='{label}'", client)
-    
+    # Wrap ts in toDateTime() on both sides to handle rows that may have been
+    # inserted with ts as String (type mismatch causes NO_COMMON_TYPE otherwise).
+    execute(f"DELETE FROM analytics.{target_table} WHERE toDateTime(ts) >= toDateTime('{start_ts}') AND toDateTime(ts) < toDateTime('{end_ts}') AND source='{label}'", client)
+
     underlyings = _get_underlyings(source_table)
     total_rows = 0
     for underlying in underlyings:
@@ -252,7 +254,7 @@ def _refresh_pnl_partitioned(context, target_table: str, source_table: str, labe
         sql = f"""\
         SELECT
             strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe,
-            argMin(weighting, revision_ts) AS weighting, toString(ts) AS ts,
+            argMin(weighting, revision_ts) AS weighting, toString(ts) AS ts_str,
             JSONExtractFloat(argMin(row_json, revision_ts), 'position') AS position,
             JSONExtractFloat(argMin(row_json, revision_ts), 'price') AS bar_price,
             JSONExtractFloat(argMin(row_json, revision_ts), 'final_signal') AS final_signal,
@@ -265,7 +267,10 @@ def _refresh_pnl_partitioned(context, target_table: str, source_table: str, labe
         """
         rows_dict = query_dicts(sql, client)
         if not rows_dict: continue
-        
+        # Rename ts_str → ts so downstream compute functions find the expected key
+        for r in rows_dict:
+            r["ts"] = r.pop("ts_str")
+
         # We still need anchors from the end of the previous day
         anchors = fetch_anchors(target_table, underlying)
         prices = fetch_prices(underlying, start_ts, end_ts)
