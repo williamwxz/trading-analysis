@@ -26,3 +26,55 @@ jobs:
 
       - name: Run tests
         run: pytest tests/ -v --tb=short -m "not integration"
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      image_uri: ${{ steps.export.outputs.image_uri }}
+      grafana_image_uri: ${{ steps.export.outputs.grafana_image_uri }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.GHA_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Dagster image
+        env:
+          IMAGE_URI: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/trading-analysis-dagster:${{ github.sha }}
+          IMAGE_LATEST: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/trading-analysis-dagster:latest
+        run: |
+          docker pull $IMAGE_LATEST || true
+          docker build --cache-from $IMAGE_LATEST --build-arg BUILDKIT_INLINE_CACHE=1 \
+            -t $IMAGE_URI -t $IMAGE_LATEST .
+          docker push $IMAGE_URI
+          docker push $IMAGE_LATEST
+
+      - name: Build and push Grafana image
+        env:
+          GRAFANA_IMAGE_URI: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/trading-analysis-grafana:${{ github.sha }}
+          GRAFANA_IMAGE_LATEST: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/trading-analysis-grafana:latest
+        run: |
+          docker pull $GRAFANA_IMAGE_LATEST || true
+          docker build --cache-from $GRAFANA_IMAGE_LATEST --build-arg BUILDKIT_INLINE_CACHE=1 \
+            -f Dockerfile.grafana -t $GRAFANA_IMAGE_URI -t $GRAFANA_IMAGE_LATEST .
+          docker push $GRAFANA_IMAGE_URI
+          docker push $GRAFANA_IMAGE_LATEST
+
+      - name: Export image URIs
+        id: export
+        env:
+          IMAGE_URI: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/trading-analysis-dagster:${{ github.sha }}
+          GRAFANA_IMAGE_URI: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/trading-analysis-grafana:${{ github.sha }}
+        run: |
+          echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
+          echo "grafana_image_uri=$GRAFANA_IMAGE_URI" >> $GITHUB_OUTPUT
