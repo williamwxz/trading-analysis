@@ -115,7 +115,8 @@
           "refId": "C",
           "format": 1
         }
-      ]
+      ],
+      "hide": true
     },
     {
       "datasource": {
@@ -204,7 +205,8 @@
           "refId": "C",
           "format": 1
         }
-      ]
+      ],
+      "hide": true
     },
     {
       "datasource": {
@@ -312,7 +314,8 @@
             }
           }
         }
-      ]
+      ],
+      "hide": true
     },
     {
       "datasource": {
@@ -402,7 +405,8 @@
             }
           }
         }
-      ]
+      ],
+      "hide": true
     },
     {
       "datasource": {

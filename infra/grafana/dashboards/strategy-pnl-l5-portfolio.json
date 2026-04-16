@@ -122,7 +122,8 @@
           "refId": "C",
           "format": 1
         }
-      ]
+      ],
+      "hide": true
     },
     {
       "datasource": {
@@ -212,7 +213,8 @@
           "refId": "C",
           "format": 1
         }
-      ]
+      ],
+      "hide": true
     },
     {
       "datasource": {
@@ -305,7 +307,8 @@
             }
           }
         }
-      ]
+      ],
+      "hide": true
     },
     {
       "datasource": {
@@ -396,7 +399,8 @@
           "refId": "C",
           "format": 1
         }
-      ]
+      ],
+      "hide": true
     },
     {
       "datasource": {
@@ -486,7 +490,8 @@
             }
           }
         }
-      ]
+      ],
+      "hide": true
     },
     {
       "datasource": {
@@ -560,7 +565,8 @@
           },
           "rawSql": "SELECT toStartOfMinute(ts) AS time, countDistinct(strategy_table_name) AS `Real Trade Strategies` FROM analytics.strategy_pnl_${resolution}_real_trade_v2 FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time"
         }
-      ]
+      ],
+      "hide": true
     },
     {
       "datasource": {
@@ -640,7 +646,8 @@
           },
           "rawSql": "SELECT time, round(prod_pnl - bt_pnl, 6) AS `Prod - BT Delta` FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(cumulative_pnl * weighting) WHEN '${mode}' = 'equal' THEN avg(cumulative_pnl) ELSE sum(cumulative_pnl * weighting) / nullIf(sum(weighting), 0) END AS prod_pnl FROM analytics.strategy_pnl_${resolution}_prod_v2 FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time) AS p JOIN (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(cumulative_pnl * weighting) WHEN '${mode}' = 'equal' THEN avg(cumulative_pnl) ELSE sum(cumulative_pnl * weighting) / nullIf(sum(weighting), 0) END AS bt_pnl FROM analytics.strategy_pnl_${resolution}_bt_v2 FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time) AS b USING (time) ORDER BY time"
         }
-      ]
+      ],
+      "hide": true
     }
   ],
   "templating": {
