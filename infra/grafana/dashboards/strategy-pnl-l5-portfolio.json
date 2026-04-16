@@ -87,7 +87,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "clickhouse"
           },
-          "rawSql": "SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(cumulative_pnl * weighting) WHEN '${mode}' = 'equal' THEN avg(cumulative_pnl) ELSE sum(cumulative_pnl * weighting) / nullIf(sum(weighting), 0) END AS `Production PnL` FROM analytics.strategy_pnl_${resolution}_prod FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
+          "rawSql": "SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(cumulative_pnl * weighting) WHEN '${mode}' = 'equal' THEN avg(cumulative_pnl) ELSE sum(cumulative_pnl * weighting) / nullIf(sum(weighting), 0) END AS `Production PnL` FROM analytics.strategy_pnl_${resolution}_prod_v2 FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
           "refId": "A",
           "format": 1,
           "queryType": "sql",
@@ -102,7 +102,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "clickhouse"
           },
-          "rawSql": "SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(cumulative_pnl * weighting) WHEN '${mode}' = 'equal' THEN avg(cumulative_pnl) ELSE sum(cumulative_pnl * weighting) / nullIf(sum(weighting), 0) END AS `Backtest PnL`, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(benchmark * weighting) WHEN '${mode}' = 'equal' THEN avg(benchmark) ELSE sum(benchmark * weighting) / nullIf(sum(weighting), 0) END AS `Benchmark` FROM analytics.strategy_pnl_${resolution}_bt FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
+          "rawSql": "SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(cumulative_pnl * weighting) WHEN '${mode}' = 'equal' THEN avg(cumulative_pnl) ELSE sum(cumulative_pnl * weighting) / nullIf(sum(weighting), 0) END AS `Backtest PnL`, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(benchmark * weighting) WHEN '${mode}' = 'equal' THEN avg(benchmark) ELSE sum(benchmark * weighting) / nullIf(sum(weighting), 0) END AS `Benchmark` FROM analytics.strategy_pnl_${resolution}_bt_v2 FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
           "refId": "B",
           "format": 1,
           "queryType": "sql",
@@ -118,7 +118,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "clickhouse"
           },
-          "rawSql": "SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(cumulative_pnl * weighting) WHEN '${mode}' = 'equal' THEN avg(cumulative_pnl) ELSE sum(cumulative_pnl * weighting) / nullIf(sum(weighting), 0) END AS `Real Trade PnL` FROM analytics.strategy_pnl_${resolution}_real_trade FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
+          "rawSql": "SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(cumulative_pnl * weighting) WHEN '${mode}' = 'equal' THEN avg(cumulative_pnl) ELSE sum(cumulative_pnl * weighting) / nullIf(sum(weighting), 0) END AS `Real Trade PnL` FROM analytics.strategy_pnl_${resolution}_real_trade_v2 FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
           "refId": "C",
           "format": 1
         }
@@ -177,7 +177,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "clickhouse"
           },
-          "rawSql": "SELECT time, sum(period_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Production PnL` FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(period_return * weighting) WHEN '${mode}' = 'equal' THEN avg(period_return) ELSE sum(period_return * weighting) / nullIf(sum(weighting), 0) END AS period_pnl FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS period_return FROM analytics.strategy_pnl_${resolution}_prod FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) GROUP BY time ORDER BY time) ORDER BY time",
+          "rawSql": "SELECT time, sum(period_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Production PnL` FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(period_return * weighting) WHEN '${mode}' = 'equal' THEN avg(period_return) ELSE sum(period_return * weighting) / nullIf(sum(weighting), 0) END AS period_pnl FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS period_return FROM analytics.strategy_pnl_${resolution}_prod_v2 FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) GROUP BY time ORDER BY time) ORDER BY time",
           "refId": "A",
           "format": 1,
           "queryType": "sql",
@@ -192,7 +192,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "clickhouse"
           },
-          "rawSql": "SELECT time, `Backtest PnL`, `Benchmark` FROM (SELECT time, sum(period_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Backtest PnL`, sum(period_bm) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Benchmark` FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(period_return * weighting) WHEN '${mode}' = 'equal' THEN avg(period_return) ELSE sum(period_return * weighting) / nullIf(sum(weighting), 0) END AS period_pnl, sum(period_bm_return * weighting) / nullIf(sum(weighting), 0) AS period_bm FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS period_return, (benchmark - first_value(benchmark) OVER (PARTITION BY strategy_table_name ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)) / (1 + first_value(benchmark) OVER (PARTITION BY strategy_table_name ORDER BY ts)) AS period_bm_return FROM analytics.strategy_pnl_${resolution}_bt FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) GROUP BY time ORDER BY time)) ORDER BY time",
+          "rawSql": "SELECT time, `Backtest PnL`, `Benchmark` FROM (SELECT time, sum(period_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Backtest PnL`, sum(period_bm) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Benchmark` FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(period_return * weighting) WHEN '${mode}' = 'equal' THEN avg(period_return) ELSE sum(period_return * weighting) / nullIf(sum(weighting), 0) END AS period_pnl, sum(period_bm_return * weighting) / nullIf(sum(weighting), 0) AS period_bm FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS period_return, (benchmark - first_value(benchmark) OVER (PARTITION BY strategy_table_name ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)) / (1 + first_value(benchmark) OVER (PARTITION BY strategy_table_name ORDER BY ts)) AS period_bm_return FROM analytics.strategy_pnl_${resolution}_bt_v2 FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) GROUP BY time ORDER BY time)) ORDER BY time",
           "refId": "B",
           "format": 1,
           "queryType": "sql",
@@ -208,7 +208,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "clickhouse"
           },
-          "rawSql": "SELECT time, sum(period_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Real Trade PnL` FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(period_return * weighting) WHEN '${mode}' = 'equal' THEN avg(period_return) ELSE sum(period_return * weighting) / nullIf(sum(weighting), 0) END AS period_pnl FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS period_return FROM analytics.strategy_pnl_${resolution}_real_trade FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) GROUP BY time ORDER BY time) ORDER BY time",
+          "rawSql": "SELECT time, sum(period_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Real Trade PnL` FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(period_return * weighting) WHEN '${mode}' = 'equal' THEN avg(period_return) ELSE sum(period_return * weighting) / nullIf(sum(weighting), 0) END AS period_pnl FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS period_return FROM analytics.strategy_pnl_${resolution}_real_trade_v2 FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) GROUP BY time ORDER BY time) ORDER BY time",
           "refId": "C",
           "format": 1
         }
@@ -264,7 +264,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "clickhouse"
           },
-          "rawSql": "SELECT time, agg_pnl - max(agg_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Production Drawdown` FROM (SELECT time, sum(period_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS agg_pnl FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(period_return * weighting) WHEN '${mode}' = 'equal' THEN avg(period_return) ELSE sum(period_return * weighting) / nullIf(sum(weighting), 0) END AS period_pnl FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS period_return FROM analytics.strategy_pnl_${resolution}_prod FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) GROUP BY time ORDER BY time)) ORDER BY time",
+          "rawSql": "SELECT time, agg_pnl - max(agg_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Production Drawdown` FROM (SELECT time, sum(period_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS agg_pnl FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(period_return * weighting) WHEN '${mode}' = 'equal' THEN avg(period_return) ELSE sum(period_return * weighting) / nullIf(sum(weighting), 0) END AS period_pnl FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS period_return FROM analytics.strategy_pnl_${resolution}_prod_v2 FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) GROUP BY time ORDER BY time)) ORDER BY time",
           "refId": "A",
           "format": 1,
           "queryType": "sql",
@@ -279,7 +279,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "clickhouse"
           },
-          "rawSql": "SELECT time, agg_pnl - max(agg_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Backtest Drawdown`, agg_bm - max(agg_bm) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Benchmark Drawdown` FROM (SELECT time, sum(period_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS agg_pnl, sum(period_bm) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS agg_bm FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(period_return * weighting) WHEN '${mode}' = 'equal' THEN avg(period_return) ELSE sum(period_return * weighting) / nullIf(sum(weighting), 0) END AS period_pnl, sum(period_bm_return * weighting) / nullIf(sum(weighting), 0) AS period_bm FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS period_return, (benchmark - first_value(benchmark) OVER (PARTITION BY strategy_table_name ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)) / (1 + first_value(benchmark) OVER (PARTITION BY strategy_table_name ORDER BY ts)) AS period_bm_return FROM analytics.strategy_pnl_${resolution}_bt FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) GROUP BY time ORDER BY time)) ORDER BY time",
+          "rawSql": "SELECT time, agg_pnl - max(agg_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Backtest Drawdown`, agg_bm - max(agg_bm) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Benchmark Drawdown` FROM (SELECT time, sum(period_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS agg_pnl, sum(period_bm) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS agg_bm FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(period_return * weighting) WHEN '${mode}' = 'equal' THEN avg(period_return) ELSE sum(period_return * weighting) / nullIf(sum(weighting), 0) END AS period_pnl, sum(period_bm_return * weighting) / nullIf(sum(weighting), 0) AS period_bm FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS period_return, (benchmark - first_value(benchmark) OVER (PARTITION BY strategy_table_name ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)) / (1 + first_value(benchmark) OVER (PARTITION BY strategy_table_name ORDER BY ts)) AS period_bm_return FROM analytics.strategy_pnl_${resolution}_bt_v2 FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) GROUP BY time ORDER BY time)) ORDER BY time",
           "refId": "B",
           "format": 1,
           "queryType": "sql",
@@ -295,7 +295,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "clickhouse"
           },
-          "rawSql": "SELECT time, agg_pnl - max(agg_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Real Trade Drawdown` FROM (SELECT time, sum(period_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS agg_pnl FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(period_return * weighting) WHEN '${mode}' = 'equal' THEN avg(period_return) ELSE sum(period_return * weighting) / nullIf(sum(weighting), 0) END AS period_pnl FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS period_return FROM analytics.strategy_pnl_${resolution}_real_trade FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) GROUP BY time ORDER BY time)) ORDER BY time",
+          "rawSql": "SELECT time, agg_pnl - max(agg_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Real Trade Drawdown` FROM (SELECT time, sum(period_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS agg_pnl FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(period_return * weighting) WHEN '${mode}' = 'equal' THEN avg(period_return) ELSE sum(period_return * weighting) / nullIf(sum(weighting), 0) END AS period_pnl FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS period_return FROM analytics.strategy_pnl_${resolution}_real_trade_v2 FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) GROUP BY time ORDER BY time)) ORDER BY time",
           "refId": "C",
           "format": 1,
           "queryType": "sql",
@@ -361,7 +361,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "clickhouse"
           },
-          "rawSql": "SELECT time, sum(period_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Production PnL` FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(period_return * weighting) WHEN '${mode}' = 'equal' THEN avg(period_return) ELSE sum(period_return * weighting) / nullIf(sum(weighting), 0) END AS period_pnl FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS period_return FROM analytics.strategy_pnl_${resolution}_prod FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) GROUP BY time ORDER BY time) ORDER BY time",
+          "rawSql": "SELECT time, sum(period_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Production PnL` FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(period_return * weighting) WHEN '${mode}' = 'equal' THEN avg(period_return) ELSE sum(period_return * weighting) / nullIf(sum(weighting), 0) END AS period_pnl FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS period_return FROM analytics.strategy_pnl_${resolution}_prod_v2 FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) GROUP BY time ORDER BY time) ORDER BY time",
           "refId": "A",
           "format": 1,
           "queryType": "sql",
@@ -376,7 +376,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "clickhouse"
           },
-          "rawSql": "SELECT time, `Backtest PnL`, `Benchmark` FROM (SELECT time, sum(period_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Backtest PnL`, sum(period_bm) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Benchmark` FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(period_return * weighting) WHEN '${mode}' = 'equal' THEN avg(period_return) ELSE sum(period_return * weighting) / nullIf(sum(weighting), 0) END AS period_pnl, sum(period_bm_return * weighting) / nullIf(sum(weighting), 0) AS period_bm FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS period_return, (benchmark - first_value(benchmark) OVER (PARTITION BY strategy_table_name ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)) / (1 + first_value(benchmark) OVER (PARTITION BY strategy_table_name ORDER BY ts)) AS period_bm_return FROM analytics.strategy_pnl_${resolution}_bt FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) GROUP BY time ORDER BY time)) ORDER BY time",
+          "rawSql": "SELECT time, `Backtest PnL`, `Benchmark` FROM (SELECT time, sum(period_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Backtest PnL`, sum(period_bm) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Benchmark` FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(period_return * weighting) WHEN '${mode}' = 'equal' THEN avg(period_return) ELSE sum(period_return * weighting) / nullIf(sum(weighting), 0) END AS period_pnl, sum(period_bm_return * weighting) / nullIf(sum(weighting), 0) AS period_bm FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS period_return, (benchmark - first_value(benchmark) OVER (PARTITION BY strategy_table_name ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)) / (1 + first_value(benchmark) OVER (PARTITION BY strategy_table_name ORDER BY ts)) AS period_bm_return FROM analytics.strategy_pnl_${resolution}_bt_v2 FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) GROUP BY time ORDER BY time)) ORDER BY time",
           "refId": "B",
           "format": 1,
           "queryType": "sql",
@@ -392,7 +392,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "clickhouse"
           },
-          "rawSql": "SELECT time, sum(period_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Real Trade PnL` FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(period_return * weighting) WHEN '${mode}' = 'equal' THEN avg(period_return) ELSE sum(period_return * weighting) / nullIf(sum(weighting), 0) END AS period_pnl FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS period_return FROM analytics.strategy_pnl_${resolution}_real_trade FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) GROUP BY time ORDER BY time) ORDER BY time",
+          "rawSql": "SELECT time, sum(period_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Real Trade PnL` FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(period_return * weighting) WHEN '${mode}' = 'equal' THEN avg(period_return) ELSE sum(period_return * weighting) / nullIf(sum(weighting), 0) END AS period_pnl FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS period_return FROM analytics.strategy_pnl_${resolution}_real_trade_v2 FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) GROUP BY time ORDER BY time) ORDER BY time",
           "refId": "C",
           "format": 1
         }
@@ -446,7 +446,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "clickhouse"
           },
-          "rawSql": "SELECT $__timeInterval(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(position * weighting) WHEN '${mode}' = 'equal' THEN avg(position) ELSE sum(position * weighting) / nullIf(sum(weighting), 0) END AS `Production Position` FROM analytics.strategy_pnl_${resolution}_prod FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
+          "rawSql": "SELECT $__timeInterval(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(position * weighting) WHEN '${mode}' = 'equal' THEN avg(position) ELSE sum(position * weighting) / nullIf(sum(weighting), 0) END AS `Production Position` FROM analytics.strategy_pnl_${resolution}_prod_v2 FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
           "refId": "A",
           "format": 1,
           "queryType": "sql",
@@ -461,7 +461,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "clickhouse"
           },
-          "rawSql": "SELECT $__timeInterval(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(position * weighting) WHEN '${mode}' = 'equal' THEN avg(position) ELSE sum(position * weighting) / nullIf(sum(weighting), 0) END AS `Backtest Position` FROM analytics.strategy_pnl_${resolution}_bt FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
+          "rawSql": "SELECT $__timeInterval(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(position * weighting) WHEN '${mode}' = 'equal' THEN avg(position) ELSE sum(position * weighting) / nullIf(sum(weighting), 0) END AS `Backtest Position` FROM analytics.strategy_pnl_${resolution}_bt_v2 FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
           "refId": "B",
           "format": 1,
           "queryType": "sql",
@@ -476,7 +476,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "clickhouse"
           },
-          "rawSql": "SELECT $__timeInterval(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(position * weighting) WHEN '${mode}' = 'equal' THEN avg(position) ELSE sum(position * weighting) / nullIf(sum(weighting), 0) END AS `Real Trade Position` FROM analytics.strategy_pnl_${resolution}_real_trade FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
+          "rawSql": "SELECT $__timeInterval(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(position * weighting) WHEN '${mode}' = 'equal' THEN avg(position) ELSE sum(position * weighting) / nullIf(sum(weighting), 0) END AS `Real Trade Position` FROM analytics.strategy_pnl_${resolution}_real_trade_v2 FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
           "refId": "C",
           "format": 1,
           "queryType": "sql",
@@ -542,7 +542,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "clickhouse"
           },
-          "rawSql": "SELECT toStartOfMinute(ts) AS time, countDistinct(strategy_table_name) AS `BT Strategies` FROM analytics.strategy_pnl_${resolution}_bt FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time"
+          "rawSql": "SELECT toStartOfMinute(ts) AS time, countDistinct(strategy_table_name) AS `BT Strategies` FROM analytics.strategy_pnl_${resolution}_bt_v2 FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time"
         },
         {
           "refId": "B",
@@ -550,7 +550,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "clickhouse"
           },
-          "rawSql": "SELECT toStartOfMinute(ts) AS time, countDistinct(strategy_table_name) AS `Prod Strategies` FROM analytics.strategy_pnl_${resolution}_prod FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time"
+          "rawSql": "SELECT toStartOfMinute(ts) AS time, countDistinct(strategy_table_name) AS `Prod Strategies` FROM analytics.strategy_pnl_${resolution}_prod_v2 FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time"
         },
         {
           "refId": "C",
@@ -558,7 +558,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "clickhouse"
           },
-          "rawSql": "SELECT toStartOfMinute(ts) AS time, countDistinct(strategy_table_name) AS `Real Trade Strategies` FROM analytics.strategy_pnl_${resolution}_real_trade FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time"
+          "rawSql": "SELECT toStartOfMinute(ts) AS time, countDistinct(strategy_table_name) AS `Real Trade Strategies` FROM analytics.strategy_pnl_${resolution}_real_trade_v2 FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time"
         }
       ]
     },
@@ -638,7 +638,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "clickhouse"
           },
-          "rawSql": "SELECT time, round(prod_pnl - bt_pnl, 6) AS `Prod - BT Delta` FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(cumulative_pnl * weighting) WHEN '${mode}' = 'equal' THEN avg(cumulative_pnl) ELSE sum(cumulative_pnl * weighting) / nullIf(sum(weighting), 0) END AS prod_pnl FROM analytics.strategy_pnl_${resolution}_prod FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time) AS p JOIN (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(cumulative_pnl * weighting) WHEN '${mode}' = 'equal' THEN avg(cumulative_pnl) ELSE sum(cumulative_pnl * weighting) / nullIf(sum(weighting), 0) END AS bt_pnl FROM analytics.strategy_pnl_${resolution}_bt FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time) AS b USING (time) ORDER BY time"
+          "rawSql": "SELECT time, round(prod_pnl - bt_pnl, 6) AS `Prod - BT Delta` FROM (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(cumulative_pnl * weighting) WHEN '${mode}' = 'equal' THEN avg(cumulative_pnl) ELSE sum(cumulative_pnl * weighting) / nullIf(sum(weighting), 0) END AS prod_pnl FROM analytics.strategy_pnl_${resolution}_prod_v2 FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time) AS p JOIN (SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(cumulative_pnl * weighting) WHEN '${mode}' = 'equal' THEN avg(cumulative_pnl) ELSE sum(cumulative_pnl * weighting) / nullIf(sum(weighting), 0) END AS bt_pnl FROM analytics.strategy_pnl_${resolution}_bt_v2 FINAL WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time) AS b USING (time) ORDER BY time"
         }
       ]
     }
