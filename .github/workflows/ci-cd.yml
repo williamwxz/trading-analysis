@@ -34,8 +34,8 @@ jobs:
       id-token: write
       contents: read
     outputs:
-      image_uri: ${{ steps.export.outputs.image_uri }}
-      grafana_image_uri: ${{ steps.export.outputs.grafana_image_uri }}
+      image_uri: ${{ steps.build_dagster.outputs.image_uri }}
+      grafana_image_uri: ${{ steps.build_grafana.outputs.grafana_image_uri }}
     steps:
       - uses: actions/checkout@v4
 
@@ -48,33 +48,38 @@ jobs:
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Build and push Dagster image
+        id: build_dagster
         env:
-          IMAGE_URI: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/trading-analysis-dagster:${{ github.sha }}
-          IMAGE_LATEST: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/trading-analysis-dagster:latest
+          REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
         run: |
-          docker pull $IMAGE_LATEST || true
-          docker build --cache-from $IMAGE_LATEST --build-arg BUILDKIT_INLINE_CACHE=1 \
-            -t $IMAGE_URI -t $IMAGE_LATEST .
-          docker push $IMAGE_URI
-          docker push $IMAGE_LATEST
+          IMAGE_URI=$REGISTRY/trading-analysis-dagster:${{ github.sha }}
+          IMAGE_LATEST=$REGISTRY/trading-analysis-dagster:latest
+          IMAGE_CACHE=$REGISTRY/trading-analysis-dagster:cache
+          docker buildx build \
+            --cache-from type=registry,ref=$IMAGE_CACHE \
+            --cache-to   type=registry,ref=$IMAGE_CACHE,mode=max \
+            --provenance=false \
+            -t $IMAGE_URI -t $IMAGE_LATEST \
+            --push .
+          echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
 
       - name: Build and push Grafana image
+        id: build_grafana
         env:
-          GRAFANA_IMAGE_URI: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/trading-analysis-grafana:${{ github.sha }}
-          GRAFANA_IMAGE_LATEST: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/trading-analysis-grafana:latest
+          REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
         run: |
-          docker pull $GRAFANA_IMAGE_LATEST || true
-          docker build --cache-from $GRAFANA_IMAGE_LATEST --build-arg BUILDKIT_INLINE_CACHE=1 \
-            -f Dockerfile.grafana -t $GRAFANA_IMAGE_URI -t $GRAFANA_IMAGE_LATEST .
-          docker push $GRAFANA_IMAGE_URI
-          docker push $GRAFANA_IMAGE_LATEST
-
-      - name: Export image URIs
-        id: export
-        env:
-          IMAGE_URI: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/trading-analysis-dagster:${{ github.sha }}
-          GRAFANA_IMAGE_URI: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/trading-analysis-grafana:${{ github.sha }}
-        run: |
-          echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
+          GRAFANA_IMAGE_URI=$REGISTRY/trading-analysis-grafana:${{ github.sha }}
+          GRAFANA_IMAGE_LATEST=$REGISTRY/trading-analysis-grafana:latest
+          GRAFANA_IMAGE_CACHE=$REGISTRY/trading-analysis-grafana:cache
+          docker buildx build \
+            --cache-from type=registry,ref=$GRAFANA_IMAGE_CACHE \
+            --cache-to   type=registry,ref=$GRAFANA_IMAGE_CACHE,mode=max \
+            --provenance=false \
+            -f Dockerfile.grafana \
+            -t $GRAFANA_IMAGE_URI -t $GRAFANA_IMAGE_LATEST \
+            --push .
           echo "grafana_image_uri=$GRAFANA_IMAGE_URI" >> $GITHUB_OUTPUT
