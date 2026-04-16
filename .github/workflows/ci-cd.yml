@@ -101,14 +101,15 @@ jobs:
 
       - name: Install clickhouse-client
         run: |
-          curl -fsSL https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key \
-            | gpg --dearmor -o /usr/share/keyrings/clickhouse-keyring.gpg
+          curl -fsSL 'https://packages.clickhouse.com/deb/archive-keyring.gpg' \
+            -o /usr/share/keyrings/clickhouse-keyring.gpg
           echo "deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg] https://packages.clickhouse.com/deb stable main" \
             | sudo tee /etc/apt/sources.list.d/clickhouse.list
           sudo apt-get update -q && sudo apt-get install -y -q clickhouse-client
 
       - name: Apply ClickHouse schema
         run: |
+          set -eu
           CH_SECRET=$(aws secretsmanager get-secret-value \
             --secret-id trading-analysis/clickhouse \
             --region ${{ secrets.AWS_REGION }} \
