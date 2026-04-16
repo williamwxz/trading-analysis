@@ -83,3 +83,44 @@ jobs:
             -t $GRAFANA_IMAGE_URI -t $GRAFANA_IMAGE_LATEST \
             --push .
           echo "grafana_image_uri=$GRAFANA_IMAGE_URI" >> $GITHUB_OUTPUT
+
+  schema:
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.GHA_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Install clickhouse-client
+        run: |
+          curl -fsSL https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key \
+            | gpg --dearmor -o /usr/share/keyrings/clickhouse-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg] https://packages.clickhouse.com/deb stable main" \
+            | sudo tee /etc/apt/sources.list.d/clickhouse.list
+          sudo apt-get update -q && sudo apt-get install -y -q clickhouse-client
+
+      - name: Apply ClickHouse schema
+        run: |
+          CH_SECRET=$(aws secretsmanager get-secret-value \
+            --secret-id trading-analysis/clickhouse \
+            --region ${{ secrets.AWS_REGION }} \
+            --query SecretString --output text)
+          CLICKHOUSE_HOST=$(echo $CH_SECRET | python3 -c "import sys,json; print(json.load(sys.stdin)['host'])")
+          CLICKHOUSE_PASSWORD=$(echo $CH_SECRET | python3 -c "import sys,json; print(json.load(sys.stdin)['password'])")
+          unset CH_SECRET
+          clickhouse-client \
+            --host "$CLICKHOUSE_HOST" \
+            --port 9440 \
+            --secure \
+            --user default \
+            --password "$CLICKHOUSE_PASSWORD" \
+            --multiquery < schemas/clickhouse_cloud.sql
+          echo "Schema applied."
