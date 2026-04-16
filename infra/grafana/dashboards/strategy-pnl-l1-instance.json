@@ -85,7 +85,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "clickhouse"
           },
-          "rawSql": "SELECT toStartOfFiveMinutes(ts) AS time, strategy_table_name, argMax(cumulative_pnl, ts) AS cumulative_pnl FROM analytics.strategy_pnl_${resolution}_prod WHERE strategy_id = ${strategy_id_derived} AND underlying = '${underlying_derived}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time, strategy_table_name ORDER BY time",
+          "rawSql": "SELECT toStartOfFiveMinutes(ts) AS time, strategy_table_name, argMax(cumulative_pnl, ts) AS cumulative_pnl FROM analytics.strategy_pnl_${resolution}_prod WHERE (empty('${strategy_id_derived}') OR strategy_id = ${strategy_id_derived}) AND (empty('${underlying_derived}') OR underlying = '${underlying_derived}') AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time, strategy_table_name ORDER BY time",
           "refId": "A",
           "format": 0,
           "queryType": "sql",
@@ -100,7 +100,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "clickhouse"
           },
-          "rawSql": "SELECT toStartOfFiveMinutes(ts) AS time, strategy_table_name, argMax(cumulative_pnl, ts) AS cumulative_pnl FROM analytics.strategy_pnl_${resolution}_real_trade WHERE strategy_id = ${strategy_id_derived} AND underlying = '${underlying_derived}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time, strategy_table_name ORDER BY time",
+          "rawSql": "SELECT toStartOfFiveMinutes(ts) AS time, strategy_table_name, argMax(cumulative_pnl, ts) AS cumulative_pnl FROM analytics.strategy_pnl_${resolution}_real_trade WHERE (empty('${strategy_id_derived}') OR strategy_id = ${strategy_id_derived}) AND (empty('${underlying_derived}') OR underlying = '${underlying_derived}') AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time, strategy_table_name ORDER BY time",
           "refId": "C",
           "format": 0
         }
@@ -169,7 +169,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "clickhouse"
           },
-          "rawSql": "WITH raw AS (SELECT toStartOfFiveMinutes(ts) AS time, strategy_table_name, argMax(cumulative_pnl, ts) AS pnl FROM analytics.strategy_pnl_${resolution}_bt WHERE strategy_id = ${strategy_id_derived} AND underlying = '${underlying_derived}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time, strategy_table_name) SELECT time, strategy_table_name, pnl - first_value(pnl) OVER (PARTITION BY strategy_table_name ORDER BY time) AS cumulative_pnl FROM raw ORDER BY time",
+          "rawSql": "WITH raw AS (SELECT toStartOfFiveMinutes(ts) AS time, strategy_table_name, argMax(cumulative_pnl, ts) AS pnl FROM analytics.strategy_pnl_${resolution}_bt WHERE (empty('${strategy_id_derived}') OR strategy_id = ${strategy_id_derived}) AND (empty('${underlying_derived}') OR underlying = '${underlying_derived}') AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time, strategy_table_name) SELECT time, strategy_table_name, pnl - first_value(pnl) OVER (PARTITION BY strategy_table_name ORDER BY time) AS cumulative_pnl FROM raw ORDER BY time",
           "refId": "A",
           "format": 0,
           "queryType": "sql",
@@ -457,7 +457,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "clickhouse"
           },
-          "rawSql": "SELECT time, agg_pnl - max(agg_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Real Trade Drawdown` FROM (SELECT toStartOfMinute(ts) AS time, sum(p * weighting) / nullIf(sum(weighting), 0) AS agg_pnl FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts) AS p FROM analytics.strategy_pnl_${resolution}_real_trade FINAL WHERE strategy_id = ${strategy_id_derived} AND underlying = '${underlying_derived}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) GROUP BY time) ORDER BY time",
+          "rawSql": "SELECT time, agg_pnl - max(agg_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Real Trade Drawdown` FROM (SELECT toStartOfMinute(ts) AS time, sum(p * weighting) / nullIf(sum(weighting), 0) AS agg_pnl FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts) AS p FROM analytics.strategy_pnl_${resolution}_real_trade FINAL WHERE (empty('${strategy_id_derived}') OR strategy_id = ${strategy_id_derived}) AND (empty('${underlying_derived}') OR underlying = '${underlying_derived}') AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) GROUP BY time) ORDER BY time",
           "refId": "C",
           "format": 1,
           "queryType": "sql",
