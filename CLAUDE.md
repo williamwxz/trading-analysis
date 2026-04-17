@@ -115,12 +115,148 @@ Schema lives in `schemas/clickhouse_cloud.sql` (apply once). No `Replicated*` pr
 
 ## CI/CD
 
-AWS CodePipeline triggers automatically on push to `main`. Stages:
-1. **Test** (`buildspec/test.yml`): `pytest tests/ -v --tb=short`
-2. **Build** (`buildspec/build.yml`): builds two Docker images (main + Grafana), pushes to ECR with both commit-SHA and `:latest` tags
-3. **Deploy** (`buildspec/deploy.yml`): `terraform apply`, updates ECS task definitions
+GitHub Actions drives all CI/CD. Workflows live in `.github/workflows/`.
 
-VPC NAT Gateway provides a static outbound IP (`18.182.133.240`) — needed for ClickHouse Cloud IP allowlisting.
+| Workflow | Trigger | Stages |
+|----------|---------|--------|
+| `ci-cd.yml` | Push to `main` | test → build → schema + deploy-dagster + deploy-grafana (parallel) |
+| `terraform.yml` | Manual (`workflow_dispatch`) | plan (always) → apply (if `auto_approve=true`) |
+
+AWS auth uses GitHub OIDC — no static credentials stored in GitHub. Each job that needs AWS access declares `permissions: id-token: write` at the job level and assumes the `trading-analysis-github-actions` IAM role via `aws-actions/configure-aws-credentials@v4`.
+
+### One-Time AWS Setup
+
+Run these once when setting up a new environment. Requires AWS CLI and `gh` CLI.
+
+**Step 1: Create GitHub OIDC Identity Provider**
+
+```bash
+aws iam create-open-id-connect-provider \
+  --url https://token.actions.githubusercontent.com \
+  --client-id-list sts.amazonaws.com \
+  --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1 \
+  --region ap-northeast-1
+```
+
+**Step 2: Create IAM role `trading-analysis-github-actions`**
+
+```bash
+cat > /tmp/gha-trust-policy.json <<'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::339163283253:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+        },
+        "StringLike": {
+          "token.actions.githubusercontent.com:sub": "repo:williamwxz/trading-analysis:*"
+        }
+      }
+    }
+  ]
+}
+EOF
+
+aws iam create-role \
+  --role-name trading-analysis-github-actions \
+  --assume-role-policy-document file:///tmp/gha-trust-policy.json \
+  --region ap-northeast-1
+
+cat > /tmp/gha-permissions.json <<'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ECR",
+      "Effect": "Allow",
+      "Action": ["ecr:GetAuthorizationToken"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ECRRepos",
+      "Effect": "Allow",
+      "Action": ["ecr:*"],
+      "Resource": [
+        "arn:aws:ecr:ap-northeast-1:339163283253:repository/trading-analysis-dagster",
+        "arn:aws:ecr:ap-northeast-1:339163283253:repository/trading-analysis-grafana"
+      ]
+    },
+    {
+      "Sid": "ECS",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:DescribeTaskDefinition",
+        "ecs:RegisterTaskDefinition",
+        "ecs:UpdateService",
+        "ecs:DescribeServices"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SecretsManager",
+      "Effect": "Allow",
+      "Action": ["secretsmanager:GetSecretValue"],
+      "Resource": [
+        "arn:aws:secretsmanager:ap-northeast-1:339163283253:secret:trading-analysis/clickhouse*"
+      ]
+    },
+    {
+      "Sid": "Logs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "TerraformState",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:ListBucket", "s3:GetBucketVersioning"],
+      "Resource": [
+        "arn:aws:s3:::trading-analysis-tfstate",
+        "arn:aws:s3:::trading-analysis-tfstate/*"
+      ]
+    },
+    {
+      "Sid": "TerraformProvision",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:*", "rds:*", "elasticloadbalancing:*",
+        "iam:*", "secretsmanager:*", "ecs:*",
+        "s3:*", "ecr:*", "logs:*"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+EOF
+
+aws iam put-role-policy \
+  --role-name trading-analysis-github-actions \
+  --policy-name github-actions-policy \
+  --policy-document file:///tmp/gha-permissions.json
+```
+
+**Step 3: Add GitHub repository secrets**
+
+```bash
+gh secret set AWS_ACCOUNT_ID --body "339163283253" --repo williamwxz/trading-analysis
+gh secret set AWS_REGION --body "ap-northeast-1" --repo williamwxz/trading-analysis
+gh secret set GHA_ROLE_ARN --body "arn:aws:iam::339163283253:role/trading-analysis-github-actions" --repo williamwxz/trading-analysis
+```
+
+### Destroying old CodePipeline infrastructure
+
+After the GitHub Actions workflows are confirmed working, run the terraform workflow manually with `auto_approve=true` to destroy the old CodePipeline/CodeBuild resources (already removed from Terraform state via `codepipeline.tf` deletion).
 
 ## Deployment
 
