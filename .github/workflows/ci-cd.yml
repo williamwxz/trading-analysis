@@ -269,3 +269,31 @@ jobs:
             --region $DEPLOY_REGION \
             --query 'services[*].{Name:serviceName,Status:status,Running:runningCount,Desired:desiredCount}' \
             --output table
+
+  deploy-grafana-cloud:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Push dashboards to Grafana Cloud
+        env:
+          GRAFANA_CLOUD_TOKEN: ${{ secrets.GRAFANA_CLOUD_TOKEN }}
+          GRAFANA_CLOUD_URL: ${{ secrets.GRAFANA_CLOUD_URL }}
+        run: |
+          set -eu
+          for file in infra/grafana/dashboards/*.json; do
+            echo "Uploading $file..."
+            HTTP_STATUS=$(curl -s -o /tmp/grafana_response.json -w "%{http_code}" \
+              -X POST \
+              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer $GRAFANA_CLOUD_TOKEN" \
+              "$GRAFANA_CLOUD_URL/api/dashboards/db" \
+              -d "{\"dashboard\": $(cat "$file"), \"overwrite\": true, \"folderId\": 0}")
+            if [ "$HTTP_STATUS" -ne 200 ]; then
+              echo "ERROR: $file returned HTTP $HTTP_STATUS"
+              cat /tmp/grafana_response.json
+              exit 1
+            fi
+            echo "OK: $file (HTTP $HTTP_STATUS)"
+          done
+          echo "All dashboards uploaded."
