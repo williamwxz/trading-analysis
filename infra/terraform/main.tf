@@ -46,6 +46,12 @@ variable "project" {
   default = "trading-analysis"
 }
 
+variable "github_repo" {
+  description = "GitHub repository in org/repo format"
+  type        = string
+  default     = "williamwxz/trading-analysis"
+}
+
 locals {
   name_prefix = var.project
   common_tags = {
