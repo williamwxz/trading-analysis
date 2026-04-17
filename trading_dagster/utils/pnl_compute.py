@@ -256,6 +256,7 @@ def _underlying_to_instrument(underlying: str) -> str:
 
 def fetch_prices(
     underlying: str, ts_min: str, ts_max: str,
+    client=None,
 ) -> Dict[str, float]:
     """Read 1-min open prices for a time window. Returns {ts_string: open}.
 
@@ -271,8 +272,49 @@ WHERE exchange = 'binance'
   AND ts >= toDateTime('{ts_min}')
   AND ts < toDateTime('{ts_max}') + toIntervalMinute(1440)
 """
-    rows = query_rows(sql)
+    rows = query_rows(sql, client)
     return {str(r[0]): float(r[1]) for r in rows}
+
+
+def fetch_prices_multi(
+    underlyings: List[str], ts_min: str, ts_max: str,
+    client=None,
+    extend_minutes: int = 1440,
+) -> Dict[str, Dict[str, float]]:
+    """Fetch 1-min open prices for multiple underlyings in a single query.
+
+    Returns {underlying: {ts_string: open}} so the per-underlying loop can
+    slice its own dict without firing a separate ClickHouse query each time.
+    This avoids N sequential scans on futures_price_1min (one per underlying)
+    which can exceed ClickHouse Cloud's memory limit for large partition runs.
+
+    extend_minutes: extra minutes past ts_max to fetch (default 1440 = 1 day,
+    for the live path where ts_max is the last bar open time). Pass 0 for
+    the daily partition path where ts_max is already the exclusive end boundary.
+    """
+    if not underlyings:
+        return {}
+    instruments = [_underlying_to_instrument(u) for u in underlyings]
+    instrument_list = ", ".join(f"'{i}'" for i in instruments)
+    extend_clause = f" + toIntervalMinute({extend_minutes})" if extend_minutes > 0 else ""
+    sql = f"""\
+SELECT instrument, toString(ts), open
+FROM analytics.futures_price_1min
+WHERE exchange = 'binance'
+  AND instrument IN ({instrument_list})
+  AND ts >= toDateTime('{ts_min}')
+  AND ts < toDateTime('{ts_max}'){extend_clause}
+"""
+    rows = query_rows(sql, client)
+    # Build reverse map: instrument → underlying (handles lowercase/no-USDT inputs)
+    instr_to_underlying = {_underlying_to_instrument(u): u for u in underlyings}
+    result: Dict[str, Dict[str, float]] = {u: {} for u in underlyings}
+    for row in rows:
+        instrument, ts_str, open_price = row[0], str(row[1]), float(row[2])
+        u = instr_to_underlying.get(instrument)
+        if u is not None:
+            result[u][ts_str] = open_price
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────

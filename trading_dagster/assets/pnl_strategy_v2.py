@@ -34,6 +34,7 @@ from ..utils.pnl_compute import (
     fetch_new_bars_bt,
     fetch_new_bars_real_trade,
     fetch_prices,
+    fetch_prices_multi,
     compute_prod_pnl,
     compute_bt_pnl,
     compute_real_trade_pnl,
@@ -248,6 +249,14 @@ def _refresh_pnl_partitioned(context, target_table: str, source_table: str, labe
     execute(f"DELETE FROM analytics.{target_table} WHERE toDateTime(ts) >= toDateTime('{start_ts}') AND toDateTime(ts) < toDateTime('{end_ts}') AND source='{label}'", client)
 
     underlyings = _get_underlyings(source_table)
+
+    # Fetch all price data in a single query to avoid N separate scans on
+    # futures_price_1min (one per underlying). extend_minutes=0 because end_ts
+    # is already the exclusive partition boundary — no extra window needed.
+    # (The default extend_minutes=1440 is for the live path where ts_max is the
+    # last bar's open time and we need prices for its full expansion window.)
+    all_prices = fetch_prices_multi(underlyings, start_ts, end_ts, client, extend_minutes=0)
+
     total_rows = 0
     for underlying in underlyings:
         # Fetch bars specifically for this date window
@@ -273,12 +282,12 @@ def _refresh_pnl_partitioned(context, target_table: str, source_table: str, labe
 
         # We still need anchors from the end of the previous day
         anchors = fetch_anchors(target_table, underlying)
-        prices = fetch_prices(underlying, start_ts, end_ts)
-        
+        prices = all_prices.get(underlying, {})
+
         rows = compute_prod_pnl(rows_dict, anchors, prices, source_label=label)
         processed_rows = _prepare_rows_for_clickhouse(rows)
         total_rows += insert_rows(f"analytics.{target_table}", PROD_INSERT_COLUMNS, processed_rows, client)
-        
+
     return MaterializeResult(metadata={"partition": date_str, "rows_inserted": total_rows})
 
 def _refresh_pnl_real_trade(context, is_daily: bool) -> MaterializeResult:
