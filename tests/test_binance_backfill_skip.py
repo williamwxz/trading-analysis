@@ -24,6 +24,7 @@ def test_skips_instrument_when_full_day_present():
          patch("trading_dagster.assets.binance_futures_ohlcv.ExchangePriceDataService") as mock_svc:
 
         result = binance_futures_backfill_asset(ctx)
+        assert result.metadata["total_rows"] == 0
 
     # query_scalar called once per instrument (10 instruments)
     assert mock_qs.call_count == 10
@@ -37,7 +38,7 @@ def test_skips_instrument_when_full_day_present():
 def test_refetches_instrument_when_partial_day():
     """If query_scalar returns < 1440, the instrument is deleted and re-fetched."""
     import pandas as pd
-    from trading_dagster.assets.binance_futures_ohlcv import binance_futures_backfill_asset, INSTRUMENTS
+    from trading_dagster.assets.binance_futures_ohlcv import binance_futures_backfill_asset, INSTRUMENTS, TARGET_TABLE
 
     ctx = _make_context("2024-03-01")
 
@@ -63,7 +64,7 @@ def test_refetches_instrument_when_partial_day():
          patch("trading_dagster.assets.binance_futures_ohlcv.ExchangePriceDataService") as mock_svc:
 
         # Return data for first instrument, then empty to stop the loop
-        mock_svc.fetch_ohlcv_times_series_df.side_effect = [fake_df, None]
+        mock_svc.fetch_ohlcv_times_series_df.side_effect = [fake_df]
         result = binance_futures_backfill_asset(ctx)
 
     # DELETE called exactly once (only for partial instrument)
@@ -71,3 +72,6 @@ def test_refetches_instrument_when_partial_day():
     assert INSTRUMENTS[0] in mock_exec.call_args[0][0]
     # insert_rows called once for the partial instrument
     assert mock_insert.call_count == 1
+    insert_call = mock_insert.call_args
+    assert insert_call[0][0] == TARGET_TABLE
+    assert len(insert_call[0][2]) == 10  # 10 rows from fake_df

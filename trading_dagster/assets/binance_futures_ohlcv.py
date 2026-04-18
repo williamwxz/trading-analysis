@@ -85,7 +85,7 @@ def binance_futures_backfill_asset(context: AssetExecutionContext) -> Materializ
             f"AND ts >= '{start_dt_str}' AND ts < '{end_dt_str}'",
             client
         )
-        if existing >= 1440:
+        if (existing or 0) >= 1440:
             context.log.info(f"[{instrument}] Full day already present ({existing} rows), skipping.")
             continue
 
