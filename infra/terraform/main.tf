@@ -103,6 +103,93 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# Private Subnet (for ECS tasks — routes outbound through NAT instance)
+resource "aws_subnet" "private" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.10.0/24"
+  availability_zone = data.aws_availability_zones.available.names[0]
+  tags              = merge(local.common_tags, { Name = "${local.name_prefix}-private-0" })
+}
+
+# NAT Instance — t4g.nano with Elastic IP (static outbound IP for ClickHouse allowlist)
+data "aws_ami" "nat" {
+  most_recent = true
+  owners      = ["568608671756"] # fck-nat publisher
+  filter {
+    name   = "name"
+    values = ["fck-nat-al2023-hvm-*-arm64-ebs"]
+  }
+  filter {
+    name   = "architecture"
+    values = ["arm64"]
+  }
+}
+
+resource "aws_eip" "nat" {
+  domain = "vpc"
+  tags   = merge(local.common_tags, { Name = "${local.name_prefix}-nat-eip" })
+}
+
+resource "aws_security_group" "nat" {
+  name_prefix = "${local.name_prefix}-nat-"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = [aws_subnet.private.cidr_block]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = local.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_instance" "nat" {
+  ami                         = data.aws_ami.nat.id
+  instance_type               = "t4g.nano"
+  subnet_id                   = aws_subnet.public[0].id
+  vpc_security_group_ids      = [aws_security_group.nat.id]
+  source_dest_check           = false
+  associate_public_ip_address = true
+
+  tags = merge(local.common_tags, { Name = "${local.name_prefix}-nat-instance" })
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_eip_association" "nat" {
+  instance_id   = aws_instance.nat.id
+  allocation_id = aws_eip.nat.id
+}
+
+# Private route table — sends all outbound through the NAT instance
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+  route {
+    cidr_block           = "0.0.0.0/0"
+    network_interface_id = aws_instance.nat.primary_network_interface_id
+  }
+  tags = merge(local.common_tags, { Name = "${local.name_prefix}-rt-private" })
+}
+
+resource "aws_route_table_association" "private" {
+  subnet_id      = aws_subnet.private.id
+  route_table_id = aws_route_table.private.id
+}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # S3 Bucket (data lake)
@@ -179,9 +266,8 @@ resource "aws_security_group" "efs" {
 }
 
 resource "aws_efs_mount_target" "dagster" {
-  count           = 2
   file_system_id  = aws_efs_file_system.dagster.id
-  subnet_id       = aws_subnet.public[count.index].id
+  subnet_id       = aws_subnet.private.id
   security_groups = [aws_security_group.efs.id]
 }
 
@@ -366,9 +452,9 @@ resource "aws_ecs_service" "dagster" {
   }
 
   network_configuration {
-    subnets          = aws_subnet.public[*].id
+    subnets          = [aws_subnet.private.id]
     security_groups  = [aws_security_group.ecs_tasks.id]
-    assign_public_ip = true
+    assign_public_ip = false
   }
 
   tags = local.common_tags
@@ -456,9 +542,9 @@ resource "aws_ecs_service" "grafana" {
   }
 
   network_configuration {
-    subnets          = aws_subnet.public[*].id
+    subnets          = [aws_subnet.private.id]
     security_groups  = [aws_security_group.ecs_tasks.id]
-    assign_public_ip = true
+    assign_public_ip = false
   }
 
   tags = local.common_tags
@@ -816,4 +902,9 @@ output "s3_bucket" {
 
 output "alb_dns_name" {
   value = "http://${aws_lb.main.dns_name}"
+}
+
+output "nat_static_ip" {
+  value       = aws_eip.nat.public_ip
+  description = "Static outbound IP — add this to ClickHouse Cloud allowlist"
 }
