@@ -1,19 +1,10 @@
 # Dagster instance configuration — trading-analysis
 # Runs on ECS Fargate with ClickHouse Cloud as analytics DB.
+# Storage: SQLite on EFS mounted at /app
 
 storage:
-  postgres:
-    postgres_db:
-      hostname:
-        env: DAGSTER_PG_HOST
-      port:
-        env: DAGSTER_PG_PORT
-      username:
-        env: DAGSTER_PG_USERNAME
-      password:
-        env: DAGSTER_PG_PASSWORD
-      db_name:
-        env: DAGSTER_PG_DATABASE
+  sqlite:
+    base_dir: /app/.dagster_storage
 
 run_launcher:
   module: dagster.core.launcher
