@@ -75,7 +75,7 @@ resource "aws_vpc" "main" {
 
 data "aws_availability_zones" "available" {}
 
-# Public Subnets (for ALB and NAT GW)
+# Public Subnets (for ALB and ECS tasks)
 resource "aws_subnet" "public" {
   count                   = 2
   vpc_id                  = aws_vpc.main.id
@@ -85,32 +85,10 @@ resource "aws_subnet" "public" {
   tags                    = merge(local.common_tags, { Name = "${local.name_prefix}-public-${count.index}" })
 }
 
-# Private Subnets (for ECS and RDS)
-resource "aws_subnet" "private" {
-  count             = 2
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = "10.0.${count.index + 10}.0/24"
-  availability_zone = data.aws_availability_zones.available.names[count.index]
-  tags              = merge(local.common_tags, { Name = "${local.name_prefix}-private-${count.index}" })
-}
-
 # Internet Gateway
 resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
   tags   = local.common_tags
-}
-
-# NAT Gateway & Elastic IP
-resource "aws_eip" "nat" {
-  domain = "vpc"
-  tags   = local.common_tags
-}
-
-resource "aws_nat_gateway" "main" {
-  allocation_id = aws_eip.nat.id
-  subnet_id     = aws_subnet.public[0].id # Place NAT in the first public subnet
-  tags          = merge(local.common_tags, { Name = "${local.name_prefix}-nat" })
-  depends_on    = [aws_internet_gateway.main]
 }
 
 # Routing for Public Subnets (to IGW)
@@ -127,22 +105,6 @@ resource "aws_route_table_association" "public" {
   count          = 2
   subnet_id      = aws_subnet.public[count.index].id
   route_table_id = aws_route_table.public.id
-}
-
-# Routing for Private Subnets (to NAT Gateway)
-resource "aws_route_table" "private" {
-  vpc_id = aws_vpc.main.id
-  route {
-    cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.main.id
-  }
-  tags = merge(local.common_tags, { Name = "${local.name_prefix}-rt-private" })
-}
-
-resource "aws_route_table_association" "private" {
-  count          = 2
-  subnet_id      = aws_subnet.private[count.index].id
-  route_table_id = aws_route_table.private.id
 }
 
 
@@ -215,7 +177,7 @@ resource "aws_db_instance" "dagster" {
 
 resource "aws_db_subnet_group" "main" {
   name       = "${local.name_prefix}-db-subnets-v2"
-  subnet_ids = aws_subnet.private[*].id # Database lives in private subnets
+  subnet_ids = aws_subnet.public[*].id
   tags       = local.common_tags
 }
 
@@ -393,9 +355,9 @@ resource "aws_ecs_service" "dagster" {
   }
 
   network_configuration {
-    subnets          = aws_subnet.private[*].id # Tasks move to private subnets
+    subnets          = aws_subnet.public[*].id
     security_groups  = [aws_security_group.ecs_tasks.id]
-    assign_public_ip = false # No longer need public IPs
+    assign_public_ip = true
   }
 
   tags = local.common_tags
@@ -696,8 +658,4 @@ output "s3_bucket" {
 
 output "alb_dns_name" {
   value = "http://${aws_lb.main.dns_name}"
-}
-
-output "nat_static_ip" {
-  value = aws_eip.nat.public_ip
 }
