@@ -34,7 +34,7 @@ jobs:
       id-token: write
       contents: read
     outputs:
-      image_uri: ${{ steps.build_dagster.outputs.image_uri }}
+      image_tag: ${{ steps.build_dagster.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -55,6 +55,7 @@ jobs:
         env:
           REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
         run: |
+          [ -n "$REGISTRY" ] || { echo "ERROR: REGISTRY is empty — AWS_ACCOUNT_ID or AWS_REGION secret is unset"; exit 1; }
           IMAGE_URI=$REGISTRY/trading-analysis-dagster:${{ github.sha }}
           IMAGE_LATEST=$REGISTRY/trading-analysis-dagster:latest
           IMAGE_CACHE=$REGISTRY/trading-analysis-dagster:cache
@@ -64,7 +65,9 @@ jobs:
             --provenance=false \
             -t $IMAGE_URI -t $IMAGE_LATEST \
             --push .
-          echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
+          # Output only the image tag (not the full URI) to avoid GitHub
+          # suppressing the output because it contains a masked secret (AWS account ID).
+          echo "image_tag=${{ github.sha }}" >> $GITHUB_OUTPUT
 
   schema:
     runs-on: ubuntu-latest
@@ -123,11 +126,14 @@ jobs:
 
       - name: Deploy Dagster to ECS
         env:
-          IMAGE_URI: ${{ needs.build.outputs.image_uri }}
+          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
           DEPLOY_REGION: ${{ secrets.AWS_REGION }}
           ECS_CLUSTER: trading-analysis
+          REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
         run: |
           set -eu
+          [ -n "$IMAGE_TAG" ] || { echo "ERROR: IMAGE_TAG is empty — build job output missing"; exit 1; }
+          IMAGE_URI=$REGISTRY/trading-analysis-dagster:$IMAGE_TAG
           TASK_DEF=$(aws ecs describe-task-definition \
             --task-definition trading-analysis-dagster \
             --region $DEPLOY_REGION \
