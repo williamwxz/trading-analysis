@@ -467,95 +467,6 @@ resource "aws_ecs_service" "dagster" {
 }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ECS Task Definition — Grafana
-# ─────────────────────────────────────────────────────────────────────────────
-
-resource "aws_ecs_task_definition" "grafana" {
-  family                   = "${local.name_prefix}-grafana"
-  requires_compatibilities = ["FARGATE"]
-  network_mode             = "awsvpc"
-  cpu                      = 512
-  memory                   = 1024
-  execution_role_arn       = aws_iam_role.ecs_execution.arn
-  task_role_arn            = aws_iam_role.ecs_task.arn
-
-  container_definitions = jsonencode([
-    {
-      name      = "grafana"
-      image     = "${aws_ecr_repository.grafana.repository_url}:latest"
-      essential = true
-
-      portMappings = [
-        {
-          containerPort = 3000
-          protocol      = "tcp"
-        }
-      ]
-
-      environment = [
-        { name = "GF_SECURITY_ADMIN_PASSWORD", value = "changeme" },
-        { name = "GF_SERVER_HTTP_PORT",        value = "3000" },
-        { name = "GF_SERVER_ROOT_URL",         value = "http://${aws_lb.main.dns_name}/grafana" },
-        { name = "GF_SERVER_SERVE_FROM_SUB_PATH", value = "true" },
-        { name = "GF_AUTH_ANONYMOUS_ENABLED",  value = "true" },
-        { name = "GF_AUTH_ANONYMOUS_ORG_ROLE", value = "Admin" },
-        { name = "CLICKHOUSE_USER",            value = "dev_ro3" },
-      ]
-
-      secrets = [
-        { name = "CLICKHOUSE_HOST",     valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
-        { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
-      ]
-
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          "awslogs-group"         = aws_cloudwatch_log_group.grafana.name
-          "awslogs-region"        = var.aws_region
-          "awslogs-stream-prefix" = "grafana"
-        }
-      }
-    }
-  ])
-
-  tags = local.common_tags
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-resource "aws_ecs_service" "grafana" {
-  name            = "${local.name_prefix}-grafana"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.grafana.arn
-  desired_count   = 1
-  launch_type     = "FARGATE"
-
-  health_check_grace_period_seconds = 60
-
-  load_balancer {
-    target_group_arn = aws_lb_target_group.grafana.arn
-    container_name   = "grafana"
-    container_port   = 3000
-  }
-
-  network_configuration {
-    subnets          = [aws_subnet.private.id]
-    security_groups  = [aws_security_group.ecs_tasks.id]
-    assign_public_ip = false
-  }
-
-  tags = local.common_tags
-
-  lifecycle {
-    create_before_destroy = true
-  }
-
-  depends_on = [aws_lb_listener.http]
-}
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Application Load Balancer (ALB)
@@ -595,25 +506,6 @@ resource "aws_lb_target_group" "dagster" {
   }
 }
 
-resource "aws_lb_target_group" "grafana" {
-  name        = "${local.name_prefix}-grafana-v2"
-  port        = 3000
-  protocol    = "HTTP"
-  vpc_id      = aws_vpc.main.id
-  target_type = "ip"
-
-  health_check {
-    path                = "/grafana/api/health"
-    healthy_threshold   = 2
-    unhealthy_threshold = 10
-  }
-
-  tags = local.common_tags
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
 
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
@@ -626,21 +518,6 @@ resource "aws_lb_listener" "http" {
   }
 }
 
-resource "aws_lb_listener_rule" "grafana" {
-  listener_arn = aws_lb_listener.http.arn
-  priority     = 10
-
-  action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.grafana.arn
-  }
-
-  condition {
-    path_pattern {
-      values = ["/grafana*"]
-    }
-  }
-}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -721,21 +598,6 @@ resource "aws_ecr_repository" "dagster" {
   }
 }
 
-resource "aws_ecr_repository" "grafana" {
-  name                 = "${local.name_prefix}-grafana"
-  image_tag_mutability = "MUTABLE"
-  force_delete         = true
-
-  image_scanning_configuration {
-    scan_on_push = true
-  }
-
-  tags = local.common_tags
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -748,11 +610,6 @@ resource "aws_cloudwatch_log_group" "dagster" {
   tags              = local.common_tags
 }
 
-resource "aws_cloudwatch_log_group" "grafana" {
-  name              = "/ecs/${local.name_prefix}-grafana"
-  retention_in_days = 30
-  tags              = local.common_tags
-}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
