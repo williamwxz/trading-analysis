@@ -1,5 +1,5 @@
 # ============================================================================
-# trading-analysis Infrastructure — VPC + NAT + ECS + RDS + Kinesis
+# trading-analysis Infrastructure — VPC + NAT + ECS + EFS
 # ============================================================================
 # Consolidated in ap-northeast-1 (Tokyo).
 # ============================================================================
@@ -11,10 +11,6 @@ terraform {
     aws = {
       source  = "hashicorp/aws"
       version = "~> 5.0"
-    }
-    random = {
-      source  = "hashicorp/random"
-      version = "~> 3.0"
     }
   }
 
@@ -144,50 +140,26 @@ resource "aws_s3_bucket_lifecycle_configuration" "data" {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RDS — Postgres for Dagster Metadata
+# EFS — SQLite storage for Dagster metadata
 # ─────────────────────────────────────────────────────────────────────────────
 
-resource "random_password" "db_password" {
-  length           = 16
-  special          = true
-  override_special = "!#$%&*()-_=+[]{}<>:?"
-}
+resource "aws_efs_file_system" "dagster" {
+  encrypted = true
 
-resource "aws_db_instance" "dagster" {
-  identifier           = "${local.name_prefix}-db-v2"
-  allocated_storage    = 20
-  engine               = "postgres"
-  engine_version       = "16.6"
-  instance_class       = "db.t4g.micro"
-  db_name              = "dagster"
-  username             = "dagster"
-  password             = random_password.db_password.result
-  parameter_group_name = "default.postgres16"
-  skip_final_snapshot  = true
-  publicly_accessible  = false
-  vpc_security_group_ids = [aws_security_group.db.id]
-  db_subnet_group_name   = aws_db_subnet_group.main.name
-
-  tags = local.common_tags
-
-  lifecycle {
-    create_before_destroy = true
+  lifecycle_policy {
+    transition_to_ia = "AFTER_30_DAYS"
   }
+
+  tags = merge(local.common_tags, { Name = "${local.name_prefix}-dagster-efs" })
 }
 
-resource "aws_db_subnet_group" "main" {
-  name       = "${local.name_prefix}-db-subnets-v2"
-  subnet_ids = aws_subnet.public[*].id
-  tags       = local.common_tags
-}
-
-resource "aws_security_group" "db" {
-  name_prefix = "${local.name_prefix}-db-"
+resource "aws_security_group" "efs" {
+  name_prefix = "${local.name_prefix}-efs-"
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    from_port       = 5432
-    to_port         = 5432
+    from_port       = 2049
+    to_port         = 2049
     protocol        = "tcp"
     security_groups = [aws_security_group.ecs_tasks.id]
   }
@@ -206,11 +178,31 @@ resource "aws_security_group" "db" {
   }
 }
 
-resource "aws_secretsmanager_secret_version" "dagster_pg" {
-  secret_id = aws_secretsmanager_secret.dagster_pg.id
-  secret_string = jsonencode({
-    password = random_password.db_password.result
-  })
+resource "aws_efs_mount_target" "dagster" {
+  count           = 2
+  file_system_id  = aws_efs_file_system.dagster.id
+  subnet_id       = aws_subnet.public[count.index].id
+  security_groups = [aws_security_group.efs.id]
+}
+
+resource "aws_efs_access_point" "dagster" {
+  file_system_id = aws_efs_file_system.dagster.id
+
+  posix_user {
+    uid = 1000
+    gid = 1000
+  }
+
+  root_directory {
+    path = "/dagster-home"
+    creation_info {
+      owner_uid   = 1000
+      owner_gid   = 1000
+      permissions = "755"
+    }
+  }
+
+  tags = merge(local.common_tags, { Name = "${local.name_prefix}-dagster-ap" })
 }
 
 
@@ -273,20 +265,15 @@ resource "aws_ecs_task_definition" "dagster" {
       ]
 
       environment = [
-        { name = "DAGSTER_HOME",        value = "/app" },
-        { name = "CLICKHOUSE_USER",     value = "dev_ro3" },
-        { name = "CLICKHOUSE_PORT",     value = "8443" },
-        { name = "CLICKHOUSE_SECURE",   value = "true" },
-        { name = "DAGSTER_PG_USERNAME", value = "dagster" },
-        { name = "DAGSTER_PG_PORT",     value = "5432" },
-        { name = "DAGSTER_PG_DATABASE", value = "dagster" },
-        { name = "DAGSTER_PG_HOST",     value = aws_db_instance.dagster.address },
+        { name = "DAGSTER_HOME",      value = "/app" },
+        { name = "CLICKHOUSE_USER",   value = "dev_ro3" },
+        { name = "CLICKHOUSE_PORT",   value = "8443" },
+        { name = "CLICKHOUSE_SECURE", value = "true" },
       ]
 
       secrets = [
         { name = "CLICKHOUSE_HOST",     valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
         { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
-        { name = "DAGSTER_PG_PASSWORD", valueFrom = "${aws_secretsmanager_secret.dagster_pg.arn}:password::" },
       ]
 
       logConfiguration = {
@@ -305,20 +292,15 @@ resource "aws_ecs_task_definition" "dagster" {
       command   = ["dagster-daemon", "run", "-m", "trading_dagster"]
 
       environment = [
-        { name = "DAGSTER_HOME",    value = "/app" },
-        { name = "CLICKHOUSE_USER",    value = "dev_ro3" },
-        { name = "CLICKHOUSE_PORT",    value = "8443" },
-        { name = "CLICKHOUSE_SECURE",  value = "true" },
-        { name = "DAGSTER_PG_USERNAME", value = "dagster" },
-        { name = "DAGSTER_PG_PORT",     value = "5432" },
-        { name = "DAGSTER_PG_DATABASE", value = "dagster" },
-        { name = "DAGSTER_PG_HOST",     value = aws_db_instance.dagster.address },
+        { name = "DAGSTER_HOME",      value = "/app" },
+        { name = "CLICKHOUSE_USER",   value = "dev_ro3" },
+        { name = "CLICKHOUSE_PORT",   value = "8443" },
+        { name = "CLICKHOUSE_SECURE", value = "true" },
       ]
 
       secrets = [
         { name = "CLICKHOUSE_HOST",     valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
         { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
-        { name = "DAGSTER_PG_PASSWORD", valueFrom = "${aws_secretsmanager_secret.dagster_pg.arn}:password::" },
       ]
 
       logConfiguration = {
@@ -671,15 +653,6 @@ resource "aws_secretsmanager_secret" "clickhouse" {
   }
 }
 
-resource "aws_secretsmanager_secret" "dagster_pg" {
-  name = "${local.name_prefix}/dagster-pg"
-  tags = local.common_tags
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # IAM Roles
@@ -727,7 +700,6 @@ resource "aws_iam_role_policy" "ecs_execution_secrets" {
         ]
         Resource = [
           aws_secretsmanager_secret.clickhouse.arn,
-          aws_secretsmanager_secret.dagster_pg.arn,
         ]
       }
     ]
@@ -782,6 +754,15 @@ resource "aws_iam_role_policy" "ecs_task_policy" {
         Effect   = "Allow"
         Action   = ["ecs:DescribeTaskDefinition"]
         Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "elasticfilesystem:ClientMount",
+          "elasticfilesystem:ClientWrite",
+          "elasticfilesystem:ClientRootAccess",
+        ]
+        Resource = aws_efs_file_system.dagster.arn
       },
     ]
   })
