@@ -35,7 +35,6 @@ jobs:
       contents: read
     outputs:
       image_uri: ${{ steps.build_dagster.outputs.image_uri }}
-      grafana_image_uri: ${{ steps.build_grafana.outputs.grafana_image_uri }}
     steps:
       - uses: actions/checkout@v4
 
@@ -66,23 +65,6 @@ jobs:
             -t $IMAGE_URI -t $IMAGE_LATEST \
             --push .
           echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
-
-      - name: Build and push Grafana image
-        id: build_grafana
-        env:
-          REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
-        run: |
-          GRAFANA_IMAGE_URI=$REGISTRY/trading-analysis-grafana:${{ github.sha }}
-          GRAFANA_IMAGE_LATEST=$REGISTRY/trading-analysis-grafana:latest
-          GRAFANA_IMAGE_CACHE=$REGISTRY/trading-analysis-grafana:cache
-          docker buildx build \
-            --cache-from type=registry,ref=$GRAFANA_IMAGE_CACHE \
-            --cache-to   type=registry,ref=$GRAFANA_IMAGE_CACHE,mode=max \
-            --provenance=false \
-            -f Dockerfile.grafana \
-            -t $GRAFANA_IMAGE_URI -t $GRAFANA_IMAGE_LATEST \
-            --push .
-          echo "grafana_image_uri=$GRAFANA_IMAGE_URI" >> $GITHUB_OUTPUT
 
   schema:
     runs-on: ubuntu-latest
@@ -194,78 +176,6 @@ jobs:
           aws ecs describe-services \
             --cluster $ECS_CLUSTER \
             --services trading-analysis-dagster \
-            --region $DEPLOY_REGION \
-            --query 'services[*].{Name:serviceName,Status:status,Running:runningCount,Desired:desiredCount}' \
-            --output table
-
-  deploy-grafana:
-    runs-on: ubuntu-latest
-    needs: build
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.GHA_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Deploy Grafana to ECS
-        env:
-          GRAFANA_IMAGE_URI: ${{ needs.build.outputs.grafana_image_uri }}
-          DEPLOY_REGION: ${{ secrets.AWS_REGION }}
-          ECS_CLUSTER: trading-analysis
-        run: |
-          set -eu
-          TASK_DEF=$(aws ecs describe-task-definition \
-            --task-definition trading-analysis-grafana \
-            --region $DEPLOY_REGION \
-            --query taskDefinition \
-            --output json)
-
-          NEW_TASK=$(echo "$TASK_DEF" | python3 -c "
-          import sys, json, os
-          td = json.load(sys.stdin)
-          img = os.environ['GRAFANA_IMAGE_URI']
-          for c in td['containerDefinitions']:
-              if c['name'] == 'grafana':
-                  c['image'] = img
-          for k in ('taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy'):
-              td.pop(k, None)
-          print(json.dumps(td))
-          ")
-
-          NEW_ARN=$(aws ecs register-task-definition \
-            --cli-input-json "$NEW_TASK" \
-            --region $DEPLOY_REGION \
-            --query taskDefinition.taskDefinitionArn \
-            --output text)
-
-          [ -n "$NEW_ARN" ] || { echo "ERROR: register-task-definition returned empty ARN"; exit 1; }
-          echo "Registered: $NEW_ARN"
-
-          aws ecs update-service \
-            --cluster $ECS_CLUSTER \
-            --service trading-analysis-grafana \
-            --task-definition "$NEW_ARN" \
-            --force-new-deployment \
-            --region $DEPLOY_REGION \
-            --output json > /dev/null
-
-      - name: Wait for Grafana service stability
-        env:
-          DEPLOY_REGION: ${{ secrets.AWS_REGION }}
-          ECS_CLUSTER: trading-analysis
-        run: |
-          aws ecs wait services-stable \
-            --cluster $ECS_CLUSTER \
-            --services trading-analysis-grafana \
-            --region $DEPLOY_REGION
-          echo "Grafana deploy complete."
-          aws ecs describe-services \
-            --cluster $ECS_CLUSTER \
-            --services trading-analysis-grafana \
             --region $DEPLOY_REGION \
             --query 'services[*].{Name:serviceName,Status:status,Running:runningCount,Desired:desiredCount}' \
             --output table
