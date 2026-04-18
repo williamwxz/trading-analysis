@@ -280,7 +280,7 @@ resource "aws_efs_access_point" "dagster" {
   }
 
   root_directory {
-    path = "/dagster-home"
+    path = "/dagster-storage"
     creation_info {
       owner_uid   = 1000
       owner_gid   = 1000
@@ -353,7 +353,7 @@ resource "aws_ecs_task_definition" "dagster" {
       mountPoints = [
         {
           sourceVolume  = "dagster-efs"
-          containerPath = "/app"
+          containerPath = "/app/dagster-storage"
           readOnly      = false
         }
       ]
@@ -388,7 +388,7 @@ resource "aws_ecs_task_definition" "dagster" {
       mountPoints = [
         {
           sourceVolume  = "dagster-efs"
-          containerPath = "/app"
+          containerPath = "/app/dagster-storage"
           readOnly      = false
         }
       ]
