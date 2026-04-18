@@ -74,11 +74,25 @@ def binance_futures_backfill_asset(context: AssetExecutionContext) -> Materializ
     client = get_client()
     total_inserted = 0
 
+    start_dt_str = start_dt.strftime('%Y-%m-%d %H:%M:%S')
+    end_dt_str = end_dt.strftime('%Y-%m-%d %H:%M:%S')
+
     for instrument in INSTRUMENTS:
-        # Idempotency: clear existing data for this day/instrument
+        # Skip if full day already present
+        existing = query_scalar(
+            f"SELECT count() FROM {TARGET_TABLE} "
+            f"WHERE exchange='binance' AND instrument='{instrument}' "
+            f"AND ts >= '{start_dt_str}' AND ts < '{end_dt_str}'",
+            client
+        )
+        if existing >= 1440:
+            context.log.info(f"[{instrument}] Full day already present ({existing} rows), skipping.")
+            continue
+
+        # Idempotency: clear existing partial data for this day/instrument
         execute_query(
             f"DELETE FROM {TARGET_TABLE} WHERE exchange='binance' AND instrument='{instrument}' "
-            f"AND ts >= '{start_dt.strftime('%Y-%m-%d %H:%M:%S')}' AND ts < '{end_dt.strftime('%Y-%m-%d %H:%M:%S')}'",
+            f"AND ts >= '{start_dt_str}' AND ts < '{end_dt_str}'",
             client
         )
 
@@ -90,7 +104,7 @@ def binance_futures_backfill_asset(context: AssetExecutionContext) -> Materializ
                 timeframe="1m", date_since=current_start_iso, limit=1000
             )
             if df is None or df.empty: break
-            
+
             # Ensure timestamp is datetime
             if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
                 df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
@@ -102,11 +116,11 @@ def binance_futures_backfill_asset(context: AssetExecutionContext) -> Materializ
             insert_rows(TARGET_TABLE, INSERT_COLUMNS, _df_to_rows(instrument, df), client)
             total_inserted += len(df)
             instrument_inserted += len(df)
-            
+
             if len(df) < 1000 or df.iloc[-1]['timestamp'] >= (end_dt - timedelta(minutes=1)): break
             current_start_iso = (df.iloc[-1]['timestamp'] + timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
             time.sleep(0.1)
-        
+
         context.log.info(f"[{instrument}] Finished partition {partition_date_str}, inserted {instrument_inserted} rows.")
 
     return MaterializeResult(metadata={"date": partition_date_str, "total_rows": total_inserted})
