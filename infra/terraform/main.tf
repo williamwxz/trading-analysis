@@ -245,8 +245,8 @@ resource "aws_ecs_task_definition" "dagster" {
   family                   = "${local.name_prefix}-dagster"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = 8192
-  memory                   = 16384
+  cpu                      = 1024
+  memory                   = 2048
   execution_role_arn       = aws_iam_role.ecs_execution.arn
   task_role_arn            = aws_iam_role.ecs_task.arn
 
@@ -261,6 +261,14 @@ resource "aws_ecs_task_definition" "dagster" {
         {
           containerPort = 3000
           protocol      = "tcp"
+        }
+      ]
+
+      mountPoints = [
+        {
+          sourceVolume  = "dagster-efs"
+          containerPath = "/app"
+          readOnly      = false
         }
       ]
 
@@ -291,6 +299,14 @@ resource "aws_ecs_task_definition" "dagster" {
       essential = true
       command   = ["dagster-daemon", "run", "-m", "trading_dagster"]
 
+      mountPoints = [
+        {
+          sourceVolume  = "dagster-efs"
+          containerPath = "/app"
+          readOnly      = false
+        }
+      ]
+
       environment = [
         { name = "DAGSTER_HOME",      value = "/app" },
         { name = "CLICKHOUSE_USER",   value = "dev_ro3" },
@@ -313,6 +329,19 @@ resource "aws_ecs_task_definition" "dagster" {
       }
     }
   ])
+
+  volume {
+    name = "dagster-efs"
+
+    efs_volume_configuration {
+      file_system_id     = aws_efs_file_system.dagster.id
+      transit_encryption = "ENABLED"
+      authorization_config {
+        access_point_id = aws_efs_access_point.dagster.id
+        iam             = "ENABLED"
+      }
+    }
+  }
 
   tags = local.common_tags
 
