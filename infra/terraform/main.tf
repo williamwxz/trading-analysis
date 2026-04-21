@@ -585,7 +585,7 @@ resource "aws_ecr_repository" "dagster" {
 
 resource "aws_cloudwatch_log_group" "dagster" {
   name              = "/ecs/${local.name_prefix}-dagster"
-  retention_in_days = 30
+  retention_in_days = 3
   tags              = local.common_tags
 }
 
