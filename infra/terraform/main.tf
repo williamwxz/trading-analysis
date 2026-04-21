@@ -647,6 +647,11 @@ resource "aws_iam_role_policy" "nat_instance_ecs" {
   })
 }
 
+resource "aws_iam_role_policy_attachment" "nat_instance_ssm" {
+  role       = aws_iam_role.nat_instance.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
 resource "aws_iam_instance_profile" "nat_instance" {
   name = "${local.name_prefix}-nat-instance"
   role = aws_iam_role.nat_instance.name
