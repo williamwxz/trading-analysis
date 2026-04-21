@@ -355,8 +355,7 @@ resource "aws_ecs_task_definition" "dagster" {
         { name = "CLICKHOUSE_USER",   value = "dev_ro3" },
         { name = "CLICKHOUSE_PORT",   value = "8443" },
         { name = "CLICKHOUSE_SECURE", value = "true" },
-        { name = "DAGSTER_PG_USER",   value = "postgres" },
-        { name = "DAGSTER_PG_DB",     value = "postgres" },
+        { name = "DAGSTER_PG_DB", value = "postgres" },
       ]
 
       secrets = [
@@ -364,6 +363,7 @@ resource "aws_ecs_task_definition" "dagster" {
         { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
         { name = "DAGSTER_PG_HOST",     valueFrom = "${aws_secretsmanager_secret.supabase.arn}:host::" },
         { name = "DAGSTER_PG_PASSWORD", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:password::" },
+        { name = "DAGSTER_PG_USER",     valueFrom = "${aws_secretsmanager_secret.supabase.arn}:user::" },
       ]
 
       logConfiguration = {
@@ -386,7 +386,6 @@ resource "aws_ecs_task_definition" "dagster" {
         { name = "CLICKHOUSE_USER",   value = "dev_ro3" },
         { name = "CLICKHOUSE_PORT",   value = "8443" },
         { name = "CLICKHOUSE_SECURE", value = "true" },
-        { name = "DAGSTER_PG_USER",   value = "postgres" },
         { name = "DAGSTER_PG_DB",     value = "postgres" },
       ]
 
@@ -395,6 +394,7 @@ resource "aws_ecs_task_definition" "dagster" {
         { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
         { name = "DAGSTER_PG_HOST",     valueFrom = "${aws_secretsmanager_secret.supabase.arn}:host::" },
         { name = "DAGSTER_PG_PASSWORD", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:password::" },
+        { name = "DAGSTER_PG_USER",     valueFrom = "${aws_secretsmanager_secret.supabase.arn}:user::" },
       ]
 
       logConfiguration = {
