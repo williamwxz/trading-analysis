@@ -1,10 +1,17 @@
 # Dagster instance configuration — trading-analysis
 # Runs on ECS Fargate with ClickHouse Cloud as analytics DB.
-# Storage: SQLite on EFS mounted at /app/dagster-storage
+# Storage: Postgres (Supabase)
 
 storage:
-  sqlite:
-    base_dir: /app/dagster-storage
+  postgres:
+    postgres_db:
+      username: { env: DAGSTER_PG_USER }
+      password: { env: DAGSTER_PG_PASSWORD }
+      hostname: { env: DAGSTER_PG_HOST }
+      db_name: { env: DAGSTER_PG_DB }
+      port: 5432
+      params:
+        sslmode: require
 
 run_launcher:
   module: dagster.core.launcher
@@ -18,7 +25,7 @@ local_artifact_storage:
   module: dagster.core.storage.root
   class: LocalArtifactStorage
   config:
-    base_dir: /app/dagster-storage/storage
+    base_dir: /tmp/dagster-storage
 
 run_queue:
   max_concurrent_runs: 25

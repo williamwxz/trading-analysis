@@ -350,24 +350,20 @@ resource "aws_ecs_task_definition" "dagster" {
         }
       ]
 
-      mountPoints = [
-        {
-          sourceVolume  = "dagster-efs"
-          containerPath = "/app/dagster-storage"
-          readOnly      = false
-        }
-      ]
-
       environment = [
         { name = "DAGSTER_HOME",      value = "/app" },
         { name = "CLICKHOUSE_USER",   value = "dev_ro3" },
         { name = "CLICKHOUSE_PORT",   value = "8443" },
         { name = "CLICKHOUSE_SECURE", value = "true" },
+        { name = "DAGSTER_PG_USER",   value = "postgres" },
+        { name = "DAGSTER_PG_DB",     value = "postgres" },
       ]
 
       secrets = [
         { name = "CLICKHOUSE_HOST",     valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
         { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
+        { name = "DAGSTER_PG_HOST",     valueFrom = "${aws_secretsmanager_secret.supabase.arn}:host::" },
+        { name = "DAGSTER_PG_PASSWORD", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:password::" },
       ]
 
       logConfiguration = {
@@ -385,24 +381,20 @@ resource "aws_ecs_task_definition" "dagster" {
       essential = true
       command   = ["dagster-daemon", "run", "-m", "trading_dagster"]
 
-      mountPoints = [
-        {
-          sourceVolume  = "dagster-efs"
-          containerPath = "/app/dagster-storage"
-          readOnly      = false
-        }
-      ]
-
       environment = [
         { name = "DAGSTER_HOME",      value = "/app" },
         { name = "CLICKHOUSE_USER",   value = "dev_ro3" },
         { name = "CLICKHOUSE_PORT",   value = "8443" },
         { name = "CLICKHOUSE_SECURE", value = "true" },
+        { name = "DAGSTER_PG_USER",   value = "postgres" },
+        { name = "DAGSTER_PG_DB",     value = "postgres" },
       ]
 
       secrets = [
         { name = "CLICKHOUSE_HOST",     valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
         { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
+        { name = "DAGSTER_PG_HOST",     valueFrom = "${aws_secretsmanager_secret.supabase.arn}:host::" },
+        { name = "DAGSTER_PG_PASSWORD", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:password::" },
       ]
 
       logConfiguration = {
@@ -415,19 +407,6 @@ resource "aws_ecs_task_definition" "dagster" {
       }
     }
   ])
-
-  volume {
-    name = "dagster-efs"
-
-    efs_volume_configuration {
-      file_system_id     = aws_efs_file_system.dagster.id
-      transit_encryption = "ENABLED"
-      authorization_config {
-        access_point_id = aws_efs_access_point.dagster.id
-        iam             = "ENABLED"
-      }
-    }
-  }
 
   tags = local.common_tags
 
@@ -625,6 +604,15 @@ resource "aws_secretsmanager_secret" "clickhouse" {
   }
 }
 
+resource "aws_secretsmanager_secret" "supabase" {
+  name = "${local.name_prefix}/supabase"
+  tags = local.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # IAM Roles
@@ -672,6 +660,7 @@ resource "aws_iam_role_policy" "ecs_execution_secrets" {
         ]
         Resource = [
           aws_secretsmanager_secret.clickhouse.arn,
+          aws_secretsmanager_secret.supabase.arn,
         ]
       }
     ]
