@@ -134,11 +134,20 @@ resource "aws_security_group" "nat" {
   name_prefix = "${local.name_prefix}-nat-"
   vpc_id      = aws_vpc.main.id
 
+  # NAT traffic from private subnet
   ingress {
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = [aws_subnet.private.cidr_block]
+  }
+
+  # Public HTTP for Dagster UI (proxied by nginx)
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
   }
 
   egress {
@@ -160,8 +169,68 @@ resource "aws_instance" "nat" {
   instance_type               = "t4g.nano"
   subnet_id                   = aws_subnet.public[0].id
   vpc_security_group_ids      = [aws_security_group.nat.id]
+  iam_instance_profile        = aws_iam_instance_profile.nat_instance.name
   source_dest_check           = false
   associate_public_ip_address = true
+
+  # nginx reverse proxy: port 80 → Dagster webserver on private subnet port 3000
+  # A cron job refreshes the upstream IP from ECS every minute
+  user_data = <<-EOF
+    #!/bin/bash
+    set -e
+    yum install -y nginx aws-cli jq
+
+    # Write nginx config with a placeholder upstream
+    cat > /etc/nginx/conf.d/dagster.conf <<'NGINX'
+upstream dagster {
+    server 127.0.0.1:3000;  # placeholder, updated by cron
+}
+server {
+    listen 80;
+    location / {
+        proxy_pass http://dagster;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 300;
+    }
+}
+NGINX
+
+    # Script to fetch current ECS task private IP and update nginx upstream
+    cat > /usr/local/bin/update-dagster-upstream.sh <<'SCRIPT'
+#!/bin/bash
+REGION="ap-northeast-1"
+CLUSTER="trading-analysis"
+SERVICE="trading-analysis-dagster"
+
+TASK_ARN=$(aws ecs list-tasks --region $REGION --cluster $CLUSTER --service-name $SERVICE --query 'taskArns[0]' --output text 2>/dev/null)
+[ -z "$TASK_ARN" ] || [ "$TASK_ARN" = "None" ] && exit 0
+
+PRIVATE_IP=$(aws ecs describe-tasks --region $REGION --cluster $CLUSTER --tasks $TASK_ARN \
+  --query 'tasks[0].containers[0].networkInterfaces[0].privateIpv4Address' --output text 2>/dev/null)
+[ -z "$PRIVATE_IP" ] || [ "$PRIVATE_IP" = "None" ] && exit 0
+
+CURRENT=$(grep -oP '(?<=server )\S+(?=;)' /etc/nginx/conf.d/dagster.conf | head -1)
+NEW="$PRIVATE_IP:3000"
+[ "$CURRENT" = "$NEW" ] && exit 0
+
+sed -i "s|server $CURRENT;|server $NEW;|" /etc/nginx/conf.d/dagster.conf
+nginx -t && nginx -s reload
+echo "$(date): updated upstream to $NEW"
+SCRIPT
+
+    chmod +x /usr/local/bin/update-dagster-upstream.sh
+
+    # Run on boot and every minute via cron
+    /usr/local/bin/update-dagster-upstream.sh || true
+    echo "* * * * * root /usr/local/bin/update-dagster-upstream.sh >> /var/log/dagster-upstream.log 2>&1" > /etc/cron.d/dagster-upstream
+
+    systemctl enable nginx
+    systemctl start nginx
+  EOF
+
+  user_data_replace_on_change = true
 
   tags = merge(local.common_tags, { Name = "${local.name_prefix}-nat-instance" })
 
@@ -422,78 +491,16 @@ resource "aws_ecs_service" "dagster" {
   desired_count   = 1
   launch_type     = "FARGATE"
 
-  health_check_grace_period_seconds = 60
-
-  load_balancer {
-    target_group_arn = aws_lb_target_group.dagster.arn
-    container_name   = "dagster-webserver"
-    container_port   = 3000
-  }
-
   network_configuration {
-    subnets          = aws_subnet.public[*].id
+    subnets          = [aws_subnet.private.id]
     security_groups  = [aws_security_group.ecs_tasks.id]
-    assign_public_ip = true
+    assign_public_ip = false
   }
 
   tags = local.common_tags
 
   lifecycle {
     create_before_destroy = true
-  }
-
-  depends_on = [aws_lb_listener.http]
-}
-
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Application Load Balancer (ALB)
-# ─────────────────────────────────────────────────────────────────────────────
-
-resource "aws_lb" "main" {
-  name               = "${local.name_prefix}-v2"
-  internal           = false
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb.id]
-  subnets            = aws_subnet.public[*].id # ALB lives in public subnets
-
-  tags = local.common_tags
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-resource "aws_lb_target_group" "dagster" {
-  name        = "${local.name_prefix}-dagster-v2"
-  port        = 3000
-  protocol    = "HTTP"
-  vpc_id      = aws_vpc.main.id
-  target_type = "ip"
-
-  health_check {
-    path                = "/server_info"
-    healthy_threshold   = 2
-    unhealthy_threshold = 10
-  }
-
-  tags = local.common_tags
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-
-resource "aws_lb_listener" "http" {
-  load_balancer_arn = aws_lb.main.arn
-  port              = "80"
-  protocol          = "HTTP"
-
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.dagster.arn
   }
 }
 
@@ -503,42 +510,16 @@ resource "aws_lb_listener" "http" {
 # Security Groups
 # ─────────────────────────────────────────────────────────────────────────────
 
-resource "aws_security_group" "alb" {
-  name_prefix = "${local.name_prefix}-alb-"
-  vpc_id      = aws_vpc.main.id
-
-  # Public HTTP access
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = local.common_tags
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
 resource "aws_security_group" "ecs_tasks" {
   name_prefix = "${local.name_prefix}-ecs-"
   vpc_id      = aws_vpc.main.id
 
-  # Allow port 3000 only from the ALB
+  # Allow port 3000 only from the NAT instance (nginx reverse proxy)
   ingress {
     from_port       = 3000
     to_port         = 3000
     protocol        = "tcp"
-    security_groups = [aws_security_group.alb.id]
+    security_groups = [aws_security_group.nat.id]
   }
 
   # All outbound
@@ -646,6 +627,41 @@ resource "aws_iam_role_policy_attachment" "ecs_execution" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
+# IAM role for NAT instance — allows nginx upstream script to query ECS task IPs
+resource "aws_iam_role" "nat_instance" {
+  name = "${local.name_prefix}-nat-instance"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" }
+    }]
+  })
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy" "nat_instance_ecs" {
+  name = "ecs-read"
+  role = aws_iam_role.nat_instance.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["ecs:ListTasks", "ecs:DescribeTasks"]
+      Resource = "*"
+    }]
+  })
+}
+
+resource "aws_iam_instance_profile" "nat_instance" {
+  name = "${local.name_prefix}-nat-instance"
+  role = aws_iam_role.nat_instance.name
+}
+
 resource "aws_iam_role_policy" "ecs_execution_secrets" {
   name = "secrets-access"
   role = aws_iam_role.ecs_execution.id
@@ -746,11 +762,12 @@ output "s3_bucket" {
   value = aws_s3_bucket.data.id
 }
 
-output "alb_dns_name" {
-  value = "http://${aws_lb.main.dns_name}"
+output "dagster_url" {
+  value       = "http://${aws_eip.nat.public_ip}"
+  description = "Dagster UI — static IP via NAT instance nginx proxy"
 }
 
 output "nat_static_ip" {
   value       = aws_eip.nat.public_ip
-  description = "Static outbound IP — add this to ClickHouse Cloud allowlist"
+  description = "Static IP (inbound Dagster UI + outbound ClickHouse allowlist)"
 }
