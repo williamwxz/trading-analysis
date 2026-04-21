@@ -142,10 +142,10 @@ resource "aws_security_group" "nat" {
     cidr_blocks = [aws_subnet.private.cidr_block]
   }
 
-  # Public HTTP for Dagster UI (proxied by nginx)
+  # Public access to Dagster UI (iptables DNAT from :3000 to ECS task :3000)
   ingress {
-    from_port   = 80
-    to_port     = 80
+    from_port   = 3000
+    to_port     = 3000
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -173,62 +173,52 @@ resource "aws_instance" "nat" {
   source_dest_check           = false
   associate_public_ip_address = true
 
-  # nginx reverse proxy: port 80 → Dagster webserver on private subnet port 3000
-  # A cron job refreshes the upstream IP from ECS every minute
-  user_data = <<-EOF
-    #!/bin/bash
-    set -e
-    yum install -y nginx aws-cli jq
+  # iptables DNAT: forward :3000 on the EIP → ECS task private IP:3000
+  # A cron job updates the DNAT rule when the ECS task IP changes
+  user_data = base64encode(<<EOF
+#!/bin/bash
+dnf install -y aws-cli jq
 
-    # Write nginx config with a placeholder upstream
-    cat > /etc/nginx/conf.d/dagster.conf <<'NGINX'
-upstream dagster {
-    server 127.0.0.1:3000;  # placeholder, updated by cron
-}
-server {
-    listen 80;
-    location / {
-        proxy_pass http://dagster;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_read_timeout 300;
-    }
-}
-NGINX
+# Enable IP forwarding (required for DNAT)
+echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
+sysctl -p
 
-    # Script to fetch current ECS task private IP and update nginx upstream
-    cat > /usr/local/bin/update-dagster-upstream.sh <<'SCRIPT'
+cat > /usr/local/bin/update-dagster-dnat.sh << 'SCRIPT'
 #!/bin/bash
 REGION="ap-northeast-1"
 CLUSTER="trading-analysis"
 SERVICE="trading-analysis-dagster"
+PORT=3000
+STATE_FILE="/var/run/dagster-dnat-ip"
 
 TASK_ARN=$(aws ecs list-tasks --region $REGION --cluster $CLUSTER --service-name $SERVICE --query 'taskArns[0]' --output text 2>/dev/null)
 [ -z "$TASK_ARN" ] || [ "$TASK_ARN" = "None" ] && exit 0
 
-PRIVATE_IP=$(aws ecs describe-tasks --region $REGION --cluster $CLUSTER --tasks $TASK_ARN \
-  --query 'tasks[0].containers[0].networkInterfaces[0].privateIpv4Address' --output text 2>/dev/null)
+PRIVATE_IP=$(aws ecs describe-tasks --region $REGION --cluster $CLUSTER --tasks $TASK_ARN --query 'tasks[0].containers[0].networkInterfaces[0].privateIpv4Address' --output text 2>/dev/null)
 [ -z "$PRIVATE_IP" ] || [ "$PRIVATE_IP" = "None" ] && exit 0
 
-CURRENT=$(grep -oP '(?<=server )\S+(?=;)' /etc/nginx/conf.d/dagster.conf | head -1)
-NEW="$PRIVATE_IP:3000"
-[ "$CURRENT" = "$NEW" ] && exit 0
+CURRENT_IP=$(cat $STATE_FILE 2>/dev/null || echo "")
+[ "$CURRENT_IP" = "$PRIVATE_IP" ] && exit 0
 
-sed -i "s|server $CURRENT;|server $NEW;|" /etc/nginx/conf.d/dagster.conf
-nginx -t && nginx -s reload
-echo "$(date): updated upstream to $NEW"
+# Remove old rule if exists
+if [ -n "$CURRENT_IP" ]; then
+    iptables -t nat -D PREROUTING -p tcp --dport $PORT -j DNAT --to-destination $CURRENT_IP:$PORT 2>/dev/null || true
+    iptables -t nat -D POSTROUTING -d $CURRENT_IP -p tcp --dport $PORT -j MASQUERADE 2>/dev/null || true
+fi
+
+# Add new DNAT rule
+iptables -t nat -A PREROUTING -p tcp --dport $PORT -j DNAT --to-destination $PRIVATE_IP:$PORT
+iptables -t nat -A POSTROUTING -d $PRIVATE_IP -p tcp --dport $PORT -j MASQUERADE
+echo "$PRIVATE_IP" > $STATE_FILE
+echo "$(date): updated DNAT to $PRIVATE_IP:$PORT"
 SCRIPT
 
-    chmod +x /usr/local/bin/update-dagster-upstream.sh
-
-    # Run on boot and every minute via cron
-    /usr/local/bin/update-dagster-upstream.sh || true
-    echo "* * * * * root /usr/local/bin/update-dagster-upstream.sh >> /var/log/dagster-upstream.log 2>&1" > /etc/cron.d/dagster-upstream
-
-    systemctl enable nginx
-    systemctl start nginx
-  EOF
+chmod +x /usr/local/bin/update-dagster-dnat.sh
+/usr/local/bin/update-dagster-dnat.sh || true
+mkdir -p /etc/cron.d
+echo "* * * * * root /usr/local/bin/update-dagster-dnat.sh >> /var/log/dagster-dnat.log 2>&1" > /etc/cron.d/dagster-dnat
+EOF
+  )
 
   user_data_replace_on_change = true
 
