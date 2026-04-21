@@ -25,4 +25,5 @@ backfill_job = define_asset_job(
         "Manual backfill: price fetch → prod PnL → real trade PnL → hourly rollup. "
         "Select one or more daily partition dates in the Launchpad."
     ),
+    tags={"dagster/max_concurrent_runs": "5"},
 )
