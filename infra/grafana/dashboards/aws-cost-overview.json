@@ -18,6 +18,7 @@
   "timepicker": {},
   "timezone": "utc",
   "schemaVersion": 39,
+  "version": 1,
   "panels": [
     {
       "id": 1,
@@ -51,6 +52,7 @@
       },
       "targets": [
         {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
           "refId": "A",
           "region": "us-east-1",
           "namespace": "AWS/Billing",
@@ -58,7 +60,7 @@
           "dimensions": { "Currency": "USD" },
           "matchExact": true,
           "statistic": "Maximum",
-          "period": "86400",
+          "period": 86400,
           "alias": "Total"
         }
       ]
@@ -87,11 +89,11 @@
         "displayMode": "gradient",
         "showUnfilled": true,
         "valueMode": "color",
-        "namePlacement": "auto",
-        "legendDisplayMode": "hidden"
+        "namePlacement": "auto"
       },
       "targets": [
         {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
           "refId": "A",
           "region": "us-east-1",
           "namespace": "AWS/Billing",
@@ -99,10 +101,11 @@
           "dimensions": { "Currency": "USD", "ServiceName": "Amazon EC2" },
           "matchExact": true,
           "statistic": "Maximum",
-          "period": "86400",
+          "period": 86400,
           "alias": "EC2"
         },
         {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
           "refId": "B",
           "region": "us-east-1",
           "namespace": "AWS/Billing",
@@ -110,10 +113,11 @@
           "dimensions": { "Currency": "USD", "ServiceName": "Amazon Elastic Container Service" },
           "matchExact": true,
           "statistic": "Maximum",
-          "period": "86400",
+          "period": 86400,
           "alias": "ECS"
         },
         {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
           "refId": "C",
           "region": "us-east-1",
           "namespace": "AWS/Billing",
@@ -121,10 +125,11 @@
           "dimensions": { "Currency": "USD", "ServiceName": "Amazon EC2 Container Registry (ECR)" },
           "matchExact": true,
           "statistic": "Maximum",
-          "period": "86400",
+          "period": 86400,
           "alias": "ECR"
         },
         {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
           "refId": "D",
           "region": "us-east-1",
           "namespace": "AWS/Billing",
@@ -132,10 +137,11 @@
           "dimensions": { "Currency": "USD", "ServiceName": "Amazon Elastic File System" },
           "matchExact": true,
           "statistic": "Maximum",
-          "period": "86400",
+          "period": 86400,
           "alias": "EFS"
         },
         {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
           "refId": "E",
           "region": "us-east-1",
           "namespace": "AWS/Billing",
@@ -143,10 +149,11 @@
           "dimensions": { "Currency": "USD", "ServiceName": "Amazon Simple Storage Service" },
           "matchExact": true,
           "statistic": "Maximum",
-          "period": "86400",
+          "period": 86400,
           "alias": "S3"
         },
         {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
           "refId": "F",
           "region": "us-east-1",
           "namespace": "AWS/Billing",
@@ -154,10 +161,11 @@
           "dimensions": { "Currency": "USD", "ServiceName": "AWS Secrets Manager" },
           "matchExact": true,
           "statistic": "Maximum",
-          "period": "86400",
+          "period": 86400,
           "alias": "Secrets Manager"
         },
         {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
           "refId": "G",
           "region": "us-east-1",
           "namespace": "AWS/Billing",
@@ -165,10 +173,11 @@
           "dimensions": { "Currency": "USD", "ServiceName": "Amazon CloudWatch" },
           "matchExact": true,
           "statistic": "Maximum",
-          "period": "86400",
+          "period": 86400,
           "alias": "CloudWatch"
         },
         {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
           "refId": "H",
           "region": "us-east-1",
           "namespace": "AWS/Billing",
@@ -176,7 +185,7 @@
           "dimensions": { "Currency": "USD", "ServiceName": "AWS CloudTrail" },
           "matchExact": true,
           "statistic": "Maximum",
-          "period": "86400",
+          "period": 86400,
           "alias": "CloudTrail"
         }
       ]
@@ -214,6 +223,7 @@
       },
       "targets": [
         {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
           "refId": "A",
           "region": "us-east-1",
           "namespace": "AWS/Billing",
@@ -221,10 +231,11 @@
           "dimensions": { "Currency": "USD", "ServiceName": "Amazon EC2" },
           "matchExact": true,
           "statistic": "Maximum",
-          "period": "86400",
+          "period": 86400,
           "alias": "EC2"
         },
         {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
           "refId": "B",
           "region": "us-east-1",
           "namespace": "AWS/Billing",
@@ -232,10 +243,11 @@
           "dimensions": { "Currency": "USD", "ServiceName": "Amazon Elastic Container Service" },
           "matchExact": true,
           "statistic": "Maximum",
-          "period": "86400",
+          "period": 86400,
           "alias": "ECS"
         },
         {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
           "refId": "C",
           "region": "us-east-1",
           "namespace": "AWS/Billing",
@@ -243,10 +255,11 @@
           "dimensions": { "Currency": "USD", "ServiceName": "Amazon EC2 Container Registry (ECR)" },
           "matchExact": true,
           "statistic": "Maximum",
-          "period": "86400",
+          "period": 86400,
           "alias": "ECR"
         },
         {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
           "refId": "D",
           "region": "us-east-1",
           "namespace": "AWS/Billing",
@@ -254,10 +267,11 @@
           "dimensions": { "Currency": "USD", "ServiceName": "Amazon Elastic File System" },
           "matchExact": true,
           "statistic": "Maximum",
-          "period": "86400",
+          "period": 86400,
           "alias": "EFS"
         },
         {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
           "refId": "E",
           "region": "us-east-1",
           "namespace": "AWS/Billing",
@@ -265,10 +279,11 @@
           "dimensions": { "Currency": "USD", "ServiceName": "Amazon Simple Storage Service" },
           "matchExact": true,
           "statistic": "Maximum",
-          "period": "86400",
+          "period": 86400,
           "alias": "S3"
         },
         {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
           "refId": "F",
           "region": "us-east-1",
           "namespace": "AWS/Billing",
@@ -276,10 +291,11 @@
           "dimensions": { "Currency": "USD", "ServiceName": "AWS Secrets Manager" },
           "matchExact": true,
           "statistic": "Maximum",
-          "period": "86400",
+          "period": 86400,
           "alias": "Secrets Manager"
         },
         {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
           "refId": "G",
           "region": "us-east-1",
           "namespace": "AWS/Billing",
@@ -287,10 +303,11 @@
           "dimensions": { "Currency": "USD", "ServiceName": "Amazon CloudWatch" },
           "matchExact": true,
           "statistic": "Maximum",
-          "period": "86400",
+          "period": 86400,
           "alias": "CloudWatch"
         },
         {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
           "refId": "H",
           "region": "us-east-1",
           "namespace": "AWS/Billing",
@@ -298,7 +315,7 @@
           "dimensions": { "Currency": "USD", "ServiceName": "AWS CloudTrail" },
           "matchExact": true,
           "statistic": "Maximum",
-          "period": "86400",
+          "period": 86400,
           "alias": "CloudTrail"
         }
       ]
