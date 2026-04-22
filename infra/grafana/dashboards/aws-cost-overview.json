@@ -1,0 +1,307 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "uid": "aws-cost-overview",
+  "title": "AWS Cost \u2014 Current Month",
+  "tags": ["aws", "cost"],
+  "links": [],
+  "liveNow": false,
+  "refresh": "1h",
+  "time": {
+    "from": "now/M",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Total MTD Cost (USD)",
+      "description": "Cumulative AWS spend for the current calendar month across all services. Updates every 4\u20138 hours from CloudWatch billing metrics.",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 4 },
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "red", "value": 200 }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["max"] },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "region": "us-east-1",
+          "namespace": "AWS/Billing",
+          "metricName": "EstimatedCharges",
+          "dimensions": { "Currency": "USD" },
+          "matchExact": true,
+          "statistic": "Maximum",
+          "period": "86400",
+          "alias": "Total"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "bargauge",
+      "title": "MTD Cost by Service (USD)",
+      "description": "Current month-to-date spend per AWS service. Each bar shows the latest cumulative value.",
+      "gridPos": { "x": 0, "y": 4, "w": 24, "h": 10 },
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "color": { "mode": "palette-classic" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "green", "value": null }]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["max"] },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "valueMode": "color",
+        "namePlacement": "auto",
+        "legendDisplayMode": "hidden"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "region": "us-east-1",
+          "namespace": "AWS/Billing",
+          "metricName": "EstimatedCharges",
+          "dimensions": { "Currency": "USD", "ServiceName": "Amazon EC2" },
+          "matchExact": true,
+          "statistic": "Maximum",
+          "period": "86400",
+          "alias": "EC2"
+        },
+        {
+          "refId": "B",
+          "region": "us-east-1",
+          "namespace": "AWS/Billing",
+          "metricName": "EstimatedCharges",
+          "dimensions": { "Currency": "USD", "ServiceName": "Amazon Elastic Container Service" },
+          "matchExact": true,
+          "statistic": "Maximum",
+          "period": "86400",
+          "alias": "ECS"
+        },
+        {
+          "refId": "C",
+          "region": "us-east-1",
+          "namespace": "AWS/Billing",
+          "metricName": "EstimatedCharges",
+          "dimensions": { "Currency": "USD", "ServiceName": "Amazon EC2 Container Registry (ECR)" },
+          "matchExact": true,
+          "statistic": "Maximum",
+          "period": "86400",
+          "alias": "ECR"
+        },
+        {
+          "refId": "D",
+          "region": "us-east-1",
+          "namespace": "AWS/Billing",
+          "metricName": "EstimatedCharges",
+          "dimensions": { "Currency": "USD", "ServiceName": "Amazon Elastic File System" },
+          "matchExact": true,
+          "statistic": "Maximum",
+          "period": "86400",
+          "alias": "EFS"
+        },
+        {
+          "refId": "E",
+          "region": "us-east-1",
+          "namespace": "AWS/Billing",
+          "metricName": "EstimatedCharges",
+          "dimensions": { "Currency": "USD", "ServiceName": "Amazon Simple Storage Service" },
+          "matchExact": true,
+          "statistic": "Maximum",
+          "period": "86400",
+          "alias": "S3"
+        },
+        {
+          "refId": "F",
+          "region": "us-east-1",
+          "namespace": "AWS/Billing",
+          "metricName": "EstimatedCharges",
+          "dimensions": { "Currency": "USD", "ServiceName": "AWS Secrets Manager" },
+          "matchExact": true,
+          "statistic": "Maximum",
+          "period": "86400",
+          "alias": "Secrets Manager"
+        },
+        {
+          "refId": "G",
+          "region": "us-east-1",
+          "namespace": "AWS/Billing",
+          "metricName": "EstimatedCharges",
+          "dimensions": { "Currency": "USD", "ServiceName": "Amazon CloudWatch" },
+          "matchExact": true,
+          "statistic": "Maximum",
+          "period": "86400",
+          "alias": "CloudWatch"
+        },
+        {
+          "refId": "H",
+          "region": "us-east-1",
+          "namespace": "AWS/Billing",
+          "metricName": "EstimatedCharges",
+          "dimensions": { "Currency": "USD", "ServiceName": "AWS CloudTrail" },
+          "matchExact": true,
+          "statistic": "Maximum",
+          "period": "86400",
+          "alias": "CloudTrail"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Daily Cost Trend by Service (USD, cumulative MTD)",
+      "description": "Running month-to-date cost per service over time. Values are cumulative (not daily delta) \u2014 an upward slope = spend is occurring.",
+      "gridPos": { "x": 0, "y": 14, "w": 24, "h": 10 },
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "lineInterpolation": "smooth"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "calcs": ["last", "max"],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "region": "us-east-1",
+          "namespace": "AWS/Billing",
+          "metricName": "EstimatedCharges",
+          "dimensions": { "Currency": "USD", "ServiceName": "Amazon EC2" },
+          "matchExact": true,
+          "statistic": "Maximum",
+          "period": "86400",
+          "alias": "EC2"
+        },
+        {
+          "refId": "B",
+          "region": "us-east-1",
+          "namespace": "AWS/Billing",
+          "metricName": "EstimatedCharges",
+          "dimensions": { "Currency": "USD", "ServiceName": "Amazon Elastic Container Service" },
+          "matchExact": true,
+          "statistic": "Maximum",
+          "period": "86400",
+          "alias": "ECS"
+        },
+        {
+          "refId": "C",
+          "region": "us-east-1",
+          "namespace": "AWS/Billing",
+          "metricName": "EstimatedCharges",
+          "dimensions": { "Currency": "USD", "ServiceName": "Amazon EC2 Container Registry (ECR)" },
+          "matchExact": true,
+          "statistic": "Maximum",
+          "period": "86400",
+          "alias": "ECR"
+        },
+        {
+          "refId": "D",
+          "region": "us-east-1",
+          "namespace": "AWS/Billing",
+          "metricName": "EstimatedCharges",
+          "dimensions": { "Currency": "USD", "ServiceName": "Amazon Elastic File System" },
+          "matchExact": true,
+          "statistic": "Maximum",
+          "period": "86400",
+          "alias": "EFS"
+        },
+        {
+          "refId": "E",
+          "region": "us-east-1",
+          "namespace": "AWS/Billing",
+          "metricName": "EstimatedCharges",
+          "dimensions": { "Currency": "USD", "ServiceName": "Amazon Simple Storage Service" },
+          "matchExact": true,
+          "statistic": "Maximum",
+          "period": "86400",
+          "alias": "S3"
+        },
+        {
+          "refId": "F",
+          "region": "us-east-1",
+          "namespace": "AWS/Billing",
+          "metricName": "EstimatedCharges",
+          "dimensions": { "Currency": "USD", "ServiceName": "AWS Secrets Manager" },
+          "matchExact": true,
+          "statistic": "Maximum",
+          "period": "86400",
+          "alias": "Secrets Manager"
+        },
+        {
+          "refId": "G",
+          "region": "us-east-1",
+          "namespace": "AWS/Billing",
+          "metricName": "EstimatedCharges",
+          "dimensions": { "Currency": "USD", "ServiceName": "Amazon CloudWatch" },
+          "matchExact": true,
+          "statistic": "Maximum",
+          "period": "86400",
+          "alias": "CloudWatch"
+        },
+        {
+          "refId": "H",
+          "region": "us-east-1",
+          "namespace": "AWS/Billing",
+          "metricName": "EstimatedCharges",
+          "dimensions": { "Currency": "USD", "ServiceName": "AWS CloudTrail" },
+          "matchExact": true,
+          "statistic": "Maximum",
+          "period": "86400",
+          "alias": "CloudTrail"
+        }
+      ]
+    }
+  ]
+}
