@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Mini trading analytics pipeline. Processes strategy PnL data with Binance API polling, ClickHouse Cloud analytics, Dagster orchestration, and Grafana dashboards. Deployed on AWS ECS Fargate in `ap-northeast-1` (Tokyo).
+Mini trading analytics pipeline. Processes strategy PnL data with Binance API polling, ClickHouse Cloud analytics, Dagster orchestration, and Grafana Cloud dashboards. Dagster deployed on AWS ECS Fargate in `ap-northeast-1` (Tokyo). Grafana is Grafana Cloud (not self-hosted).
 
 ## Commands
 
@@ -28,9 +28,9 @@ pytest -m integration # requires live ClickHouse/S3
 docker compose up -d postgres
 dagster dev           # http://localhost:3000
 
-# Full local stack (Dagster + Grafana)
+# Full local stack (Dagster only — Grafana is Grafana Cloud, not local)
 docker compose up -d
-# Dagster: http://localhost:3000, Grafana: http://localhost:3001 (admin/admin)
+# Dagster: http://localhost:3000
 ```
 
 ## Architecture
@@ -119,10 +119,22 @@ GitHub Actions drives all CI/CD. Workflows live in `.github/workflows/`.
 
 | Workflow | Trigger | Stages |
 |----------|---------|--------|
-| `ci-cd.yml` | Push to `main` | test → build → schema + deploy-dagster + deploy-grafana (parallel) |
+| `ci-cd.yml` | Push to `main` | test → build → deploy-dagster + deploy-grafana-cloud (parallel) |
 | `terraform.yml` | Manual (`workflow_dispatch`) | plan (always) → apply (if `auto_approve=true`) |
 
 AWS auth uses GitHub OIDC — no static credentials stored in GitHub. Each job that needs AWS access declares `permissions: id-token: write` at the job level and assumes the `trading-analysis-github-actions` IAM role via `aws-actions/configure-aws-credentials@v4`.
+
+### Grafana Cloud Deployment
+
+Dashboard JSON files in `infra/grafana/dashboards/` are automatically pushed to Grafana Cloud on every push to `main` via the `deploy-grafana-cloud` job. It uses:
+- `GRAFANA_CLOUD_TOKEN` — service account token (GitHub secret)
+- `GRAFANA_CLOUD_URL` — Grafana Cloud stack URL, e.g. `https://yourstack.grafana.net` (GitHub secret)
+
+The job POSTs each `*.json` file to `$GRAFANA_CLOUD_URL/api/dashboards/db` with `"overwrite": true`. To add or update a dashboard, commit the JSON to `infra/grafana/dashboards/` and push to `main`.
+
+### IAM for Grafana CloudWatch Datasource
+
+The IAM user `trading-analysis-grafana-cloudwatch` (with `cloudwatch:GetMetricStatistics`, `cloudwatch:ListMetrics`, `cloudwatch:GetMetricData` permissions) is managed by Terraform. After `terraform apply`, retrieve the access key and configure it in Grafana Cloud → Connections → CloudWatch datasource (default region: `us-east-1`, where AWS billing metrics are published).
 
 ### One-Time AWS Setup
 
@@ -254,10 +266,6 @@ gh secret set AWS_REGION --body "ap-northeast-1" --repo williamwxz/trading-analy
 gh secret set GHA_ROLE_ARN --body "arn:aws:iam::339163283253:role/trading-analysis-github-actions" --repo williamwxz/trading-analysis
 ```
 
-### Destroying old CodePipeline infrastructure
-
-After the GitHub Actions workflows are confirmed working, run the terraform workflow manually with `auto_approve=true` to destroy the old CodePipeline/CodeBuild resources (already removed from Terraform state via `codepipeline.tf` deletion).
-
 ## Deployment
 
 ```bash
@@ -274,5 +282,5 @@ terraform apply -var="github_repo=williamwxz/trading-analysis"
 clickhouse-client --host <host> --secure --password <pw> < schemas/clickhouse_cloud.sql
 ```
 
-ECR repos: `trading-analysis-dagster`, `trading-analysis-grafana`  
+ECR repo: `trading-analysis-dagster`  
 S3 buckets: `trading-analysis-data-v2`, `trading-analysis-pipeline-v2`

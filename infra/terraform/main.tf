@@ -773,6 +773,40 @@ resource "aws_iam_role_policy" "ecs_task_policy" {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# IAM User — Grafana Cloud CloudWatch read access (billing metrics)
+# ─────────────────────────────────────────────────────────────────────────────
+
+resource "aws_iam_user" "grafana_cloudwatch" {
+  name = "${local.name_prefix}-grafana-cloudwatch"
+  tags = local.common_tags
+}
+
+resource "aws_iam_user_policy" "grafana_cloudwatch" {
+  name = "cloudwatch-billing-read"
+  user = aws_iam_user.grafana_cloudwatch.name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "cloudwatch:GetMetricStatistics",
+          "cloudwatch:ListMetrics",
+          "cloudwatch:GetMetricData",
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_access_key" "grafana_cloudwatch" {
+  user = aws_iam_user.grafana_cloudwatch.name
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Outputs
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -796,4 +830,15 @@ output "dagster_url" {
 output "nat_static_ip" {
   value       = aws_eip.nat.public_ip
   description = "Static IP (inbound Dagster UI + outbound ClickHouse allowlist)"
+}
+
+output "grafana_cloudwatch_access_key_id" {
+  value       = aws_iam_access_key.grafana_cloudwatch.id
+  description = "Access key ID for Grafana Cloud CloudWatch datasource"
+}
+
+output "grafana_cloudwatch_secret_access_key" {
+  value       = aws_iam_access_key.grafana_cloudwatch.secret
+  description = "Secret access key for Grafana Cloud CloudWatch datasource"
+  sensitive   = true
 }
