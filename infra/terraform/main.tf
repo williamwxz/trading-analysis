@@ -773,7 +773,9 @@ resource "aws_iam_role_policy" "ecs_task_policy" {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# IAM User — Grafana Cloud CloudWatch read access (billing metrics)
+# IAM User — Grafana Cloud CloudWatch read access (AWS/Billing namespace metrics)
+# Grants read access to CloudWatch EstimatedCharges metrics in us-east-1 only.
+# Does NOT grant Cost Explorer (ce:*) access — billing data comes from CloudWatch.
 # ─────────────────────────────────────────────────────────────────────────────
 
 resource "aws_iam_user" "grafana_cloudwatch" {
@@ -796,6 +798,11 @@ resource "aws_iam_user_policy" "grafana_cloudwatch" {
           "cloudwatch:GetMetricData",
         ]
         Resource = "*"
+        Condition = {
+          StringEquals = {
+            "cloudwatch:namespace" = ["AWS/Billing"]
+          }
+        }
       }
     ]
   })
