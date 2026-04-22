@@ -12,6 +12,24 @@
 
 set -euo pipefail
 
+# Check for session-manager-plugin
+if ! command -v session-manager-plugin &>/dev/null; then
+  echo "session-manager-plugin is not installed."
+  read -r -p "Install it now? (requires sudo) [y/N] " reply
+  if [[ "$reply" =~ ^[Yy]$ ]]; then
+    echo "Downloading..."
+    curl -sSL "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/mac_arm64/session-manager-plugin.pkg" -o /tmp/session-manager-plugin.pkg
+    echo "Installing (you may be prompted for your password)..."
+    sudo installer -pkg /tmp/session-manager-plugin.pkg -target /
+    sudo ln -sf /usr/local/sessionmanagerplugin/bin/session-manager-plugin /usr/local/bin/session-manager-plugin
+    rm /tmp/session-manager-plugin.pkg
+    echo "Installed."
+  else
+    echo "Aborted."
+    exit 1
+  fi
+fi
+
 PROFILE="AdministratorAccess-339163283253"
 REGION="ap-northeast-1"
 CLUSTER="trading-analysis"

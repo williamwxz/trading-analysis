@@ -1,0 +1,5 @@
+load_from:
+  - grpc_server:
+      host: localhost
+      port: 4266
+      location_name: trading_dagster

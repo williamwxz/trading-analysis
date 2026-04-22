@@ -400,7 +400,7 @@ resource "aws_ecs_task_definition" "dagster" {
       name      = "dagster-webserver"
       image     = "${aws_ecr_repository.dagster.repository_url}:latest"
       essential = true
-      command   = ["dagster-webserver", "-h", "0.0.0.0", "-p", "3000", "-m", "trading_dagster"]
+      command   = ["dagster-webserver", "-h", "0.0.0.0", "-p", "3000"]
 
       portMappings = [
         {
@@ -414,7 +414,7 @@ resource "aws_ecs_task_definition" "dagster" {
         { name = "CLICKHOUSE_USER",   value = "dev_ro3" },
         { name = "CLICKHOUSE_PORT",   value = "8443" },
         { name = "CLICKHOUSE_SECURE", value = "true" },
-        { name = "DAGSTER_PG_DB", value = "postgres" },
+        { name = "DAGSTER_PG_DB",     value = "postgres" },
       ]
 
       secrets = [
@@ -438,7 +438,7 @@ resource "aws_ecs_task_definition" "dagster" {
       name      = "dagster-daemon"
       image     = "${aws_ecr_repository.dagster.repository_url}:latest"
       essential = true
-      command   = ["dagster-daemon", "run", "-m", "trading_dagster"]
+      command   = ["dagster-daemon", "run"]
 
       environment = [
         { name = "DAGSTER_HOME",      value = "/app" },
@@ -462,6 +462,37 @@ resource "aws_ecs_task_definition" "dagster" {
           "awslogs-group"         = aws_cloudwatch_log_group.dagster.name
           "awslogs-region"        = var.aws_region
           "awslogs-stream-prefix" = "daemon"
+        }
+      }
+    },
+    {
+      name      = "dagster-code-server"
+      image     = "${aws_ecr_repository.dagster.repository_url}:latest"
+      essential = true
+      command   = ["dagster", "code-server", "start", "-h", "0.0.0.0", "-p", "4266", "-m", "trading_dagster"]
+
+      environment = [
+        { name = "DAGSTER_HOME",      value = "/app" },
+        { name = "CLICKHOUSE_USER",   value = "dev_ro3" },
+        { name = "CLICKHOUSE_PORT",   value = "8443" },
+        { name = "CLICKHOUSE_SECURE", value = "true" },
+        { name = "DAGSTER_PG_DB",     value = "postgres" },
+      ]
+
+      secrets = [
+        { name = "CLICKHOUSE_HOST",     valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
+        { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
+        { name = "DAGSTER_PG_HOST",     valueFrom = "${aws_secretsmanager_secret.supabase.arn}:host::" },
+        { name = "DAGSTER_PG_PASSWORD", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:password::" },
+        { name = "DAGSTER_PG_USER",     valueFrom = "${aws_secretsmanager_secret.supabase.arn}:user::" },
+      ]
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.dagster.name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "code-server"
         }
       }
     }

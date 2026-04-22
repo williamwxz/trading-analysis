@@ -27,6 +27,7 @@ ENV DAGSTER_HOME=/app
 # Copy application code and config
 COPY trading_dagster/ trading_dagster/
 COPY dagster.yaml .
+COPY workspace.yaml .
 # pyproject.toml provides [tool.dagster] module_name for dagster-daemon auto-discovery
 COPY pyproject.toml .
 
