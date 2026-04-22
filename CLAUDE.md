@@ -134,7 +134,16 @@ The job POSTs each `*.json` file to `$GRAFANA_CLOUD_URL/api/dashboards/db` with 
 
 ### IAM for Grafana CloudWatch Datasource
 
-The IAM user `trading-analysis-grafana-cloudwatch` (with `cloudwatch:GetMetricStatistics`, `cloudwatch:ListMetrics`, `cloudwatch:GetMetricData` permissions) is managed by Terraform. After `terraform apply`, retrieve the access key and configure it in Grafana Cloud → Connections → CloudWatch datasource (default region: `us-east-1`, where AWS billing metrics are published).
+The IAM user `trading-analysis-grafana-cloudwatch` (with `cloudwatch:GetMetricStatistics`, `cloudwatch:ListMetrics`, `cloudwatch:GetMetricData` permissions, scoped to `AWS/Billing` namespace) is managed by Terraform. Credentials are stored in Secrets Manager at `trading-analysis/grafana-cloudwatch` (region: `ap-northeast-1`). After `terraform apply`, retrieve them:
+
+```bash
+aws secretsmanager get-secret-value \
+  --secret-id trading-analysis/grafana-cloudwatch \
+  --region ap-northeast-1 \
+  --query SecretString --output text
+```
+
+Configure in Grafana Cloud → Connections → CloudWatch datasource (default region: `us-east-1`, where AWS billing metrics are published).
 
 ### One-Time AWS Setup
 

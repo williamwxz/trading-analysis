@@ -812,6 +812,30 @@ resource "aws_iam_access_key" "grafana_cloudwatch" {
   user = aws_iam_user.grafana_cloudwatch.name
 }
 
+# Store credentials in Secrets Manager so they are never exposed as Terraform outputs.
+# Retrieve after terraform apply:
+#   aws secretsmanager get-secret-value \
+#     --secret-id trading-analysis/grafana-cloudwatch \
+#     --region ap-northeast-1 \
+#     --query SecretString --output text
+resource "aws_secretsmanager_secret" "grafana_cloudwatch" {
+  name        = "${local.name_prefix}/grafana-cloudwatch"
+  description = "Grafana Cloud CloudWatch datasource credentials (access key ID + secret)"
+  tags        = local.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_secretsmanager_secret_version" "grafana_cloudwatch" {
+  secret_id = aws_secretsmanager_secret.grafana_cloudwatch.id
+  secret_string = jsonencode({
+    access_key_id     = aws_iam_access_key.grafana_cloudwatch.id
+    secret_access_key = aws_iam_access_key.grafana_cloudwatch.secret
+  })
+}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Outputs
@@ -839,13 +863,7 @@ output "nat_static_ip" {
   description = "Static IP (inbound Dagster UI + outbound ClickHouse allowlist)"
 }
 
-output "grafana_cloudwatch_access_key_id" {
-  value       = aws_iam_access_key.grafana_cloudwatch.id
-  description = "Access key ID for Grafana Cloud CloudWatch datasource"
-}
-
-output "grafana_cloudwatch_secret_access_key" {
-  value       = aws_iam_access_key.grafana_cloudwatch.secret
-  description = "Secret access key for Grafana Cloud CloudWatch datasource"
-  sensitive   = true
+output "grafana_cloudwatch_secret_arn" {
+  value       = aws_secretsmanager_secret.grafana_cloudwatch.arn
+  description = "ARN of the Secrets Manager secret holding Grafana CloudWatch datasource credentials"
 }
