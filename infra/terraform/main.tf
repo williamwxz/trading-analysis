@@ -391,7 +391,7 @@ resource "aws_ecs_task_definition" "dagster" {
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = 1024
-  memory                   = 2048
+  memory                   = 4096
   execution_role_arn       = aws_iam_role.ecs_execution.arn
   task_role_arn            = aws_iam_role.ecs_task.arn
 
@@ -469,7 +469,7 @@ resource "aws_ecs_task_definition" "dagster" {
       name      = "dagster-code-server"
       image     = "${aws_ecr_repository.dagster.repository_url}:latest"
       essential = true
-      command   = ["dagster", "code-server", "start", "-h", "0.0.0.0", "-p", "4266", "-m", "trading_dagster"]
+      command   = ["dagster", "api", "grpc", "-h", "0.0.0.0", "-p", "4266", "-m", "trading_dagster", "--heartbeat-timeout", "3600"]
 
       environment = [
         { name = "DAGSTER_HOME",      value = "/app" },
