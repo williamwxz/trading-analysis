@@ -119,8 +119,7 @@ GitHub Actions drives all CI/CD. Workflows live in `.github/workflows/`.
 
 | Workflow | Trigger | Stages |
 |----------|---------|--------|
-| `ci-cd.yml` | Push to `main` | test → build → deploy-dagster + deploy-grafana-cloud (parallel) |
-| `terraform.yml` | Manual (`workflow_dispatch`) | plan (always) → apply (if `auto_approve=true`) |
+| `ci-cd.yml` | Push to `main` | test → build + terraform (parallel) → deploy-dagster + deploy-grafana-cloud (parallel, terraform must pass first) |
 
 AWS auth uses GitHub OIDC — no static credentials stored in GitHub. Each job that needs AWS access declares `permissions: id-token: write` at the job level and assumes the `trading-analysis-github-actions` IAM role via `aws-actions/configure-aws-credentials@v4`.
 
