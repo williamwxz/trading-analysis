@@ -204,8 +204,7 @@ cat > /tmp/gha-permissions.json <<'EOF'
       "Effect": "Allow",
       "Action": ["ecr:*"],
       "Resource": [
-        "arn:aws:ecr:ap-northeast-1:339163283253:repository/trading-analysis-dagster",
-        "arn:aws:ecr:ap-northeast-1:339163283253:repository/trading-analysis-grafana"
+        "arn:aws:ecr:ap-northeast-1:339163283253:repository/trading-analysis-dagster"
       ]
     },
     {
@@ -252,7 +251,7 @@ cat > /tmp/gha-permissions.json <<'EOF'
       "Action": [
         "ec2:*", "rds:*", "elasticloadbalancing:*",
         "iam:*", "secretsmanager:*", "ecs:*",
-        "s3:*", "ecr:*", "logs:*"
+        "s3:*", "ecr:*", "logs:*", "elasticfilesystem:*"
       ],
       "Resource": "*"
     }
