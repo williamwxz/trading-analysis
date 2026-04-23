@@ -354,17 +354,34 @@ def compute_prod_pnl(
 
     Returns: List of rows ready for INSERT (PROD_INSERT_COLUMNS order)
     """
+    output_rows = []
+    for _, strategy_rows in iter_compute_prod_pnl(bars, anchors, prices, source_label):
+        output_rows.extend(strategy_rows)
+    return output_rows
+
+
+def iter_compute_prod_pnl(
+    bars: List[dict],
+    anchors: Dict[str, Tuple[float, float]],
+    prices: Dict[str, float],
+    source_label: str = "production",
+):
+    """Same as compute_prod_pnl but yields (strategy_table_name, rows) per strategy.
+
+    Use this in memory-constrained paths (e.g. large backfills) so each
+    strategy's rows can be inserted and freed before processing the next one.
+    """
     by_strategy: Dict[str, List[dict]] = defaultdict(list)
     for bar in bars:
         by_strategy[bar["strategy_table_name"]].append(bar)
 
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    output_rows = []
 
     for stn, strategy_bars in by_strategy.items():
         strategy_bars.sort(key=lambda b: b["ts"])
 
         anchor_pnl, anchor_open_price, active_position = anchors.get(stn, (0.0, 0.0, 0.0))
+        strategy_rows = []
 
         for bar in strategy_bars:
             tf_minutes = TIMEFRAME_MAP.get(bar["config_timeframe"], 5)
@@ -375,7 +392,7 @@ def compute_prod_pnl(
             for n in range(tf_minutes):
                 ts_1min = bar_ts + timedelta(minutes=n)
                 ts_str = ts_1min.strftime("%Y-%m-%d %H:%M:%S")
-                
+
                 live_open_price = prices.get(ts_str, anchor_open_price if anchor_open_price != 0.0 else bar_price)
 
                 if anchor_open_price == 0.0:
@@ -386,7 +403,7 @@ def compute_prod_pnl(
                 else:
                     cpnl = anchor_pnl
 
-                output_rows.append([
+                strategy_rows.append([
                     stn, bar["strategy_id"], bar["strategy_name"],
                     bar["underlying"], bar["config_timeframe"],
                     source_label, "v2", ts_str, cpnl,
@@ -398,7 +415,7 @@ def compute_prod_pnl(
                 anchor_pnl = cpnl
                 anchor_open_price = live_open_price
 
-    return output_rows
+        yield stn, strategy_rows
 
 
 def compute_real_trade_pnl(

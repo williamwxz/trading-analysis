@@ -36,6 +36,7 @@ from ..utils.pnl_compute import (
     fetch_prices,
     fetch_prices_multi,
     compute_prod_pnl,
+    iter_compute_prod_pnl,
     compute_bt_pnl,
     compute_real_trade_pnl,
     PROD_INSERT_COLUMNS,
@@ -284,9 +285,11 @@ def _refresh_pnl_partitioned(context, target_table: str, source_table: str, labe
         anchors = fetch_anchors(target_table, underlying)
         prices = all_prices.get(underlying, {})
 
-        rows = compute_prod_pnl(rows_dict, anchors, prices, source_label=label)
-        processed_rows = _prepare_rows_for_clickhouse(rows)
-        total_rows += insert_rows(f"analytics.{target_table}", PROD_INSERT_COLUMNS, processed_rows, client)
+        # Insert per-strategy so each strategy's expanded rows are freed after
+        # insert rather than accumulating all strategies in memory at once.
+        for _stn, strategy_rows in iter_compute_prod_pnl(rows_dict, anchors, prices, source_label=label):
+            processed_rows = _prepare_rows_for_clickhouse(strategy_rows)
+            total_rows += insert_rows(f"analytics.{target_table}", PROD_INSERT_COLUMNS, processed_rows, client)
 
     return MaterializeResult(metadata={"partition": date_str, "rows_inserted": total_rows})
 
