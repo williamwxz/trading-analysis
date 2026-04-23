@@ -410,19 +410,19 @@ resource "aws_ecs_task_definition" "dagster" {
       ]
 
       environment = [
-        { name = "DAGSTER_HOME",      value = "/app" },
-        { name = "CLICKHOUSE_USER",   value = "dev_ro3" },
-        { name = "CLICKHOUSE_PORT",   value = "8443" },
+        { name = "DAGSTER_HOME", value = "/app" },
+        { name = "CLICKHOUSE_USER", value = "dev_ro3" },
+        { name = "CLICKHOUSE_PORT", value = "8443" },
         { name = "CLICKHOUSE_SECURE", value = "true" },
-        { name = "DAGSTER_PG_DB",     value = "postgres" },
+        { name = "DAGSTER_PG_DB", value = "postgres" },
       ]
 
       secrets = [
-        { name = "CLICKHOUSE_HOST",     valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
+        { name = "CLICKHOUSE_HOST", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
         { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
-        { name = "DAGSTER_PG_HOST",     valueFrom = "${aws_secretsmanager_secret.supabase.arn}:host::" },
+        { name = "DAGSTER_PG_HOST", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:host::" },
         { name = "DAGSTER_PG_PASSWORD", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:password::" },
-        { name = "DAGSTER_PG_USER",     valueFrom = "${aws_secretsmanager_secret.supabase.arn}:user::" },
+        { name = "DAGSTER_PG_USER", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:user::" },
       ]
 
       logConfiguration = {
@@ -441,19 +441,19 @@ resource "aws_ecs_task_definition" "dagster" {
       command   = ["dagster-daemon", "run"]
 
       environment = [
-        { name = "DAGSTER_HOME",      value = "/app" },
-        { name = "CLICKHOUSE_USER",   value = "dev_ro3" },
-        { name = "CLICKHOUSE_PORT",   value = "8443" },
+        { name = "DAGSTER_HOME", value = "/app" },
+        { name = "CLICKHOUSE_USER", value = "dev_ro3" },
+        { name = "CLICKHOUSE_PORT", value = "8443" },
         { name = "CLICKHOUSE_SECURE", value = "true" },
-        { name = "DAGSTER_PG_DB",     value = "postgres" },
+        { name = "DAGSTER_PG_DB", value = "postgres" },
       ]
 
       secrets = [
-        { name = "CLICKHOUSE_HOST",     valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
+        { name = "CLICKHOUSE_HOST", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
         { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
-        { name = "DAGSTER_PG_HOST",     valueFrom = "${aws_secretsmanager_secret.supabase.arn}:host::" },
+        { name = "DAGSTER_PG_HOST", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:host::" },
         { name = "DAGSTER_PG_PASSWORD", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:password::" },
-        { name = "DAGSTER_PG_USER",     valueFrom = "${aws_secretsmanager_secret.supabase.arn}:user::" },
+        { name = "DAGSTER_PG_USER", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:user::" },
       ]
 
       logConfiguration = {
@@ -472,19 +472,19 @@ resource "aws_ecs_task_definition" "dagster" {
       command   = ["dagster", "api", "grpc", "-h", "0.0.0.0", "-p", "4266", "-m", "trading_dagster", "--heartbeat-timeout", "3600"]
 
       environment = [
-        { name = "DAGSTER_HOME",      value = "/app" },
-        { name = "CLICKHOUSE_USER",   value = "dev_ro3" },
-        { name = "CLICKHOUSE_PORT",   value = "8443" },
+        { name = "DAGSTER_HOME", value = "/app" },
+        { name = "CLICKHOUSE_USER", value = "dev_ro3" },
+        { name = "CLICKHOUSE_PORT", value = "8443" },
         { name = "CLICKHOUSE_SECURE", value = "true" },
-        { name = "DAGSTER_PG_DB",     value = "postgres" },
+        { name = "DAGSTER_PG_DB", value = "postgres" },
       ]
 
       secrets = [
-        { name = "CLICKHOUSE_HOST",     valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
+        { name = "CLICKHOUSE_HOST", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
         { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
-        { name = "DAGSTER_PG_HOST",     valueFrom = "${aws_secretsmanager_secret.supabase.arn}:host::" },
+        { name = "DAGSTER_PG_HOST", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:host::" },
         { name = "DAGSTER_PG_PASSWORD", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:password::" },
-        { name = "DAGSTER_PG_USER",     valueFrom = "${aws_secretsmanager_secret.supabase.arn}:user::" },
+        { name = "DAGSTER_PG_USER", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:user::" },
       ]
 
       logConfiguration = {
@@ -510,7 +510,11 @@ resource "aws_ecs_service" "dagster" {
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.dagster.arn
   desired_count   = 1
-  launch_type     = "FARGATE"
+
+  capacity_provider_strategy {
+    capacity_provider = "FARGATE_SPOT"
+    weight            = 1
+  }
 
   network_configuration {
     subnets          = [aws_subnet.private.id]
