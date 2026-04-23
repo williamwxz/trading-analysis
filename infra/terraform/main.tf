@@ -1,5 +1,5 @@
 # ============================================================================
-# trading-analysis Infrastructure — VPC + NAT + ECS + EFS
+# trading-analysis Infrastructure — VPC + NAT + ECS
 # ============================================================================
 # Consolidated in ap-northeast-1 (Tokyo).
 # ============================================================================
@@ -757,19 +757,25 @@ resource "aws_iam_role_policy" "ecs_task_policy" {
         ]
       },
       {
-        # DefaultRunLauncher introspects the current ECS task definition at startup
-        Effect   = "Allow"
-        Action   = ["ecs:DescribeTaskDefinition"]
+        # EcsRunLauncher: introspect task definition and launch/monitor/stop run tasks
+        Effect = "Allow"
+        Action = [
+          "ecs:DescribeTaskDefinition",
+          "ecs:RunTask",
+          "ecs:StopTask",
+          "ecs:DescribeTasks",
+          "ecs:ListTasks",
+        ]
         Resource = "*"
       },
       {
+        # EcsRunLauncher: pass execution + task roles to new run tasks
         Effect = "Allow"
-        Action = [
-          "elasticfilesystem:ClientMount",
-          "elasticfilesystem:ClientWrite",
-          "elasticfilesystem:ClientRootAccess",
+        Action = ["iam:PassRole"]
+        Resource = [
+          aws_iam_role.ecs_execution.arn,
+          aws_iam_role.ecs_task.arn,
         ]
-        Resource = aws_efs_file_system.dagster.arn
       },
     ]
   })
