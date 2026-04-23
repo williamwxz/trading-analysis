@@ -14,8 +14,16 @@ storage:
         sslmode: require
 
 run_launcher:
-  module: dagster.core.launcher
-  class: DefaultRunLauncher
+  module: dagster_aws.ecs
+  class: EcsRunLauncher
+  config:
+    run_resources:
+      cpu: "256"
+      memory: "512"
+    run_task_kwargs:
+      capacityProviderStrategy:
+        - capacityProvider: FARGATE_SPOT
+          weight: 1
 
 compute_logs:
   module: dagster.core.storage.noop_compute_log_manager
