@@ -65,17 +65,17 @@ def _get_source_max_revision(source_table: str, underlying: str) -> Optional[str
     return None if not v or v == "1970-01-01 00:00:00" else v
 
 def _prepare_rows_for_clickhouse(rows: List[list]) -> List[list]:
-    """Ensure timestamp strings are converted back to datetime objects for clickhouse-connect."""
-    processed = []
+    """Ensure timestamp strings are converted back to datetime objects for clickhouse-connect.
+
+    Mutates rows in-place to avoid doubling peak memory for large strategy batches.
+    """
     for r in rows:
-        new_row = list(r)
         # In PROD_INSERT_COLUMNS, 'ts' is at index 7, 'updated_at' at index 14
-        if isinstance(new_row[7], str):
-            new_row[7] = datetime.strptime(new_row[7], "%Y-%m-%d %H:%M:%S")
-        if isinstance(new_row[14], str):
-            new_row[14] = datetime.strptime(new_row[14], "%Y-%m-%d %H:%M:%S")
-        processed.append(new_row)
-    return processed
+        if isinstance(r[7], str):
+            r[7] = datetime.strptime(r[7], "%Y-%m-%d %H:%M:%S")
+        if isinstance(r[14], str):
+            r[14] = datetime.strptime(r[14], "%Y-%m-%d %H:%M:%S")
+    return rows
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. Production PnL (Live + Daily)
@@ -276,20 +276,28 @@ def _refresh_pnl_partitioned(context, target_table: str, source_table: str, labe
         ORDER BY strategy_table_name, ts
         """
         rows_dict = query_dicts(sql, client)
-        if not rows_dict: continue
+        if not rows_dict:
+            # Free this underlying's price slice even if there are no bars.
+            all_prices.pop(underlying, None)
+            continue
         # Rename ts_str → ts so downstream compute functions find the expected key
         for r in rows_dict:
             r["ts"] = r.pop("ts_str")
 
         # We still need anchors from the end of the previous day
         anchors = fetch_anchors(target_table, underlying)
-        prices = all_prices.get(underlying, {})
+        # Pop (not get) so this underlying's price dict is freed immediately after
+        # use rather than being held in all_prices for the rest of the loop.
+        prices = all_prices.pop(underlying, {})
 
         # Insert per-strategy so each strategy's expanded rows are freed after
         # insert rather than accumulating all strategies in memory at once.
         for _stn, strategy_rows in iter_compute_prod_pnl(rows_dict, anchors, prices, source_label=label):
-            processed_rows = _prepare_rows_for_clickhouse(strategy_rows)
-            total_rows += insert_rows(f"analytics.{target_table}", PROD_INSERT_COLUMNS, processed_rows, client)
+            _prepare_rows_for_clickhouse(strategy_rows)
+            total_rows += insert_rows(f"analytics.{target_table}", PROD_INSERT_COLUMNS, strategy_rows, client)
+
+        # Explicitly release bars for this underlying before loading the next one.
+        del rows_dict, prices
 
     return MaterializeResult(metadata={"partition": date_str, "rows_inserted": total_rows})
 

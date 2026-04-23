@@ -228,14 +228,21 @@ jobs:
           }))
           " "$CW_KEY_ID" "$CW_SECRET")
 
-          # Try PUT (update existing); fall back to POST (create) on 404
-          HTTP_STATUS=$(curl -s -o /tmp/grafana_ds_response.json -w "%{http_code}" \
-            -X PUT \
-            -H "Content-Type: application/json" \
+          # GET datasource by name to find its ID, then PUT to update or POST to create
+          DS_ID=$(curl -s \
             -H "Authorization: Bearer $GRAFANA_CLOUD_TOKEN" \
             "$GRAFANA_CLOUD_URL/api/datasources/name/cloudwatch" \
-            -d "$PAYLOAD")
-          if [[ "$HTTP_STATUS" == "404" ]]; then
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || true)
+
+          if [[ -n "$DS_ID" ]]; then
+            echo "Datasource found (id=$DS_ID), updating..."
+            HTTP_STATUS=$(curl -s -o /tmp/grafana_ds_response.json -w "%{http_code}" \
+              -X PUT \
+              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer $GRAFANA_CLOUD_TOKEN" \
+              "$GRAFANA_CLOUD_URL/api/datasources/$DS_ID" \
+              -d "$PAYLOAD")
+          else
             echo "Datasource not found, creating..."
             HTTP_STATUS=$(curl -s -o /tmp/grafana_ds_response.json -w "%{http_code}" \
               -X POST \
