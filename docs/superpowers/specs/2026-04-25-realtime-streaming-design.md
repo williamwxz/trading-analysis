@@ -126,7 +126,7 @@ One combined WebSocket connection for all 8 instruments.
 
 **Deployment:** Single ECS Fargate Spot task, 2 vCPU / 4GB RAM (JobManager + TaskManager combined, parallelism=1)  
 **Checkpointing:** Every 30s to S3 `trading-analysis-data-v2/flink-checkpoints/`  
-**Language:** Java — chosen over PyFlink for better connector ecosystem (Flink Kafka connector, ClickHouse JDBC driver), more stable exactly-once semantics, and wider community support for production deployments
+**Language:** PyFlink (Python) — Flink's Table API from Python. Connectors (Kafka source, ClickHouse JDBC sink) are Java jars configured from Python; the job logic (lookup join, PnL compute) is written in Python, consistent with the rest of the codebase. Chosen over plain Java Flink for consistency, and over a plain Python consumer for built-in state management, fault tolerance, and Option C migration path.
 
 **Job graph:**
 
