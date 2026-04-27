@@ -89,7 +89,11 @@ async def _consume_forever(producer: Producer, buffer: deque) -> None:
                     msg_str = raw if isinstance(raw, str) else raw.decode()
                     candle = parse_and_filter(msg_str)
                     if candle is not None:
-                        publish_candle(producer, candle)
+                        try:
+                            publish_candle(producer, candle)
+                        except Exception as publish_exc:
+                            logger.warning("Failed to publish candle, buffering: %s", publish_exc)
+                            buffer.append(candle)
         except Exception as exc:
             delay = _BACKOFF_CAPS[min(backoff_idx, len(_BACKOFF_CAPS) - 1)]
             logger.warning("WS error: %s. Reconnecting in %ds...", exc, delay)

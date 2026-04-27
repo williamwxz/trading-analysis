@@ -1,6 +1,8 @@
+import asyncio
 import json
+from collections import deque
 from datetime import datetime
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -89,3 +91,5 @@ def test_publish_candle_calls_producer_produce():
     assert call_kwargs[1]["key"] == b"BTCUSDT"
     payload = json.loads(call_kwargs[1]["value"])
     assert payload["instrument"] == "BTCUSDT"
+
+
