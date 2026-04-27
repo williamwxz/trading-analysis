@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -14,8 +15,6 @@ class CandleEvent:
     volume: float
 
     def to_json(self) -> str:
-        import json
-
         return json.dumps(
             {
                 "exchange": self.exchange,
@@ -37,6 +36,8 @@ class CandleEvent:
         {"stream": "btcusdt@kline_1m", "data": {"e": "kline", "k": {...}}}
         """
         k = stream_data["data"]["k"]
+        if k.get("x") is not True:
+            raise ValueError(f"Candle for {k.get('s')} is not closed (x={k.get('x')})")
         # Convert to naive UTC datetime (strip timezone info)
         ts_utc = datetime.fromtimestamp(k["t"] / 1000, tz=UTC)
         return cls(

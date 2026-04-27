@@ -49,3 +49,25 @@ def test_to_json_round_trips():
     assert payload["instrument"] == "ETHUSDT"
     assert payload["ts"] == "2026-04-26T00:01:00"
     assert payload["close"] == 1805.0
+
+
+@pytest.mark.unit
+def test_from_binance_kline_raises_for_open_candle():
+    msg = {
+        "stream": "btcusdt@kline_1m",
+        "data": {
+            "e": "kline",
+            "k": {
+                "s": "BTCUSDT",
+                "t": 1777161600000,
+                "o": "93100.0",
+                "h": "93250.0",
+                "l": "93050.0",
+                "c": "93200.0",
+                "v": "12.34",
+                "x": False,  # NOT closed
+            },
+        },
+    }
+    with pytest.raises(ValueError, match="not closed"):
+        CandleEvent.from_binance_kline(msg)
