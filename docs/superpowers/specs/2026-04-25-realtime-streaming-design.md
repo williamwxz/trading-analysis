@@ -11,7 +11,7 @@
 
 - Replace the 5-minute Binance REST polling with a WebSocket-based feed so prices land in ClickHouse within 30s of the minute boundary
 - Compute PnL continuously (per closed 1-min candle) rather than on a 5-minute Dagster cron
-- Keep infrastructure cost low (~$39/month additional on Fargate Spot)
+- Keep infrastructure cost low (~$24/month additional on Fargate Spot)
 - Design the broker layer so that migrating to Option C (stream-stream join) requires only a Flink job graph change, not a new broker deployment
 
 ## 2. Out of Scope
@@ -124,7 +124,7 @@ One combined WebSocket connection for all 8 instruments.
 
 ### 4.3 Flink Job
 
-**Deployment:** Single ECS Fargate Spot task, 2 vCPU / 4GB RAM (JobManager + TaskManager combined, parallelism=1)  
+**Deployment:** Single ECS Fargate Spot task, 0.5 vCPU / 2GB RAM (JobManager + TaskManager combined, parallelism=1)  
 **Checkpointing:** Every 30s to S3 `trading-analysis-data-v2/flink-checkpoints/`  
 **Language:** PyFlink (Python) — Flink's Table API from Python. Connectors (Kafka source, ClickHouse JDBC sink) are Java jars configured from Python; the job logic (lookup join, PnL compute) is written in Python, consistent with the rest of the codebase. Chosen over plain Java Flink for consistency, and over a plain Python consumer for built-in state management, fault tolerance, and Option C migration path.
 
@@ -196,7 +196,7 @@ KafkaSource(binance.price.ticks)
 |------|-------|-----|--------|----------|
 | `binance-ws-consumer` | New Python image | 256 | 512MB | FARGATE_SPOT |
 | `redpanda` | `redpandadata/redpanda:latest` | 1024 | 2048MB | FARGATE_SPOT |
-| `flink-job` | New Java image | 2048 | 4096MB | FARGATE_SPOT |
+| `flink-job` | New PyFlink image | 512 | 2048MB | FARGATE_SPOT |
 
 ### New ECR Repositories
 - `trading-analysis-ws-consumer`
@@ -221,8 +221,8 @@ KafkaSource(binance.price.ticks)
 |-----------|------|--------|---------|
 | Python WS Consumer | 0.25 | 512MB | ~$3 |
 | Redpanda | 1.0 | 2GB | ~$12 |
-| Flink Job | 2.0 | 4GB | ~$24 |
-| **Total additional** | | | **~$39/month** |
+| PyFlink Job | 0.5 | 2GB | ~$9 |
+| **Total additional** | | | **~$24/month** |
 
 Existing costs (NAT instance ~$8, RDS ~varies, Dagster ECS ~$4) are unchanged.
 
