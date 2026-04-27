@@ -82,8 +82,9 @@ async def _consume_forever(producer: Producer, buffer: deque) -> None:
                 backoff_idx = 0  # reset on successful connection
                 # flush buffer accumulated during outage
                 while buffer:
-                    candle = buffer.popleft()
+                    candle = buffer[0]   # peek without removing
                     publish_candle(producer, candle)
+                    buffer.popleft()     # only remove after successful publish
                 logger.info("Connected. Listening for closed candles...")
                 async for raw in ws:
                     msg_str = raw if isinstance(raw, str) else raw.decode()
@@ -92,7 +93,10 @@ async def _consume_forever(producer: Producer, buffer: deque) -> None:
                         try:
                             publish_candle(producer, candle)
                         except Exception as publish_exc:
-                            logger.warning("Failed to publish candle, buffering: %s", publish_exc)
+                            logger.warning(
+                                "Failed to publish candle, buffering: %s",
+                                publish_exc,
+                            )
                             buffer.append(candle)
         except Exception as exc:
             delay = _BACKOFF_CAPS[min(backoff_idx, len(_BACKOFF_CAPS) - 1)]
