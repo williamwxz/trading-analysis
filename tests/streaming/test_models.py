@@ -14,7 +14,7 @@ def test_from_binance_kline_parses_correctly():
             "e": "kline",
             "k": {
                 "s": "BTCUSDT",
-                "t": 1777186800000,  # 2026-04-26T00:00:00 UTC in ms
+                "t": 1777161600000,  # 2026-04-26T00:00:00 UTC in ms
                 "o": "93100.0",
                 "h": "93250.0",
                 "l": "93050.0",
@@ -27,7 +27,7 @@ def test_from_binance_kline_parses_correctly():
     candle = CandleEvent.from_binance_kline(msg)
     assert candle.exchange == "binance"
     assert candle.instrument == "BTCUSDT"
-    assert candle.ts == datetime(2026, 4, 26, 7, 0, 0)
+    assert candle.ts == datetime(2026, 4, 26, 0, 0, 0)
     assert candle.open == 93100.0
     assert candle.close == 93200.0
     assert candle.volume == 12.34
