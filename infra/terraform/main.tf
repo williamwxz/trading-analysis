@@ -15,7 +15,7 @@ terraform {
   }
 
   backend "s3" {
-    bucket = "trading-analysis-tfstate"
+    bucket = "trading-analysis-tfstate-068704208855"
     key    = "infra/terraform.tfstate"
     region = "ap-northeast-1"
   }
@@ -247,41 +247,6 @@ resource "aws_route_table" "private" {
 resource "aws_route_table_association" "private" {
   subnet_id      = aws_subnet.private.id
   route_table_id = aws_route_table.private.id
-}
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# S3 Bucket (data lake)
-# ─────────────────────────────────────────────────────────────────────────────
-
-resource "aws_s3_bucket" "data" {
-  bucket = "${local.name_prefix}-data-v2"
-  tags   = local.common_tags
-}
-
-resource "aws_s3_bucket_versioning" "data" {
-  bucket = aws_s3_bucket.data.id
-  versioning_configuration {
-    status = "Enabled"
-  }
-}
-
-resource "aws_s3_bucket_lifecycle_configuration" "data" {
-  bucket = aws_s3_bucket.data.id
-
-  rule {
-    id     = "archive-old-data"
-    status = "Enabled"
-
-    filter {
-      prefix = ""
-    }
-
-    transition {
-      days          = 90
-      storage_class = "GLACIER_IR"
-    }
-  }
 }
 
 
@@ -678,19 +643,6 @@ resource "aws_iam_role_policy" "ecs_task_policy" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect = "Allow"
-        Action = [
-          "s3:GetObject",
-          "s3:PutObject",
-          "s3:ListBucket",
-          "s3:DeleteObject",
-        ]
-        Resource = [
-          aws_s3_bucket.data.arn,
-          "${aws_s3_bucket.data.arn}/*",
-        ]
-      },
-      {
         # EcsRunLauncher: introspect task definition and launch/monitor/stop run tasks
         Effect = "Allow"
         Action = [
@@ -791,10 +743,6 @@ output "ecs_cluster_name" {
 
 output "ecr_repository_url" {
   value = aws_ecr_repository.dagster.repository_url
-}
-
-output "s3_bucket" {
-  value = aws_s3_bucket.data.id
 }
 
 output "dagster_url" {
