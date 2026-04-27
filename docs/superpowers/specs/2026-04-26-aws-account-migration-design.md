@@ -17,7 +17,7 @@ Hard cutover from old AWS account (already deleted) to new AWS account. All AWS-
 | ECS cluster `trading-analysis` | Terraform | Recreated |
 | ECS service + task definition (Dagster) | Terraform + CI/CD | Image re-pushed from scratch |
 | ECR repo `trading-analysis-dagster` | Terraform | Recreated, CI/CD re-pushes image |
-| S3 bucket `trading-analysis-data-v2` | Terraform | Recreated (no data to migrate) |
+| ~~S3 bucket `trading-analysis-data-v2`~~ | Removed | Not used by any active asset — omitted from new account |
 | S3 bucket `trading-analysis-tfstate` | Manual bootstrap | Created before Terraform runs |
 | Secrets Manager (clickhouse, supabase) | Terraform shell + manual values | Terraform creates shell; values entered manually |
 | Secrets Manager (grafana-cloudwatch) | Terraform | Auto-populated by Terraform (IAM key rotation) |
@@ -36,7 +36,9 @@ Hard cutover from old AWS account (already deleted) to new AWS account. All AWS-
 ## Code Changes
 
 ### `infra/terraform/main.tf`
-One line: the GitHub OIDC trust policy Federated ARN hardcodes the account ID.
+Two changes:
+1. **Account ID** — the GitHub OIDC trust policy Federated ARN hardcodes the account ID (one line).
+2. **Remove S3 data bucket** — delete `aws_s3_bucket.data`, `aws_s3_bucket_versioning.data`, `aws_s3_bucket_lifecycle_configuration.data`, the S3 permissions block in `aws_iam_role_policy.ecs_task_policy`, and the `s3_bucket` output. The bucket is unused by any active asset.
 
 ```hcl
 # Before

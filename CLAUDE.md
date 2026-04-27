@@ -168,7 +168,7 @@ cat > /tmp/gha-trust-policy.json <<'EOF'
     {
       "Effect": "Allow",
       "Principal": {
-        "Federated": "arn:aws:iam::339163283253:oidc-provider/token.actions.githubusercontent.com"
+        "Federated": "arn:aws:iam::068704208855:oidc-provider/token.actions.githubusercontent.com"
       },
       "Action": "sts:AssumeRoleWithWebIdentity",
       "Condition": {
@@ -204,7 +204,7 @@ cat > /tmp/gha-permissions.json <<'EOF'
       "Effect": "Allow",
       "Action": ["ecr:*"],
       "Resource": [
-        "arn:aws:ecr:ap-northeast-1:339163283253:repository/trading-analysis-dagster"
+        "arn:aws:ecr:ap-northeast-1:068704208855:repository/trading-analysis-dagster"
       ]
     },
     {
@@ -223,7 +223,7 @@ cat > /tmp/gha-permissions.json <<'EOF'
       "Effect": "Allow",
       "Action": ["secretsmanager:GetSecretValue"],
       "Resource": [
-        "arn:aws:secretsmanager:ap-northeast-1:339163283253:secret:trading-analysis/clickhouse*"
+        "arn:aws:secretsmanager:ap-northeast-1:068704208855:secret:trading-analysis/clickhouse*"
       ]
     },
     {
@@ -268,9 +268,9 @@ aws iam put-role-policy \
 **Step 3: Add GitHub repository secrets**
 
 ```bash
-gh secret set AWS_ACCOUNT_ID --body "339163283253" --repo williamwxz/trading-analysis
+gh secret set AWS_ACCOUNT_ID --body "068704208855" --repo williamwxz/trading-analysis
 gh secret set AWS_REGION --body "ap-northeast-1" --repo williamwxz/trading-analysis
-gh secret set GHA_ROLE_ARN --body "arn:aws:iam::339163283253:role/trading-analysis-github-actions" --repo williamwxz/trading-analysis
+gh secret set GHA_ROLE_ARN --body "arn:aws:iam::068704208855:role/trading-analysis-github-actions" --repo williamwxz/trading-analysis
 ```
 
 ## Deployment
