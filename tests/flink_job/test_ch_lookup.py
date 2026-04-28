@@ -1,7 +1,9 @@
 from datetime import datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
+
 import pytest
-from flink_job.ch_lookup import fetch_strategies_for_candle, StrategyBar
+
+from flink_job.ch_lookup import fetch_strategies_for_candle
 
 
 @pytest.mark.unit

@@ -1,5 +1,5 @@
 """
-ClickHouse async lookup for strategy positions.
+ClickHouse synchronous lookup for strategy positions.
 
 Queries strategy_output_history_v2 for the most recent bar per strategy
 for a given instrument at or before candle_ts. Returns all active strategies.
@@ -45,6 +45,7 @@ SELECT
     underlying,
     config_timeframe,
     weighting,
+    max(ts) AS latest_ts,
     argMin(row_json, revision_ts) AS row_json
 FROM analytics.strategy_output_history_v2
 WHERE underlying = '{instrument}'
@@ -53,7 +54,7 @@ WHERE underlying = '{instrument}'
 GROUP BY
     strategy_table_name, strategy_id, strategy_name,
     underlying, config_timeframe, weighting
-ORDER BY strategy_table_name, ts DESC
+ORDER BY strategy_table_name, latest_ts DESC
 LIMIT 1 BY strategy_table_name
 """
     rows = query_dicts(sql)
