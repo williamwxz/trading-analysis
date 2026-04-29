@@ -17,8 +17,8 @@ run_launcher:
   module: dagster_aws.ecs
   class: EcsRunLauncher
   config:
-    task_definition: { env: DAGSTER_RUN_TASK_DEFINITION_ARN }
-    container_name: dagster-user-code
+    use_current_ecs_task_config: true
+    container_name: dagster-code-server
     run_resources:
       cpu: "512"
       memory: "1024"

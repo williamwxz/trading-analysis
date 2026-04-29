@@ -345,7 +345,6 @@ resource "aws_ecs_task_definition" "dagster" {
         { name = "CLICKHOUSE_PORT", value = "8443" },
         { name = "CLICKHOUSE_SECURE", value = "true" },
         { name = "DAGSTER_PG_DB", value = "postgres" },
-        { name = "DAGSTER_RUN_TASK_DEFINITION_ARN", value = aws_ecs_task_definition.dagster_run.arn },
       ]
 
       secrets = [
@@ -393,55 +392,6 @@ resource "aws_ecs_task_definition" "dagster" {
           "awslogs-group"         = aws_cloudwatch_log_group.dagster.name
           "awslogs-region"        = var.aws_region
           "awslogs-stream-prefix" = "code-server"
-        }
-      }
-    }
-  ])
-
-  tags = local.common_tags
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-resource "aws_ecs_task_definition" "dagster_run" {
-  family                   = "${local.name_prefix}-dagster-run"
-  requires_compatibilities = ["FARGATE"]
-  network_mode             = "awsvpc"
-  cpu                      = 512
-  memory                   = 1024
-  execution_role_arn       = aws_iam_role.ecs_execution.arn
-  task_role_arn            = aws_iam_role.ecs_task.arn
-
-  container_definitions = jsonencode([
-    {
-      name      = "dagster-user-code"
-      image     = "${aws_ecr_repository.dagster.repository_url}:latest"
-      essential = true
-
-      environment = [
-        { name = "DAGSTER_HOME", value = "/app" },
-        { name = "CLICKHOUSE_USER", value = "dev_ro3" },
-        { name = "CLICKHOUSE_PORT", value = "8443" },
-        { name = "CLICKHOUSE_SECURE", value = "true" },
-        { name = "DAGSTER_PG_DB", value = "postgres" },
-      ]
-
-      secrets = [
-        { name = "CLICKHOUSE_HOST", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
-        { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
-        { name = "DAGSTER_PG_HOST", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:host::" },
-        { name = "DAGSTER_PG_PASSWORD", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:password::" },
-        { name = "DAGSTER_PG_USER", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:user::" },
-      ]
-
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          "awslogs-group"         = aws_cloudwatch_log_group.dagster.name
-          "awslogs-region"        = var.aws_region
-          "awslogs-stream-prefix" = "run"
         }
       }
     }
@@ -1054,11 +1004,6 @@ output "dagster_url" {
 output "nat_static_ip" {
   value       = aws_eip.nat.public_ip
   description = "Static IP (inbound Dagster UI + outbound ClickHouse allowlist)"
-}
-
-output "dagster_run_task_definition_arn" {
-  value       = aws_ecs_task_definition.dagster_run.arn
-  description = "ECS task definition ARN for Dagster EcsRunLauncher run tasks"
 }
 
 output "grafana_cloudwatch_secret_arn" {
