@@ -24,26 +24,9 @@ from datetime import UTC, datetime
 from flink_job.anchor_state import AnchorRecord, AnchorState
 from flink_job.ch_lookup import fetch_strategies_for_candle
 from streaming.models import CandleEvent
+from trading_dagster.utils.pnl_compute import PROD_INSERT_COLUMNS
 
 logger = logging.getLogger(__name__)
-
-PROD_INSERT_COLUMNS = [
-    "strategy_table_name",
-    "strategy_id",
-    "strategy_name",
-    "underlying",
-    "config_timeframe",
-    "source",
-    "version",
-    "ts",
-    "cumulative_pnl",
-    "benchmark",
-    "position",
-    "price",
-    "final_signal",
-    "weighting",
-    "updated_at",
-]
 
 
 def process_candle(
@@ -139,7 +122,7 @@ LIMIT 1 BY strategy_table_name
                 anchor_position=row["anchor_position"],
             ),
         )
-    logger.info("Bootstrapped %d anchor(s) from ClickHouse", len(state._store))
+    logger.info("Bootstrapped %d anchor(s) from ClickHouse", len(state))
 
 
 def run_flink_job() -> None:
@@ -151,8 +134,69 @@ def run_flink_job() -> None:
         KafkaOffsetsInitializer,
         KafkaSource,
     )
+    from pyflink.datastream.functions import RichFlatMapFunction, RuntimeContext
 
     from trading_dagster.utils.clickhouse_client import insert_rows
+
+    FLUSH_EVERY = 50
+
+    class PnlFlatMapFunction(RichFlatMapFunction):
+        def open(self, context: RuntimeContext) -> None:
+            self._state = AnchorState()
+            _bootstrap_anchors(self._state)
+            self._price_batch: list[list] = []
+            self._pnl_batch: list[list] = []
+
+        def flat_map(self, raw: str):
+            data = json.loads(raw)
+            candle = CandleEvent(
+                exchange=data["exchange"],
+                instrument=data["instrument"],
+                ts=datetime.fromisoformat(data["ts"]),
+                open=data["open"], high=data["high"],
+                low=data["low"], close=data["close"],
+                volume=data["volume"],
+            )
+            for row in process_candle(candle, self._state):
+                if row["_sink"] == "price":
+                    self._price_batch.append([
+                        row["exchange"], row["instrument"], row["ts"],
+                        row["open"], row["high"], row["low"],
+                        row["close"], row["volume"],
+                    ])
+                elif row["_sink"] == "pnl":
+                    self._pnl_batch.append([row[c] for c in PROD_INSERT_COLUMNS])
+
+            if len(self._price_batch) >= FLUSH_EVERY:
+                self._flush_price()
+            if len(self._pnl_batch) >= FLUSH_EVERY:
+                self._flush_pnl()
+            yield  # RichFlatMapFunction must be a generator
+
+        def _flush_price(self) -> None:
+            if self._price_batch:
+                insert_rows(
+                    "analytics.futures_price_1min",
+                    [
+                        "exchange", "instrument", "ts",
+                        "open", "high", "low", "close", "volume",
+                    ],
+                    self._price_batch,
+                )
+                self._price_batch = []
+
+        def _flush_pnl(self) -> None:
+            if self._pnl_batch:
+                insert_rows(
+                    "analytics.strategy_pnl_1min_prod_v2",
+                    PROD_INSERT_COLUMNS,
+                    self._pnl_batch,
+                )
+                self._pnl_batch = []
+
+        def close(self) -> None:
+            self._flush_price()
+            self._flush_pnl()
 
     env = StreamExecutionEnvironment.get_execution_environment()
     env.enable_checkpointing(30_000, CheckpointingMode.AT_LEAST_ONCE)
@@ -171,71 +215,8 @@ def run_flink_job() -> None:
         .build()
     )
 
-    state = AnchorState()
-    _bootstrap_anchors(state)
-
-    price_batch: list[list] = []
-    pnl_batch: list[list] = []
-    FLUSH_EVERY = 50
-
     ds = env.from_source(source, WatermarkStrategy.no_watermarks(), "Redpanda")
-
-    def handle(raw: str) -> None:
-        nonlocal price_batch, pnl_batch
-        data = json.loads(raw)
-        candle = CandleEvent(
-            exchange=data["exchange"],
-            instrument=data["instrument"],
-            ts=datetime.fromisoformat(data["ts"]),
-            open=data["open"],
-            high=data["high"],
-            low=data["low"],
-            close=data["close"],
-            volume=data["volume"],
-        )
-        for row in process_candle(candle, state):
-            if row["_sink"] == "price":
-                price_batch.append(
-                    [
-                        row["exchange"],
-                        row["instrument"],
-                        row["ts"],
-                        row["open"],
-                        row["high"],
-                        row["low"],
-                        row["close"],
-                        row["volume"],
-                    ]
-                )
-            elif row["_sink"] == "pnl":
-                pnl_batch.append([row[c] for c in PROD_INSERT_COLUMNS])
-
-        if len(price_batch) >= FLUSH_EVERY:
-            insert_rows(
-                "analytics.futures_price_1min",
-                [
-                    "exchange",
-                    "instrument",
-                    "ts",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "volume",
-                ],
-                price_batch,
-            )
-            price_batch = []
-
-        if len(pnl_batch) >= FLUSH_EVERY:
-            insert_rows(
-                "analytics.strategy_pnl_1min_prod_v2",
-                PROD_INSERT_COLUMNS,
-                pnl_batch,
-            )
-            pnl_batch = []
-
-    ds.map(handle)
+    ds.flat_map(PnlFlatMapFunction())
     env.execute("binance-pnl-stream")
 
 

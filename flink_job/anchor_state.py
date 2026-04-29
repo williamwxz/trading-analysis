@@ -27,6 +27,9 @@ class AnchorState:
     def update(self, strategy_table_name: str, record: AnchorRecord) -> None:
         self._store[strategy_table_name] = record
 
+    def __len__(self) -> int:
+        return len(self._store)
+
     def compute_pnl(
         self,
         strategy_table_name: str,
@@ -39,7 +42,10 @@ class AnchorState:
             # No prior anchor — PnL stays flat, record this candle as new anchor
             new_pnl = rec.anchor_pnl
         else:
-            new_pnl = rec.anchor_pnl + position * (close_price - rec.anchor_price) / rec.anchor_price
+            new_pnl = (
+                rec.anchor_pnl
+                + position * (close_price - rec.anchor_price) / rec.anchor_price
+            )
         self.update(strategy_table_name, AnchorRecord(
             anchor_pnl=new_pnl,
             anchor_price=close_price,
