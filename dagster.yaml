@@ -17,8 +17,28 @@ run_launcher:
   module: dagster_aws.ecs
   class: EcsRunLauncher
   config:
-    use_current_ecs_task_config: true
+    task_definition:
+      log_group: /ecs/trading-analysis-dagster
+      task_role_arn: "arn:aws:iam::068704208855:role/trading-analysis-ecs-task"
+      execution_role_arn: "arn:aws:iam::068704208855:role/trading-analysis-ecs-execution"
     container_name: dagster-code-server
+    secrets:
+      - name: CLICKHOUSE_HOST
+        valueFrom: "arn:aws:secretsmanager:ap-northeast-1:068704208855:secret:trading-analysis/clickhouse-tVGomt:host::"
+      - name: CLICKHOUSE_PASSWORD
+        valueFrom: "arn:aws:secretsmanager:ap-northeast-1:068704208855:secret:trading-analysis/clickhouse-tVGomt:password::"
+      - name: DAGSTER_PG_HOST
+        valueFrom: "arn:aws:secretsmanager:ap-northeast-1:068704208855:secret:trading-analysis/supabase-ARkLCs:host::"
+      - name: DAGSTER_PG_PASSWORD
+        valueFrom: "arn:aws:secretsmanager:ap-northeast-1:068704208855:secret:trading-analysis/supabase-ARkLCs:password::"
+      - name: DAGSTER_PG_USER
+        valueFrom: "arn:aws:secretsmanager:ap-northeast-1:068704208855:secret:trading-analysis/supabase-ARkLCs:user::"
+    env_vars:
+      - CLICKHOUSE_USER=dev_ro3
+      - CLICKHOUSE_PORT=8443
+      - CLICKHOUSE_SECURE=true
+      - DAGSTER_PG_DB=postgres
+      - DAGSTER_HOME=/app
     run_resources:
       cpu: "512"
       memory: "1024"
