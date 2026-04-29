@@ -198,7 +198,11 @@ PRIVATE_IP=$(aws ecs describe-tasks --region $REGION --cluster $CLUSTER --tasks 
 [ -z "$PRIVATE_IP" ] || [ "$PRIVATE_IP" = "None" ] && exit 0
 
 CURRENT_IP=$(cat $STATE_FILE 2>/dev/null || echo "")
-[ "$CURRENT_IP" = "$PRIVATE_IP" ] && exit 0
+
+# Skip update only if IP unchanged AND current target is reachable
+if [ "$CURRENT_IP" = "$PRIVATE_IP" ]; then
+    timeout 2 bash -c ">/dev/tcp/$PRIVATE_IP/$PORT" 2>/dev/null && exit 0
+fi
 
 # Remove old rule if exists
 if [ -n "$CURRENT_IP" ]; then
@@ -216,7 +220,13 @@ SCRIPT
 chmod +x /usr/local/bin/update-dagster-dnat.sh
 /usr/local/bin/update-dagster-dnat.sh || true
 mkdir -p /etc/cron.d
-echo "* * * * * root /usr/local/bin/update-dagster-dnat.sh >> /var/log/dagster-dnat.log 2>&1" > /etc/cron.d/dagster-dnat
+# Run every 10 seconds via two staggered cron entries (cron minimum is 1 min)
+echo "* * * * * root sleep 0  && /usr/local/bin/update-dagster-dnat.sh >> /var/log/dagster-dnat.log 2>&1" > /etc/cron.d/dagster-dnat
+echo "* * * * * root sleep 10 && /usr/local/bin/update-dagster-dnat.sh >> /var/log/dagster-dnat.log 2>&1" >> /etc/cron.d/dagster-dnat
+echo "* * * * * root sleep 20 && /usr/local/bin/update-dagster-dnat.sh >> /var/log/dagster-dnat.log 2>&1" >> /etc/cron.d/dagster-dnat
+echo "* * * * * root sleep 30 && /usr/local/bin/update-dagster-dnat.sh >> /var/log/dagster-dnat.log 2>&1" >> /etc/cron.d/dagster-dnat
+echo "* * * * * root sleep 40 && /usr/local/bin/update-dagster-dnat.sh >> /var/log/dagster-dnat.log 2>&1" >> /etc/cron.d/dagster-dnat
+echo "* * * * * root sleep 50 && /usr/local/bin/update-dagster-dnat.sh >> /var/log/dagster-dnat.log 2>&1" >> /etc/cron.d/dagster-dnat
 EOF
   )
 
