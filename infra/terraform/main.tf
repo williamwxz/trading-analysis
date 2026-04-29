@@ -663,6 +663,12 @@ resource "aws_iam_role_policy" "ecs_task_policy" {
           aws_iam_role.ecs_task.arn,
         ]
       },
+      {
+        # Dagster EcsRunLauncher: discover secrets to inject into run tasks
+        Effect = "Allow"
+        Action = ["secretsmanager:ListSecrets"]
+        Resource = "*"
+      },
     ]
   })
 }
@@ -732,6 +738,251 @@ resource "aws_secretsmanager_secret_version" "grafana_cloudwatch" {
   })
 }
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ECR — Streaming images
+# ─────────────────────────────────────────────────────────────────────────────
+
+resource "aws_ecr_repository" "ws_consumer" {
+  name                 = "trading-analysis-ws-consumer"
+  image_tag_mutability = "MUTABLE"
+  tags                 = local.common_tags
+}
+
+resource "aws_ecr_repository" "flink_job" {
+  name                 = "trading-analysis-flink-job"
+  image_tag_mutability = "MUTABLE"
+  tags                 = local.common_tags
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IAM — Flink task role (S3 checkpoint access)
+# ─────────────────────────────────────────────────────────────────────────────
+
+resource "aws_iam_role" "flink_task" {
+  name = "${local.name_prefix}-flink-task"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ecs-tasks.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy" "flink_s3" {
+  name = "flink-s3-checkpoints"
+  role = aws_iam_role.flink_task.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
+      Resource = [
+        "arn:aws:s3:::trading-analysis-data-v2",
+        "arn:aws:s3:::trading-analysis-data-v2/flink-checkpoints/*"
+      ]
+    }]
+  })
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Security group — Redpanda (internal VPC only)
+# ─────────────────────────────────────────────────────────────────────────────
+
+resource "aws_security_group" "redpanda" {
+  name        = "${local.name_prefix}-redpanda"
+  description = "Redpanda broker — internal VPC only"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port   = 9092
+    to_port     = 9092
+    protocol    = "tcp"
+    cidr_blocks = [aws_vpc.main.cidr_block]
+    description = "Kafka API from VPC"
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = local.common_tags
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ECS Task Definitions
+# ─────────────────────────────────────────────────────────────────────────────
+
+resource "aws_ecs_task_definition" "redpanda" {
+  family                   = "${local.name_prefix}-redpanda"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = 1024
+  memory                   = 2048
+  execution_role_arn       = aws_iam_role.ecs_execution.arn
+
+  container_definitions = jsonencode([{
+    name      = "redpanda"
+    image     = "redpandadata/redpanda:latest"
+    essential = true
+    command = [
+      "redpanda", "start",
+      "--smp", "1",
+      "--memory", "1500M",
+      "--reserve-memory", "0M",
+      "--node-id", "0",
+      "--kafka-addr", "PLAINTEXT://0.0.0.0:9092",
+      "--advertise-kafka-addr", "PLAINTEXT://redpanda.${local.name_prefix}.local:9092",
+      "--set", "redpanda.auto_create_topics_enabled=true",
+    ]
+    portMappings = [{ containerPort = 9092, protocol = "tcp" }]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = "/ecs/${local.name_prefix}"
+        "awslogs-region"        = var.aws_region
+        "awslogs-stream-prefix" = "redpanda"
+      }
+    }
+  }])
+
+  tags = local.common_tags
+}
+
+resource "aws_ecs_task_definition" "ws_consumer" {
+  family                   = "${local.name_prefix}-ws-consumer"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = 256
+  memory                   = 512
+  execution_role_arn       = aws_iam_role.ecs_execution.arn
+
+  container_definitions = jsonencode([{
+    name      = "ws-consumer"
+    image     = "${aws_ecr_repository.ws_consumer.repository_url}:latest"
+    essential = true
+    environment = [
+      { name = "REDPANDA_BROKERS", value = "redpanda.${local.name_prefix}.local:9092" }
+    ]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = "/ecs/${local.name_prefix}"
+        "awslogs-region"        = var.aws_region
+        "awslogs-stream-prefix" = "ws-consumer"
+      }
+    }
+  }])
+
+  tags = local.common_tags
+}
+
+resource "aws_ecs_task_definition" "flink_job" {
+  family                   = "${local.name_prefix}-flink-job"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = 512
+  memory                   = 2048
+  execution_role_arn       = aws_iam_role.ecs_execution.arn
+  task_role_arn            = aws_iam_role.flink_task.arn
+
+  container_definitions = jsonencode([{
+    name      = "flink-job"
+    image     = "${aws_ecr_repository.flink_job.repository_url}:latest"
+    essential = true
+    secrets = [
+      { name = "CLICKHOUSE_HOST",     valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
+      { name = "CLICKHOUSE_PORT",     valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:port::" },
+      { name = "CLICKHOUSE_USER",     valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:user::" },
+      { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
+    ]
+    environment = [
+      { name = "CLICKHOUSE_SECURE",   value = "true" },
+      { name = "REDPANDA_BROKERS",    value = "redpanda.${local.name_prefix}.local:9092" },
+      { name = "S3_BUCKET",           value = "trading-analysis-data-v2" },
+    ]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = "/ecs/${local.name_prefix}"
+        "awslogs-region"        = var.aws_region
+        "awslogs-stream-prefix" = "flink-job"
+      }
+    }
+  }])
+
+  tags = local.common_tags
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ECS Services (FARGATE_SPOT)
+# ─────────────────────────────────────────────────────────────────────────────
+
+resource "aws_ecs_service" "redpanda" {
+  name            = "${local.name_prefix}-redpanda"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.redpanda.arn
+  desired_count   = 1
+
+  capacity_provider_strategy {
+    capacity_provider = "FARGATE_SPOT"
+    weight            = 1
+  }
+
+  network_configuration {
+    subnets          = [aws_subnet.private.id]
+    security_groups  = [aws_security_group.redpanda.id]
+    assign_public_ip = false
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_ecs_service" "ws_consumer" {
+  name            = "${local.name_prefix}-ws-consumer"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.ws_consumer.arn
+  desired_count   = 1
+
+  capacity_provider_strategy {
+    capacity_provider = "FARGATE_SPOT"
+    weight            = 1
+  }
+
+  network_configuration {
+    subnets          = [aws_subnet.private.id]
+    security_groups  = [aws_security_group.ecs_tasks.id]
+    assign_public_ip = false
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_ecs_service" "flink_job" {
+  name            = "${local.name_prefix}-flink-job"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.flink_job.arn
+  desired_count   = 1
+
+  capacity_provider_strategy {
+    capacity_provider = "FARGATE_SPOT"
+    weight            = 1
+  }
+
+  network_configuration {
+    subnets          = [aws_subnet.private.id]
+    security_groups  = [aws_security_group.ecs_tasks.id]
+    assign_public_ip = false
+  }
+
+  tags = local.common_tags
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Outputs
