@@ -43,3 +43,6 @@ Thumbs.db
 
 # Docker
 docker-compose.override.yml
+
+# Flink connectors (large JAR files)
+flink_job/connectors/*.jar
