@@ -3,3 +3,6 @@ load_from:
       host: localhost
       port: 4266
       location_name: trading_dagster
+      container_context:
+        ecs:
+          image: 068704208855.dkr.ecr.ap-northeast-1.amazonaws.com/trading-analysis-dagster:latest
