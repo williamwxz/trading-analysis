@@ -794,7 +794,7 @@ resource "aws_iam_role_policy" "flink_s3" {
 
 resource "aws_security_group" "redpanda" {
   name        = "${local.name_prefix}-redpanda"
-  description = "Redpanda broker — internal VPC only"
+  description = "Redpanda broker - internal VPC only"
   vpc_id      = aws_vpc.main.id
 
   ingress {
@@ -998,7 +998,7 @@ output "ecr_repository_url" {
 
 output "dagster_url" {
   value       = "http://${aws_eip.nat.public_ip}"
-  description = "Dagster UI — static IP via NAT instance nginx proxy"
+  description = "Dagster UI - static IP via NAT instance nginx proxy"
 }
 
 output "nat_static_ip" {
