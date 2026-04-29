@@ -41,6 +41,7 @@ from ..utils.pnl_compute import (
     compute_real_trade_pnl,
     PROD_INSERT_COLUMNS,
     REAL_TRADE_INSERT_COLUMNS,
+    TIMEFRAME_MAP,
 )
 
 # Start date for partitions
@@ -115,8 +116,8 @@ def pnl_prod_v2_daily_asset(context: AssetExecutionContext) -> MaterializeResult
     compute_kind="clickhouse",
 )
 def pnl_bt_v2_live_asset(context: AssetExecutionContext) -> MaterializeResult:
-    """Live backtest PnL refresh (incremental)."""
-    return _refresh_pnl_generic(context, "strategy_pnl_1min_bt_v2", "strategy_output_history_bt_v2", "backtest")
+    """Live backtest PnL refresh (incremental). Uses cumulative_pnl from strategy JSON directly."""
+    return _refresh_pnl_bt(context, is_daily=False)
 
 @asset(
     name="pnl_bt_v2_daily",
@@ -126,8 +127,8 @@ def pnl_bt_v2_live_asset(context: AssetExecutionContext) -> MaterializeResult:
     compute_kind="clickhouse",
 )
 def pnl_bt_v2_daily_asset(context: AssetExecutionContext) -> MaterializeResult:
-    """Daily partitioned backtest PnL backfill."""
-    return _refresh_pnl_partitioned(context, "strategy_pnl_1min_bt_v2", "strategy_output_history_bt_v2", "backtest")
+    """Daily partitioned backtest PnL backfill. Uses cumulative_pnl from strategy JSON directly."""
+    return _refresh_pnl_bt(context, is_daily=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. Real Trade PnL (Live + Daily)
@@ -300,6 +301,106 @@ def _refresh_pnl_partitioned(context, target_table: str, source_table: str, labe
         del rows_dict, prices
 
     return MaterializeResult(metadata={"partition": date_str, "rows_inserted": total_rows})
+
+def _refresh_pnl_bt(context, is_daily: bool) -> MaterializeResult:
+    target_table = "strategy_pnl_1min_bt_v2"
+    source_table = "strategy_output_history_bt_v2"
+
+    if is_daily:
+        date_str = context.partition_key
+        start_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        end_dt = start_dt + timedelta(days=1)
+        start_ts = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+        end_ts = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        client = get_client()
+        execute(
+            f"DELETE FROM analytics.{target_table} "
+            f"WHERE toDateTime(ts) >= toDateTime('{start_ts}') AND toDateTime(ts) < toDateTime('{end_ts}') "
+            f"AND source='backtest'",
+            client
+        )
+
+        underlyings = _get_underlyings(source_table)
+        all_prices = fetch_prices_multi(underlyings, start_ts, end_ts, client, extend_minutes=0)
+        total_rows = 0
+        for underlying in underlyings:
+            sql = f"""\
+SELECT
+    strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe,
+    argMin(weighting, revision_ts) AS weighting, toString(ts) AS ts,
+    JSONExtractFloat(argMin(row_json, revision_ts), 'position') AS position,
+    JSONExtractFloat(argMin(row_json, revision_ts), 'price') AS bar_price,
+    JSONExtractFloat(argMin(row_json, revision_ts), 'final_signal') AS final_signal,
+    JSONExtractFloat(argMin(row_json, revision_ts), 'benchmark') AS bar_benchmark,
+    JSONExtractFloat(argMin(row_json, revision_ts), 'cumulative_pnl') AS cumulative_pnl
+FROM analytics.{source_table}
+WHERE underlying = '{underlying}'
+  AND ts >= toDateTime('{start_ts}') AND ts < toDateTime('{end_ts}')
+GROUP BY strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, ts
+ORDER BY strategy_table_name, ts
+"""
+            bars = query_dicts(sql, client)
+            if not bars:
+                all_prices.pop(underlying, None)
+                continue
+            for b in bars:
+                tf = b["config_timeframe"]
+                if tf not in TIMEFRAME_MAP:
+                    raise ValueError(f"Unknown config_timeframe '{tf}' in {source_table} — add it to TIMEFRAME_MAP")
+                bar_ts = datetime.strptime(b["ts"], "%Y-%m-%d %H:%M:%S")
+                b["execution_ts"] = (bar_ts + timedelta(minutes=TIMEFRAME_MAP[tf])).strftime("%Y-%m-%d %H:%M:%S")
+            prices = all_prices.pop(underlying, {})
+            rows = compute_bt_pnl(bars, prices)
+            _prepare_rows_for_clickhouse(rows)
+            total_rows += insert_rows(f"analytics.{target_table}", PROD_INSERT_COLUMNS, rows, client)
+
+        return MaterializeResult(metadata={"partition": date_str, "rows_inserted": total_rows})
+
+    else:
+        underlyings = _get_underlyings(source_table)
+        client = get_client()
+        total_rows = 0
+        refreshed = []
+
+        for underlying in underlyings:
+            source_max = _get_source_max_revision(source_table, underlying)
+            if not source_max:
+                continue
+
+            watermark = query_scalar(
+                f"SELECT toString(max(last_revision_ts)) FROM analytics.pnl_refresh_watermarks "
+                f"WHERE underlying = '{underlying}' AND target_table = '{target_table}'",
+                client
+            )
+            watermark = str(watermark).strip() if watermark else "2020-01-01 00:00:00"
+
+            if source_max <= watermark:
+                continue
+
+            context.log.info(f"[{underlying}] Incremental bt refresh since {watermark}")
+            bars = fetch_new_bars_bt(source_table, underlying, watermark)
+            if not bars:
+                continue
+
+            ts_min = min(b["ts"] for b in bars)
+            ts_max = max(b["ts"] for b in bars)
+            prices = fetch_prices(underlying, ts_min, ts_max)
+            rows = compute_bt_pnl(bars, prices)
+            _prepare_rows_for_clickhouse(rows)
+            n = insert_rows(f"analytics.{target_table}", PROD_INSERT_COLUMNS, rows, client)
+            total_rows += n
+
+            execute(
+                f"INSERT INTO analytics.pnl_refresh_watermarks (underlying, target_table, last_revision_ts, updated_at) "
+                f"VALUES ('{underlying}', '{target_table}', toDateTime('{source_max}'), now())",
+                client
+            )
+            refreshed.append(underlying)
+            context.log.info(f"[{underlying}] Inserted {n} rows")
+
+        return MaterializeResult(metadata={"total_inserted": total_rows, "underlyings": ", ".join(refreshed)})
+
 
 def _refresh_pnl_real_trade(context, is_daily: bool) -> MaterializeResult:
     # Real trade specific logic - would need similar datetime conversion

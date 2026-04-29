@@ -113,7 +113,11 @@ ORDER BY strategy_table_name, ts
 def fetch_new_bars_bt(
     source_table: str, underlying: str, since: str,
 ) -> List[dict]:
-    """Fetch new bars for bt: argMin(row_json, revision_ts) and extract cumulative_pnl."""
+    """Fetch new bars for bt: argMin(row_json, revision_ts) and extract cumulative_pnl.
+
+    execution_ts = ts + tf_minutes (bar close), which is when the position takes effect
+    and PnL starts being counted.
+    """
     sql = f"""\
 SELECT
     strategy_table_name,
@@ -136,23 +140,30 @@ GROUP BY strategy_table_name, strategy_id, strategy_name, underlying, config_tim
 ORDER BY strategy_table_name, ts
 """
     rows = query_dicts(sql)
-    return [
-        {
+    result = []
+    for r in rows:
+        tf = str(r["config_timeframe"])
+        if tf not in TIMEFRAME_MAP:
+            raise ValueError(f"Unknown config_timeframe '{tf}' in {source_table} — add it to TIMEFRAME_MAP")
+        tf_minutes = TIMEFRAME_MAP[tf]
+        bar_ts = datetime.strptime(str(r["ts"]), "%Y-%m-%d %H:%M:%S")
+        execution_ts = (bar_ts + timedelta(minutes=tf_minutes)).strftime("%Y-%m-%d %H:%M:%S")
+        result.append({
             "strategy_table_name": r["strategy_table_name"],
             "strategy_id": int(r["strategy_id"]),
             "strategy_name": r["strategy_name"],
             "underlying": r["underlying"],
-            "config_timeframe": r["config_timeframe"],
+            "config_timeframe": tf,
             "weighting": float(r["weighting"]),
             "ts": str(r["ts"]),
+            "execution_ts": execution_ts,
             "position": float(r["position"]),
             "bar_price": float(r["bar_price"]),
             "final_signal": float(r["final_signal"]),
             "bar_benchmark": float(r["bar_benchmark"]),
             "cumulative_pnl": float(r["cumulative_pnl"]),
-        }
-        for r in rows
-    ]
+        })
+    return result
 
 
 def fetch_new_bars_real_trade(
@@ -503,26 +514,61 @@ def compute_real_trade_pnl(
     return output_rows
 
 
-def compute_bt_pnl(bars: List[dict]) -> List[list]:
-    """Compute backtest PnL directly from strategy JSON cumulative_pnl. Expand to 1-min intervals."""
+def compute_bt_pnl(
+    bars: List[dict],
+    prices: Dict[str, float],
+) -> List[list]:
+    """Expand bt bars to 1-min intervals starting from execution_ts (bar close).
+
+    The backtester executes at bar close (execution_ts = ts + tf_minutes).
+    cumulative_pnl from row_json is the anchor at execution_ts. From there,
+    PnL is recomputed minute-by-minute using live prices until the next bar's
+    execution_ts.
+
+    Formula per minute:
+        cpnl = anchor_pnl + position * (live_price - anchor_price) / anchor_price
+    """
+    by_strategy: Dict[str, List[dict]] = defaultdict(list)
+    for bar in bars:
+        by_strategy[bar["strategy_table_name"]].append(bar)
+
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     output_rows = []
 
-    for bar in bars:
-        tf_minutes = TIMEFRAME_MAP.get(bar["config_timeframe"], 5)
-        bar_ts = datetime.strptime(bar["ts"], "%Y-%m-%d %H:%M:%S")
+    for stn, strategy_bars in by_strategy.items():
+        strategy_bars.sort(key=lambda b: b["execution_ts"])
 
-        for n in range(tf_minutes):
-            ts_1min = bar_ts + timedelta(minutes=tf_minutes + n)
-            ts_str = ts_1min.strftime("%Y-%m-%d %H:%M:%S")
+        for i, bar in enumerate(strategy_bars):
+            exec_ts = datetime.strptime(bar["execution_ts"], "%Y-%m-%d %H:%M:%S")
+            # Hold position until next bar's execution_ts (or tf_minutes if last bar)
+            if i + 1 < len(strategy_bars):
+                next_exec_ts = datetime.strptime(strategy_bars[i + 1]["execution_ts"], "%Y-%m-%d %H:%M:%S")
+            else:
+                tf_minutes = TIMEFRAME_MAP.get(bar["config_timeframe"], 5)
+                next_exec_ts = exec_ts + timedelta(minutes=tf_minutes)
 
-            output_rows.append([
-                bar["strategy_table_name"], bar["strategy_id"], bar["strategy_name"],
-                bar["underlying"], bar["config_timeframe"],
-                "backtest", "v2", ts_str, 
-                bar["cumulative_pnl"],
-                bar["bar_benchmark"], bar["position"], bar["bar_price"],
-                bar["final_signal"], bar["weighting"], now_str,
-            ])
+            anchor_pnl = bar["cumulative_pnl"]
+            anchor_price = prices.get(bar["execution_ts"], bar["bar_price"])
+
+            ts_cur = exec_ts
+            while ts_cur < next_exec_ts:
+                ts_str = ts_cur.strftime("%Y-%m-%d %H:%M:%S")
+                live_price = prices.get(ts_str, anchor_price)
+
+                if anchor_price != 0.0:
+                    cpnl = anchor_pnl + bar["position"] * (live_price - anchor_price) / anchor_price
+                else:
+                    cpnl = anchor_pnl
+
+                output_rows.append([
+                    stn, bar["strategy_id"], bar["strategy_name"],
+                    bar["underlying"], bar["config_timeframe"],
+                    "backtest", "v2", ts_str,
+                    cpnl,
+                    bar["bar_benchmark"], bar["position"], live_price,
+                    bar["final_signal"], bar["weighting"], now_str,
+                ])
+
+                ts_cur += timedelta(minutes=1)
 
     return output_rows
