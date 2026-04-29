@@ -30,7 +30,7 @@ if ! command -v session-manager-plugin &>/dev/null; then
   fi
 fi
 
-PROFILE="AdministratorAccess-339163283253"
+PROFILE="AdministratorAccess-068704208855"
 REGION="ap-northeast-1"
 CLUSTER="trading-analysis"
 SERVICE="trading-analysis-dagster"
@@ -54,7 +54,7 @@ echo "Looking up ECS task private IP..."
 TASK_ARN=$($AWS ecs list-tasks --cluster $CLUSTER --service-name $SERVICE \
   --query 'taskArns[0]' --output text)
 TASK_IP=$($AWS ecs describe-tasks --cluster $CLUSTER --tasks "$TASK_ARN" \
-  --query 'tasks[0].containers[0].networkInterfaces[0].privateIpv4Address' --output text)
+  --query 'tasks[0].attachments[0].details[?name==`privateIPv4Address`].value|[0]' --output text)
 
 if [ -z "$TASK_IP" ] || [ "$TASK_IP" = "None" ]; then
   echo "ERROR: No running Dagster task found"
