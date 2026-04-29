@@ -69,6 +69,49 @@ jobs:
           # suppressing the output because it contains a masked secret (AWS account ID).
           echo "image_tag=${{ github.sha }}" >> $GITHUB_OUTPUT
 
+      - name: Download Flink connector JARs
+        run: |
+          mkdir -p flink_job/connectors
+          if [ ! -f flink_job/connectors/flink-sql-connector-kafka-3.2.0-1.19.jar ]; then
+            curl -fL -o flink_job/connectors/flink-sql-connector-kafka-3.2.0-1.19.jar \
+              https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka/3.2.0-1.19/flink-sql-connector-kafka-3.2.0-1.19.jar
+          fi
+          if [ ! -f flink_job/connectors/clickhouse-jdbc-0.6.0-all.jar ]; then
+            curl -fL -o flink_job/connectors/clickhouse-jdbc-0.6.0-all.jar \
+              https://github.com/ClickHouse/clickhouse-java/releases/download/v0.6.0/clickhouse-jdbc-0.6.0-all.jar
+          fi
+
+      - name: Build and push WS consumer image
+        env:
+          REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+        run: |
+          [ -n "$REGISTRY" ] || { echo "ERROR: REGISTRY is empty"; exit 1; }
+          IMAGE_URI=$REGISTRY/trading-analysis-ws-consumer:${{ github.sha }}
+          IMAGE_LATEST=$REGISTRY/trading-analysis-ws-consumer:latest
+          IMAGE_CACHE=$REGISTRY/trading-analysis-ws-consumer:cache
+          docker buildx build \
+            -f streaming/Dockerfile \
+            --cache-from type=registry,ref=$IMAGE_CACHE \
+            --cache-to   type=registry,ref=$IMAGE_CACHE,mode=max \
+            --provenance=false \
+            -t $IMAGE_URI -t $IMAGE_LATEST \
+            --push .
+
+      - name: Build and push Flink job image
+        env:
+          REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+        run: |
+          [ -n "$REGISTRY" ] || { echo "ERROR: REGISTRY is empty"; exit 1; }
+          IMAGE_URI=$REGISTRY/trading-analysis-flink-job:${{ github.sha }}
+          IMAGE_LATEST=$REGISTRY/trading-analysis-flink-job:latest
+          IMAGE_CACHE=$REGISTRY/trading-analysis-flink-job:cache
+          docker buildx build \
+            -f flink_job/Dockerfile \
+            --cache-from type=registry,ref=$IMAGE_CACHE \
+            --cache-to   type=registry,ref=$IMAGE_CACHE,mode=max \
+            --provenance=false \
+            -t $IMAGE_URI -t $IMAGE_LATEST \
+            --push .
 
   deploy-dagster:
     runs-on: ubuntu-latest
