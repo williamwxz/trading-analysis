@@ -328,7 +328,7 @@ def _refresh_pnl_bt(context, is_daily: bool) -> MaterializeResult:
             sql = f"""\
 SELECT
     strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe,
-    argMin(weighting, revision_ts) AS weighting, toString(ts) AS ts,
+    argMin(weighting, revision_ts) AS weighting, toString(ts) AS ts_str,
     JSONExtractFloat(argMin(row_json, revision_ts), 'position') AS position,
     JSONExtractFloat(argMin(row_json, revision_ts), 'price') AS bar_price,
     JSONExtractFloat(argMin(row_json, revision_ts), 'final_signal') AS final_signal,
@@ -345,6 +345,7 @@ ORDER BY strategy_table_name, ts
                 all_prices.pop(underlying, None)
                 continue
             for b in bars:
+                b["ts"] = b.pop("ts_str")
                 tf = b["config_timeframe"]
                 if tf not in TIMEFRAME_MAP:
                     raise ValueError(f"Unknown config_timeframe '{tf}' in {source_table} — add it to TIMEFRAME_MAP")
