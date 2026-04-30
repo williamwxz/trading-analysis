@@ -36,10 +36,14 @@ concurrency:
 retention:
   schedule:
     purge_after_days:
-      skipped: 30
+      skipped: 7
+      success: 14
+      failure: 14
   sensor:
     purge_after_days:
-      skipped: 30
+      skipped: 7
+      success: 14
+      failure: 14
 
 python_logs:
   managed_python_loggers:
