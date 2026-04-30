@@ -28,10 +28,10 @@ local_artifact_storage:
     base_dir: /tmp/dagster-storage
 
 run_queue:
-  max_concurrent_runs: 5
+  max_concurrent_runs: 20
 
 concurrency:
-  default_op_concurrency_limit: 5
+  default_op_concurrency_limit: 20
 
 retention:
   schedule:
