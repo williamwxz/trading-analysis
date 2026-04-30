@@ -299,8 +299,8 @@ resource "aws_ecs_task_definition" "dagster" {
   family                   = "${local.name_prefix}-dagster"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = 1024
-  memory                   = 2048
+  cpu                      = 2048
+  memory                   = 4096
   execution_role_arn       = aws_iam_role.ecs_execution.arn
   task_role_arn            = aws_iam_role.ecs_task.arn
 
@@ -500,6 +500,12 @@ resource "aws_ecr_repository" "dagster" {
 
 resource "aws_cloudwatch_log_group" "dagster" {
   name              = "/ecs/${local.name_prefix}-dagster"
+  retention_in_days = 3
+  tags              = local.common_tags
+}
+
+resource "aws_cloudwatch_log_group" "streaming" {
+  name              = "/ecs/${local.name_prefix}"
   retention_in_days = 3
   tags              = local.common_tags
 }
@@ -855,7 +861,7 @@ resource "aws_ecs_task_definition" "redpanda" {
     logConfiguration = {
       logDriver = "awslogs"
       options = {
-        "awslogs-group"         = "/ecs/${local.name_prefix}"
+        "awslogs-group"         = aws_cloudwatch_log_group.streaming.name
         "awslogs-region"        = var.aws_region
         "awslogs-stream-prefix" = "redpanda"
       }
@@ -883,7 +889,7 @@ resource "aws_ecs_task_definition" "ws_consumer" {
     logConfiguration = {
       logDriver = "awslogs"
       options = {
-        "awslogs-group"         = "/ecs/${local.name_prefix}"
+        "awslogs-group"         = aws_cloudwatch_log_group.streaming.name
         "awslogs-region"        = var.aws_region
         "awslogs-stream-prefix" = "ws-consumer"
       }
@@ -908,11 +914,11 @@ resource "aws_ecs_task_definition" "flink_job" {
     essential = true
     secrets = [
       { name = "CLICKHOUSE_HOST",     valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
-      { name = "CLICKHOUSE_PORT",     valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:port::" },
-      { name = "CLICKHOUSE_USER",     valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:user::" },
       { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
     ]
     environment = [
+      { name = "CLICKHOUSE_PORT",     value = "8443" },
+      { name = "CLICKHOUSE_USER",     value = "dev_ro3" },
       { name = "CLICKHOUSE_SECURE",   value = "true" },
       { name = "REDPANDA_BROKERS",    value = "redpanda.${local.name_prefix}.local:9092" },
       { name = "S3_BUCKET",           value = "trading-analysis-data-v2" },
@@ -920,7 +926,7 @@ resource "aws_ecs_task_definition" "flink_job" {
     logConfiguration = {
       logDriver = "awslogs"
       options = {
-        "awslogs-group"         = "/ecs/${local.name_prefix}"
+        "awslogs-group"         = aws_cloudwatch_log_group.streaming.name
         "awslogs-region"        = var.aws_region
         "awslogs-stream-prefix" = "flink-job"
       }
