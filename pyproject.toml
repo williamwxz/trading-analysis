@@ -30,6 +30,7 @@ dev = [
     "mypy>=1.10",
     "pytest>=8.0",
     "pytest-cov>=5.0",
+    "testcontainers>=4.8",
 ]
 
 [tool.setuptools.packages.find]
@@ -56,4 +57,5 @@ testpaths = ["tests"]
 markers = [
     "unit: Unit tests (fast, no external dependencies)",
     "integration: Integration tests (require ClickHouse/S3)",
+    "streaming_integration: Integration tests (require Docker + Binance network access)",
 ]
