@@ -21,7 +21,9 @@ COPY streaming/ ./streaming/
 COPY flink_job/ ./flink_job/
 COPY trading_dagster/utils/clickhouse_client.py ./trading_dagster/utils/clickhouse_client.py
 COPY trading_dagster/utils/__init__.py ./trading_dagster/utils/__init__.py
-COPY trading_dagster/__init__.py ./trading_dagster/__init__.py
+COPY trading_dagster/utils/pnl_compute.py ./trading_dagster/utils/pnl_compute.py
+# Stub __init__.py — the real one imports Dagster definitions not present in this image
+RUN echo "" > ./trading_dagster/__init__.py
 
 ENV PYTHONUNBUFFERED=1
 ENV PYFLINK_PYTHON=python3

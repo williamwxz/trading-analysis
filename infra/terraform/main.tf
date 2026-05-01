@@ -937,6 +937,36 @@ resource "aws_ecs_task_definition" "flink_job" {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Cloud Map — private DNS namespace for ECS service discovery
+# ─────────────────────────────────────────────────────────────────────────────
+
+resource "aws_service_discovery_private_dns_namespace" "main" {
+  name        = "${local.name_prefix}.local"
+  vpc         = aws_vpc.main.id
+  description = "Private DNS for ECS service discovery"
+  tags        = local.common_tags
+}
+
+resource "aws_service_discovery_service" "redpanda" {
+  name = "redpanda"
+
+  dns_config {
+    namespace_id   = aws_service_discovery_private_dns_namespace.main.id
+    routing_policy = "MULTIVALUE"
+    dns_records {
+      ttl  = 10
+      type = "A"
+    }
+  }
+
+  health_check_custom_config {
+    failure_threshold = 1
+  }
+
+  tags = local.common_tags
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ECS Services (FARGATE_SPOT)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -955,6 +985,10 @@ resource "aws_ecs_service" "redpanda" {
     subnets          = [aws_subnet.private.id]
     security_groups  = [aws_security_group.redpanda.id]
     assign_public_ip = false
+  }
+
+  service_registries {
+    registry_arn = aws_service_discovery_service.redpanda.arn
   }
 
   tags = local.common_tags
