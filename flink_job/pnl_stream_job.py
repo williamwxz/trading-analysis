@@ -200,7 +200,7 @@ def run_flink_job() -> None:
 
     env = StreamExecutionEnvironment.get_execution_environment()
     env.enable_checkpointing(30_000, CheckpointingMode.AT_LEAST_ONCE)
-    env.get_checkpoint_config().set_checkpoint_storage_uri(
+    env.get_checkpoint_config().set_checkpoint_storage_dir(
         f"s3://{os.environ['S3_BUCKET']}/flink-checkpoints/"
     )
 
