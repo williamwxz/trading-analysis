@@ -134,13 +134,13 @@ def run_flink_job() -> None:
         KafkaOffsetsInitializer,
         KafkaSource,
     )
-    from pyflink.datastream.functions import RichFlatMapFunction, RuntimeContext
+    from pyflink.datastream.functions import FlatMapFunction, RuntimeContext
 
     from trading_dagster.utils.clickhouse_client import insert_rows
 
     FLUSH_EVERY = 50
 
-    class PnlFlatMapFunction(RichFlatMapFunction):
+    class PnlFlatMapFunction(FlatMapFunction):
         def open(self, context: RuntimeContext) -> None:
             self._state = AnchorState()
             _bootstrap_anchors(self._state)
