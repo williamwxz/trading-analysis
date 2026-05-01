@@ -169,68 +169,34 @@ ORDER BY strategy_table_name, ts
 def fetch_new_bars_real_trade(
     source_table: str, underlying: str, since: str,
 ) -> List[dict]:
-    """Fetch real_trade bars with execution_ts filtering. Multiple revisions per bar."""
+    """Fetch real_trade revisions. Each revision that arrives before bar close is a separate bar."""
     sql = f"""\
-WITH
-raw AS (
-    SELECT
-        strategy_table_name, config_timeframe, ts, revision_ts,
-        strategy_id, strategy_name, underlying, weighting, row_json,
-        multiIf(
-            config_timeframe = '5m', 5, config_timeframe = '10m', 10,
-            config_timeframe = '15m', 15, config_timeframe = '30m', 30,
-            config_timeframe = '1h', 60, config_timeframe = '4h', 240,
-            config_timeframe = '1d', 1440, 5
-        ) AS timeframe_minutes,
-        ts + toIntervalMinute(timeframe_minutes) AS closing_ts,
-        toStartOfMinute(revision_ts + INTERVAL 59 SECOND) AS execution_ts
-    FROM analytics.{source_table}
-    WHERE underlying = '{underlying}'
-      AND strategy_table_name NOT LIKE 'manual_probe%'
-      AND revision_ts >= toDateTime('{since}')
-      AND revision_ts < ts + toIntervalMinute(timeframe_minutes)
-),
-with_flag AS (
-    SELECT *,
-        if(execution_ts != lagInFrame(execution_ts, 1, toDateTime('1970-01-01'))
-            OVER (PARTITION BY strategy_table_name ORDER BY closing_ts, revision_ts),
-            1, 0) AS is_new_group
-    FROM raw
-),
-with_gid AS (
-    SELECT *,
-        sum(is_new_group) OVER (PARTITION BY strategy_table_name ORDER BY closing_ts, revision_ts
-            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS gid
-    FROM with_flag
-),
-group_next AS (
-    SELECT strategy_table_name, gid,
-        any(execution_ts) AS grp_exec_ts,
-        leadInFrame(any(execution_ts), 1, toDateTime('9999-12-31'))
-            OVER (PARTITION BY strategy_table_name ORDER BY gid
-                  ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS next_exec_ts
-    FROM with_gid
-    GROUP BY strategy_table_name, gid
-),
-filtered AS (
-    SELECT w.*
-    FROM with_gid w
-    INNER JOIN group_next g
-        ON w.strategy_table_name = g.strategy_table_name AND w.gid = g.gid
-    WHERE w.execution_ts < g.next_exec_ts
-)
 SELECT
     strategy_table_name,
     strategy_id, strategy_name, underlying, config_timeframe, weighting,
     toString(ts) AS ts,
-    toString(closing_ts) AS closing_ts,
-    toString(execution_ts) AS execution_ts,
+    toString(ts + toIntervalMinute(multiIf(
+        config_timeframe = '5m', 5, config_timeframe = '10m', 10,
+        config_timeframe = '15m', 15, config_timeframe = '30m', 30,
+        config_timeframe = '1h', 60, config_timeframe = '4h', 240,
+        config_timeframe = '1d', 1440, 5
+    ))) AS closing_ts,
+    toString(toStartOfMinute(revision_ts + INTERVAL 59 SECOND)) AS execution_ts,
     JSONExtractFloat(row_json, 'position') AS position,
     JSONExtractFloat(row_json, 'price') AS bar_price,
     JSONExtractFloat(row_json, 'final_signal') AS final_signal,
     JSONExtractFloat(row_json, 'benchmark') AS bar_benchmark
-FROM filtered
-ORDER BY strategy_table_name, closing_ts, revision_ts
+FROM analytics.{source_table}
+WHERE underlying = '{underlying}'
+  AND strategy_table_name NOT LIKE 'manual_probe%'
+  AND revision_ts >= toDateTime('{since}')
+  AND revision_ts < ts + toIntervalMinute(multiIf(
+        config_timeframe = '5m', 5, config_timeframe = '10m', 10,
+        config_timeframe = '15m', 15, config_timeframe = '30m', 30,
+        config_timeframe = '1h', 60, config_timeframe = '4h', 240,
+        config_timeframe = '1d', 1440, 5
+    ))
+ORDER BY strategy_table_name, ts, revision_ts
 """
     rows = query_dicts(sql)
     return [
@@ -436,10 +402,12 @@ def compute_real_trade_pnl(
 ) -> List[list]:
     """Compute anchor-chained PnL for real_trade bars. Expand to 1-min intervals.
 
+    Same logic as compute_prod_pnl but bars are sorted by execution_ts (not ts)
+    and output includes closing_ts, execution_ts, traded columns.
+
     Args:
-        bars: List of bar dicts (may have multiple revisions per bar, sorted by
-              strategy, closing_ts, revision_ts)
-        anchors: {strategy_table_name: (anchor_pnl, anchor_price)} from target
+        bars: List of bar dicts (one per revision, sorted by strategy, ts, revision_ts)
+        anchors: {strategy_table_name: (anchor_pnl, anchor_price, anchor_position)}
         prices: {ts_string: open_price}
 
     Returns: List of rows ready for INSERT (REAL_TRADE_INSERT_COLUMNS order)
@@ -452,62 +420,39 @@ def compute_real_trade_pnl(
     output_rows = []
 
     for stn, strategy_bars in by_strategy.items():
+        strategy_bars.sort(key=lambda b: b["execution_ts"])
+
         anchor_pnl, anchor_open_price, active_position = anchors.get(stn, (0.0, 0.0, 0.0))
 
-        # We must generate a timeline for each unique closing_ts block.
-        # Store latest bar dictionary per closing_ts block for formatting fallbacks.
-        closing_blocks = {}
-        for b in strategy_bars:
-            cts = b["closing_ts"]
-            if cts not in closing_blocks:
-                closing_blocks[cts] = b
-            else:
-                # keep the latest revision as the base metadata for this hour
-                if b.get("revision_ts", "") > closing_blocks[cts].get("revision_ts", ""):
-                    closing_blocks[cts] = b
-
-        sorted_closing = sorted(closing_blocks.keys())
-        sorted_revs = sorted(strategy_bars, key=lambda b: b["execution_ts"])
-
-        rev_idx = 0
-        n_revs = len(sorted_revs)
-
-        for cts in sorted_closing:
-            base_bar = closing_blocks[cts]
-            tf_minutes = TIMEFRAME_MAP.get(base_bar["config_timeframe"], 5)
-            closing_ts_dt = datetime.strptime(cts, "%Y-%m-%d %H:%M:%S")
+        for bar in strategy_bars:
+            tf_minutes = TIMEFRAME_MAP.get(bar["config_timeframe"], 5)
+            exec_ts = datetime.strptime(bar["execution_ts"], "%Y-%m-%d %H:%M:%S")
+            position = bar["position"]
+            bar_price = bar["bar_price"]
 
             for n in range(tf_minutes):
-                ts_1min = closing_ts_dt + timedelta(minutes=n)
+                ts_1min = exec_ts + timedelta(minutes=n)
                 ts_str = ts_1min.strftime("%Y-%m-%d %H:%M:%S")
 
-                # Advance active_position if we reach a new execution_ts
-                while rev_idx < n_revs and sorted_revs[rev_idx]["execution_ts"] <= ts_str:
-                    active_position = sorted_revs[rev_idx]["position"]
-                    # If this revision provides updated metadata we can use it
-                    base_bar = sorted_revs[rev_idx]
-                    rev_idx += 1
-
-                live_open_price = prices.get(ts_str, anchor_open_price if anchor_open_price != 0.0 else base_bar["bar_price"])
+                live_open_price = prices.get(ts_str, anchor_open_price if anchor_open_price != 0.0 else bar_price)
 
                 if anchor_open_price == 0.0:
                     anchor_open_price = live_open_price
 
                 if anchor_open_price != 0.0:
-                    cpnl = anchor_pnl + active_position * (live_open_price - anchor_open_price) / anchor_open_price
+                    cpnl = anchor_pnl + position * (live_open_price - anchor_open_price) / anchor_open_price
                 else:
                     cpnl = anchor_pnl
 
                 output_rows.append([
-                    stn, base_bar["strategy_id"], base_bar["strategy_name"],
-                    base_bar["underlying"], base_bar["config_timeframe"],
+                    stn, bar["strategy_id"], bar["strategy_name"],
+                    bar["underlying"], bar["config_timeframe"],
                     "real_trade", "v2", ts_str, cpnl,
-                    base_bar["bar_benchmark"], active_position, live_open_price,
-                    base_bar["final_signal"], base_bar["weighting"], now_str,
-                    base_bar["closing_ts"], base_bar["execution_ts"], "false",
+                    bar["bar_benchmark"], position, live_open_price,
+                    bar["final_signal"], bar["weighting"], now_str,
+                    bar["closing_ts"], bar["execution_ts"], "false",
                 ])
 
-                # Advance strictly chronological state
                 anchor_pnl = cpnl
                 anchor_open_price = live_open_price
 

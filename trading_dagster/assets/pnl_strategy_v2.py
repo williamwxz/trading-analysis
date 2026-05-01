@@ -47,6 +47,7 @@ from ..utils.pnl_compute import (
 # Start date for partitions
 START_DATE = "2024-01-01"
 daily_partitions = DailyPartitionsDefinition(start_date=START_DATE)
+bt_daily_partitions = DailyPartitionsDefinition(start_date="2020-06-14")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Watermark + discovery helpers
@@ -69,13 +70,19 @@ def _prepare_rows_for_clickhouse(rows: List[list]) -> List[list]:
     """Ensure timestamp strings are converted back to datetime objects for clickhouse-connect.
 
     Mutates rows in-place to avoid doubling peak memory for large strategy batches.
+    Handles both PROD_INSERT_COLUMNS (15 cols) and REAL_TRADE_INSERT_COLUMNS (18 cols).
     """
     for r in rows:
-        # In PROD_INSERT_COLUMNS, 'ts' is at index 7, 'updated_at' at index 14
+        # ts=7, updated_at=14 in both column layouts
         if isinstance(r[7], str):
             r[7] = datetime.strptime(r[7], "%Y-%m-%d %H:%M:%S")
         if isinstance(r[14], str):
             r[14] = datetime.strptime(r[14], "%Y-%m-%d %H:%M:%S")
+        # closing_ts=15, execution_ts=16 in REAL_TRADE_INSERT_COLUMNS only
+        if len(r) > 15 and isinstance(r[15], str):
+            r[15] = datetime.strptime(r[15], "%Y-%m-%d %H:%M:%S")
+        if len(r) > 16 and isinstance(r[16], str):
+            r[16] = datetime.strptime(r[16], "%Y-%m-%d %H:%M:%S")
     return rows
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -123,7 +130,7 @@ def pnl_bt_v2_live_asset(context: AssetExecutionContext) -> MaterializeResult:
     name="pnl_bt_v2_daily",
     group_name="strategy_pnl",
     deps=["binance_futures_backfill"],
-    partitions_def=daily_partitions,
+    partitions_def=bt_daily_partitions,
     compute_kind="clickhouse",
 )
 def pnl_bt_v2_daily_asset(context: AssetExecutionContext) -> MaterializeResult:
@@ -404,5 +411,84 @@ ORDER BY strategy_table_name, ts
 
 
 def _refresh_pnl_real_trade(context, is_daily: bool) -> MaterializeResult:
-    # Real trade specific logic - would need similar datetime conversion
-    return MaterializeResult(metadata={"status": "success"})
+    source_table = "strategy_output_history_v2"
+    target_table = "strategy_pnl_1min_real_trade_v2"
+
+    if is_daily:
+        date_str = context.partition_key
+        start_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        end_dt = start_dt + timedelta(days=1)
+        start_ts = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+        end_ts = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        client = get_client()
+        execute(
+            f"DELETE FROM analytics.{target_table} "
+            f"WHERE toDateTime(ts) >= toDateTime('{start_ts}') AND toDateTime(ts) < toDateTime('{end_ts}') "
+            f"AND source='real_trade'",
+            client
+        )
+
+        underlyings = _get_underlyings(source_table)
+        total_rows = 0
+        for underlying in underlyings:
+            bars = fetch_new_bars_real_trade(source_table, underlying, start_ts)
+            if not bars:
+                continue
+            bars = [b for b in bars if b["closing_ts"] >= start_ts and b["closing_ts"] < end_ts]
+            if not bars:
+                continue
+            ts_min = min(b["ts"] for b in bars)
+            ts_max = max(b["ts"] for b in bars)
+            prices = fetch_prices(underlying, ts_min, ts_max, client)
+            anchors = fetch_anchors(target_table, underlying)
+            rows = compute_real_trade_pnl(bars, anchors, prices)
+            _prepare_rows_for_clickhouse(rows)
+            total_rows += insert_rows(f"analytics.{target_table}", REAL_TRADE_INSERT_COLUMNS, rows, client)
+
+        return MaterializeResult(metadata={"partition": date_str, "rows_inserted": total_rows})
+
+    else:
+        underlyings = _get_underlyings(source_table)
+        client = get_client()
+        total_rows = 0
+        refreshed = []
+
+        for underlying in underlyings:
+            source_max = _get_source_max_revision(source_table, underlying)
+            if not source_max:
+                continue
+
+            watermark = query_scalar(
+                f"SELECT toString(max(last_revision_ts)) FROM analytics.pnl_refresh_watermarks "
+                f"WHERE underlying = '{underlying}' AND target_table = '{target_table}'",
+                client
+            )
+            watermark = str(watermark).strip() if watermark else "2020-01-01 00:00:00"
+
+            if source_max <= watermark:
+                continue
+
+            context.log.info(f"[{underlying}] Incremental real_trade refresh since {watermark}")
+            bars = fetch_new_bars_real_trade(source_table, underlying, watermark)
+            if not bars:
+                continue
+
+            ts_min = min(b["ts"] for b in bars)
+            ts_max = max(b["ts"] for b in bars)
+            prices = fetch_prices(underlying, ts_min, ts_max, client)
+            anchors = fetch_anchors(target_table, underlying)
+            rows = compute_real_trade_pnl(bars, anchors, prices)
+            _prepare_rows_for_clickhouse(rows)
+            n = insert_rows(f"analytics.{target_table}", REAL_TRADE_INSERT_COLUMNS, rows, client)
+            total_rows += n
+
+            execute(
+                f"INSERT INTO analytics.pnl_refresh_watermarks (underlying, target_table, last_revision_ts, updated_at) "
+                f"VALUES ('{underlying}', '{target_table}', toDateTime('{source_max}'), now())",
+                client
+            )
+            refreshed.append(underlying)
+            context.log.info(f"[{underlying}] Inserted {n} rows")
+
+        return MaterializeResult(metadata={"total_inserted": total_rows, "underlyings": ", ".join(refreshed)})
