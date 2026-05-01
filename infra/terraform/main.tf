@@ -450,10 +450,6 @@ resource "aws_ecs_service" "dagster" {
   }
 
   tags = local.common_tags
-
-  lifecycle {
-    create_before_destroy = true
-  }
 }
 
 
