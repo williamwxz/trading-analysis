@@ -23,7 +23,7 @@ from ..utils.clickhouse_client import get_client, insert_rows, query_scalar, exe
 from ..utils.exchange_price_service import ExchangePriceDataService
 
 # Configuration
-START_DATE = "2024-01-01"
+START_DATE = "2020-06-14"
 INSTRUMENTS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
     "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",

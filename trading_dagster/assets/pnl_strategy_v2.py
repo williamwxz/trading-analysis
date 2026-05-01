@@ -45,9 +45,9 @@ from ..utils.pnl_compute import (
 )
 
 # Start date for partitions
-START_DATE = "2024-01-01"
+START_DATE = "2020-06-14"
 daily_partitions = DailyPartitionsDefinition(start_date=START_DATE)
-bt_daily_partitions = DailyPartitionsDefinition(start_date="2020-06-14")
+bt_daily_partitions = daily_partitions
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Watermark + discovery helpers
