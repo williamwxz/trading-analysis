@@ -27,9 +27,9 @@ from testcontainers.core.waiting_utils import wait_for_logs
 from confluent_kafka import Consumer, Producer
 from streaming.models import CandleEvent
 from streaming.binance_ws_consumer import publish_candle, TOPIC
-from flink_job.pnl_stream_job import process_candle
-from flink_job.anchor_state import AnchorState
-from flink_job.ch_lookup import StrategyBar
+from pnl_consumer.pnl_consumer import process_candle
+from pnl_consumer.anchor_state import AnchorState
+from pnl_consumer.ch_lookup import StrategyBar
 
 
 def _fetch_live_candle() -> CandleEvent | None:
@@ -159,7 +159,7 @@ def test_process_candle_no_clickhouse_writes(producer, consumer):
 
     state = AnchorState()
 
-    with patch("flink_job.pnl_stream_job.fetch_strategies_for_candle",
+    with patch("pnl_consumer.pnl_consumer.fetch_strategies_for_candle",
                side_effect=_stub_strategy_bar):
         rows = process_candle(candle, state)
 
@@ -176,7 +176,7 @@ def test_process_candle_no_clickhouse_writes(producer, consumer):
     assert isinstance(pnl_rows[0]["ts"], datetime)
 
     # Second call with same price: anchor advances but delta is 0
-    with patch("flink_job.pnl_stream_job.fetch_strategies_for_candle",
+    with patch("pnl_consumer.pnl_consumer.fetch_strategies_for_candle",
                side_effect=_stub_strategy_bar):
         rows2 = process_candle(candle, state)
 
