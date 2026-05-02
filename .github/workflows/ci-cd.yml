@@ -321,7 +321,11 @@ jobs:
 
   deploy-streaming:
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build-streaming, detect-changes]
+    if: |
+      always() &&
+      needs.build-streaming.result == 'success' &&
+      needs.detect-changes.outputs.streaming == 'true'
     permissions:
       id-token: write
       contents: read
@@ -334,7 +338,7 @@ jobs:
 
       - name: Deploy WS consumer to ECS
         env:
-          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+          IMAGE_TAG: ${{ needs.build-streaming.outputs.image_tag }}
           DEPLOY_REGION: ${{ secrets.AWS_REGION }}
           ECS_CLUSTER: trading-analysis
           REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
@@ -369,9 +373,55 @@ jobs:
             --region $DEPLOY_REGION \
             --output json > /dev/null
 
+      - name: Wait for WS consumer stability
+        env:
+          DEPLOY_REGION: ${{ secrets.AWS_REGION }}
+          ECS_CLUSTER: trading-analysis
+        run: |
+          echo "Waiting up to 20 min for trading-analysis-ws-consumer to stabilise..."
+          for i in $(seq 1 80); do
+            STATUS=$(aws ecs describe-services \
+              --cluster $ECS_CLUSTER \
+              --services trading-analysis-ws-consumer \
+              --region $DEPLOY_REGION \
+              --query 'services[0].deployments' --output json)
+            PRIMARIES=$(echo "$STATUS" | python3 -c "
+          import sys,json
+          d=json.load(sys.stdin)
+          print(sum(1 for x in d if x['status']=='PRIMARY' and x['runningCount']>=x['desiredCount'] and x['failedTasks']==0))")
+            TOTAL=$(echo "$STATUS" | python3 -c "
+          import sys,json; d=json.load(sys.stdin); print(len(d))")
+            echo "Poll $i/80: deployments=$TOTAL primary_stable=$PRIMARIES"
+            if [ "$PRIMARIES" = "1" ] && [ "$TOTAL" = "1" ]; then
+              echo "WS consumer deploy complete."
+              break
+            fi
+            if [ "$i" = "80" ]; then
+              echo "ERROR: timed out waiting for ws-consumer stability"; exit 1
+            fi
+            sleep 15
+          done
+
+  deploy-flink:
+    runs-on: ubuntu-latest
+    needs: [build-flink, detect-changes]
+    if: |
+      always() &&
+      needs.build-flink.result == 'success' &&
+      needs.detect-changes.outputs.flink == 'true'
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.GHA_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
       - name: Deploy Flink job to ECS
         env:
-          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+          IMAGE_TAG: ${{ needs.build-flink.outputs.image_tag }}
           DEPLOY_REGION: ${{ secrets.AWS_REGION }}
           ECS_CLUSTER: trading-analysis
           REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
@@ -406,44 +456,34 @@ jobs:
             --region $DEPLOY_REGION \
             --output json > /dev/null
 
-      - name: Wait for streaming services stability
+      - name: Wait for Flink job stability
         env:
           DEPLOY_REGION: ${{ secrets.AWS_REGION }}
           ECS_CLUSTER: trading-analysis
         run: |
-          echo "Waiting up to 20 min for streaming services to stabilise..."
+          echo "Waiting up to 20 min for trading-analysis-flink-job to stabilise..."
           for i in $(seq 1 80); do
             STATUS=$(aws ecs describe-services \
               --cluster $ECS_CLUSTER \
-              --services trading-analysis-ws-consumer trading-analysis-flink-job \
+              --services trading-analysis-flink-job \
               --region $DEPLOY_REGION \
-              --query 'services[*].deployments' --output json)
-            STABLE=$(echo "$STATUS" | python3 -c "
-          import sys, json
-          svcs = json.load(sys.stdin)
-          stable = sum(
-            1 for d_list in svcs
-            for d in d_list
-            if d['status']=='PRIMARY' and d['runningCount']>=d['desiredCount'] and d['failedTasks']==0
-            and len(d_list)==1
-          )
-          print(stable)")
-            echo "Poll $i/80: stable_services=$STABLE/2"
-            if [ "$STABLE" = "2" ]; then
-              echo "Streaming deploy complete."
+              --query 'services[0].deployments' --output json)
+            PRIMARIES=$(echo "$STATUS" | python3 -c "
+          import sys,json
+          d=json.load(sys.stdin)
+          print(sum(1 for x in d if x['status']=='PRIMARY' and x['runningCount']>=x['desiredCount'] and x['failedTasks']==0))")
+            TOTAL=$(echo "$STATUS" | python3 -c "
+          import sys,json; d=json.load(sys.stdin); print(len(d))")
+            echo "Poll $i/80: deployments=$TOTAL primary_stable=$PRIMARIES"
+            if [ "$PRIMARIES" = "1" ] && [ "$TOTAL" = "1" ]; then
+              echo "Flink deploy complete."
               break
             fi
             if [ "$i" = "80" ]; then
-              echo "ERROR: timed out waiting for streaming stability"; exit 1
+              echo "ERROR: timed out waiting for flink-job stability"; exit 1
             fi
             sleep 15
           done
-          aws ecs describe-services \
-            --cluster $ECS_CLUSTER \
-            --services trading-analysis-ws-consumer trading-analysis-flink-job \
-            --region $DEPLOY_REGION \
-            --query 'services[*].{Name:serviceName,Status:status,Running:runningCount,Desired:desiredCount}' \
-            --output table
 
   terraform:
     runs-on: ubuntu-latest
