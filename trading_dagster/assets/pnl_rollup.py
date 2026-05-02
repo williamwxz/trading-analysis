@@ -155,12 +155,14 @@ def _run_rollup(
     name="pnl_1hour_rollup",
     group_name="strategy_pnl",
     deps=[
-        "pnl_prod_v2_refresh",
-        "pnl_bt_v2_refresh",
-        "pnl_real_trade_v2_refresh",
+        "pnl_prod_v2_live",
+        "pnl_prod_v2_daily",
+        "pnl_real_trade_v2_live",
+        "pnl_real_trade_v2_daily",
     ],
     automation_condition=(
-        AutomationCondition.on_cron("15 * * * *") & ~AutomationCondition.in_progress()
+        (AutomationCondition.on_cron("15 * * * *") | AutomationCondition.any_deps_updated())
+        & ~AutomationCondition.in_progress()
     ),
     description=(
         "Rolls up strategy_pnl_1min_*_v2 → strategy_pnl_1hour_*_v2. "
