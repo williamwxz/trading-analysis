@@ -8,6 +8,33 @@ permissions:
   contents: read
 
 jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      dagster:   ${{ steps.filter.outputs.dagster   == 'true' || steps.filter.outputs.terraform == 'true' }}
+      streaming: ${{ steps.filter.outputs.streaming == 'true' || steps.filter.outputs.terraform == 'true' }}
+      flink:     ${{ steps.filter.outputs.flink     == 'true' || steps.filter.outputs.terraform == 'true' }}
+      terraform: ${{ steps.filter.outputs.terraform }}
+      grafana:   ${{ steps.filter.outputs.grafana   == 'true' || steps.filter.outputs.terraform == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            dagster:
+              - 'trading_dagster/**'
+              - 'Dockerfile'
+              - 'pyproject.toml'
+            streaming:
+              - 'streaming/**'
+            flink:
+              - 'flink_job/**'
+            terraform:
+              - 'infra/terraform/**'
+            grafana:
+              - 'infra/grafana/**'
+
   test:
     runs-on: ubuntu-latest
     steps:
