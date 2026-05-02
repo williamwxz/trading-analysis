@@ -4,12 +4,14 @@ Unit tests for PnL computation logic.
 Tests the anchor-chained PnL computation without ClickHouse dependency.
 """
 
+import re
 import pytest
 
 from trading_dagster.utils.pnl_compute import (
     assert_anchors_present,
     compute_prod_pnl,
     compute_real_trade_pnl,
+    fetch_new_bars_real_trade,
     PROD_REAL_TRADE_START_DATE,
     BT_START_DATE,
     TIMEFRAME_MAP,
@@ -200,6 +202,40 @@ class TestComputeRealTradePnl:
         # Should include closing_ts and execution_ts columns
         assert rows[0][15] == "2024-01-01 00:05:00"  # closing_ts
         assert rows[0][16] == "2024-01-01 00:05:00"  # execution_ts
+
+
+class TestFetchNewBarsRealTradeSQL:
+    """Test that fetch_new_bars_real_trade generates correct SQL (no alias collision)."""
+
+    def _capture_sql(self, monkeypatch, **kwargs) -> str:
+        captured = {}
+
+        def fake_query_dicts(sql):
+            captured["sql"] = sql
+            return []
+
+        monkeypatch.setattr(
+            "trading_dagster.utils.pnl_compute.query_dicts", fake_query_dicts
+        )
+        fetch_new_bars_real_trade(**kwargs)
+        return captured["sql"]
+
+    def test_order_by_uses_toDateTime_not_string_alias(self, monkeypatch):
+        """ORDER BY must use toDateTime(ts) so ClickHouse sorts on the DateTime column,
+        not the toString(ts) alias — bare 'ts' resolves to the String alias and causes
+        a NO_COMMON_TYPE error when the WHERE clause compares it against toDateTime(...)."""
+        sql = self._capture_sql(
+            monkeypatch,
+            source_table="strategy_output_history_v2",
+            underlying="btc",
+            since="2025-04-27 00:00:00",
+            ts_end="2025-04-28 00:00:00",
+        )
+        order_by = re.search(r"ORDER BY (.+)", sql).group(1).strip()
+        assert "toDateTime(ts)" in order_by, (
+            f"ORDER BY should use toDateTime(ts) to avoid alias collision with "
+            f"toString(ts) AS ts in SELECT, but got: ORDER BY {order_by}"
+        )
 
 
 class TestTimeframeMap:

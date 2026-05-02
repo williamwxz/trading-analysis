@@ -247,7 +247,7 @@ WHERE underlying = '{underlying}'
         config_timeframe = '1h', 60, config_timeframe = '4h', 240,
         config_timeframe = '1d', 1440, 5
     ))
-ORDER BY strategy_table_name, ts, revision_ts
+ORDER BY strategy_table_name, toDateTime(ts), revision_ts
 """
     rows = query_dicts(sql)
     return [
