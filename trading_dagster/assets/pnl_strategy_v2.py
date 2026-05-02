@@ -29,7 +29,10 @@ from ..utils.clickhouse_client import (
     query_dicts,
 )
 from ..utils.pnl_compute import (
+    assert_anchors_present,
     fetch_anchors,
+    PROD_REAL_TRADE_START_DATE,
+    BT_START_DATE,
     fetch_new_bars_prod,
     fetch_new_bars_bt,
     fetch_new_bars_real_trade,
@@ -44,10 +47,8 @@ from ..utils.pnl_compute import (
     TIMEFRAME_MAP,
 )
 
-# Start date for partitions
-START_DATE = "2020-06-14"
-daily_partitions = DailyPartitionsDefinition(start_date=START_DATE)
-bt_daily_partitions = daily_partitions
+daily_partitions = DailyPartitionsDefinition(start_date=PROD_REAL_TRADE_START_DATE)
+bt_daily_partitions = DailyPartitionsDefinition(start_date=BT_START_DATE)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Watermark + discovery helpers
@@ -208,6 +209,7 @@ def _refresh_pnl_generic(context, target_table: str, source_table: str, label: s
             chunks[bucket].append(b)
 
         anchors = fetch_anchors(target_table, underlying)
+        assert_anchors_present(anchors, bars, start_date=PROD_REAL_TRADE_START_DATE)
         underlying_rows = 0
 
         for bucket in sorted(chunks.keys()):
@@ -294,6 +296,7 @@ def _refresh_pnl_partitioned(context, target_table: str, source_table: str, labe
 
         # We still need anchors from the end of the previous day
         anchors = fetch_anchors(target_table, underlying)
+        assert_anchors_present(anchors, rows_dict, start_date=PROD_REAL_TRADE_START_DATE)
         # Pop (not get) so this underlying's price dict is freed immediately after
         # use rather than being held in all_prices for the rest of the loop.
         prices = all_prices.pop(underlying, {})
@@ -442,6 +445,7 @@ def _refresh_pnl_real_trade(context, is_daily: bool) -> MaterializeResult:
             ts_max = max(b["ts"] for b in bars)
             prices = fetch_prices(underlying, ts_min, ts_max, client)
             anchors = fetch_anchors(target_table, underlying)
+            assert_anchors_present(anchors, bars, start_date=PROD_REAL_TRADE_START_DATE, bar_ts_key="execution_ts")
             rows = compute_real_trade_pnl(bars, anchors, prices)
             _prepare_rows_for_clickhouse(rows)
             total_rows += insert_rows(f"analytics.{target_table}", REAL_TRADE_INSERT_COLUMNS, rows, client)
@@ -478,6 +482,7 @@ def _refresh_pnl_real_trade(context, is_daily: bool) -> MaterializeResult:
             ts_max = max(b["ts"] for b in bars)
             prices = fetch_prices(underlying, ts_min, ts_max, client)
             anchors = fetch_anchors(target_table, underlying)
+            assert_anchors_present(anchors, bars, start_date=PROD_REAL_TRADE_START_DATE, bar_ts_key="execution_ts")
             rows = compute_real_trade_pnl(bars, anchors, prices)
             _prepare_rows_for_clickhouse(rows)
             n = insert_rows(f"analytics.{target_table}", REAL_TRADE_INSERT_COLUMNS, rows, client)

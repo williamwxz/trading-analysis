@@ -19,6 +19,11 @@ from typing import Dict, List, Tuple
 
 from .clickhouse_client import query_dicts, query_rows
 
+# Partition start dates — strategies whose first bar falls on this date are
+# allowed to cold-start with no prior anchor (genuinely the first data point).
+PROD_REAL_TRADE_START_DATE = "2026-02-27"
+BT_START_DATE = "2020-06-14"
+
 TIMEFRAME_MAP = {
     "5m": 5,
     "10m": 10,
@@ -65,6 +70,44 @@ LIMIT 1 BY strategy_table_name
         pos = float(r["anchor_position"]) if r["anchor_position"] is not None else 0.0
         result[r["strategy_table_name"]] = (pnl, price, pos)
     return result
+
+
+def assert_anchors_present(
+    anchors: Dict[str, Tuple[float, float, float]],
+    bars: List[dict],
+    start_date: str,
+    bar_ts_key: str = "ts",
+) -> None:
+    """Raise if any strategy is missing an anchor, unless its first bar is on start_date.
+
+    A missing anchor after the start date means there is a gap in the PnL history
+    that would cause the cumulative_pnl series to silently reset to zero.
+
+    Args:
+        anchors: result of fetch_anchors()
+        bars: bars about to be computed (must have strategy_table_name + bar_ts_key)
+        start_date: partition start date string (YYYY-MM-DD); cold starts are allowed on this date
+        bar_ts_key: dict key for the bar timestamp ("ts" for prod, "execution_ts" for real_trade)
+    """
+    earliest: Dict[str, str] = {}
+    for bar in bars:
+        stn = bar["strategy_table_name"]
+        ts = bar[bar_ts_key]
+        if stn not in earliest or ts < earliest[stn]:
+            earliest[stn] = ts
+
+    missing = [
+        stn
+        for stn, ts in earliest.items()
+        if stn not in anchors and not ts.startswith(start_date)
+    ]
+    if missing:
+        raise RuntimeError(
+            f"Missing PnL anchor for strategies: {missing}. "
+            f"This would silently reset cumulative_pnl to zero. "
+            f"Check that the previous partition ran successfully or that the "
+            f"anchor window (2 hours) covers the last committed row."
+        )
 
 
 def fetch_new_bars_prod(

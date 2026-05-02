@@ -7,8 +7,11 @@ Tests the anchor-chained PnL computation without ClickHouse dependency.
 import pytest
 
 from trading_dagster.utils.pnl_compute import (
+    assert_anchors_present,
     compute_prod_pnl,
     compute_real_trade_pnl,
+    PROD_REAL_TRADE_START_DATE,
+    BT_START_DATE,
     TIMEFRAME_MAP,
 )
 
@@ -16,8 +19,8 @@ from trading_dagster.utils.pnl_compute import (
 class TestComputeProdPnl:
     """Test compute_prod_pnl anchor chaining logic."""
 
-    def test_single_bar_no_anchor(self):
-        """First bar with no existing anchor should use bar_price as anchor."""
+    def test_single_bar_no_anchor_prod_start_date(self):
+        """First bar on PROD_REAL_TRADE_START_DATE with no anchor is allowed (cold start)."""
         bars = [
             {
                 "strategy_table_name": "test_strategy",
@@ -26,7 +29,7 @@ class TestComputeProdPnl:
                 "underlying": "btc",
                 "config_timeframe": "5m",
                 "weighting": 1.0,
-                "ts": "2024-01-01 00:00:00",
+                "ts": f"{PROD_REAL_TRADE_START_DATE} 00:00:00",
                 "position": 1.0,
                 "bar_price": 100.0,
                 "final_signal": 1.0,
@@ -36,13 +39,71 @@ class TestComputeProdPnl:
         anchors = {}
         prices = {}
 
+        assert_anchors_present(anchors, bars, start_date=PROD_REAL_TRADE_START_DATE)  # must not raise
         rows = compute_prod_pnl(bars, anchors, prices, source_label="production")
 
-        # 5m bar → 5 output rows
         assert len(rows) == 5
-        # All prices should be bar_price (no live prices available)
         for row in rows:
             assert row[11] == 100.0  # price column
+
+    def test_single_bar_no_anchor_bt_start_date(self):
+        """First bar on BT_START_DATE with no anchor is allowed (cold start)."""
+        bars = [
+            {
+                "strategy_table_name": "test_bt_strategy",
+                "strategy_id": 2,
+                "strategy_name": "BT Test",
+                "underlying": "btc",
+                "config_timeframe": "5m",
+                "weighting": 1.0,
+                "ts": f"{BT_START_DATE} 00:00:00",
+                "position": 1.0,
+                "bar_price": 50.0,
+                "final_signal": 1.0,
+                "bar_benchmark": 50.0,
+            }
+        ]
+        assert_anchors_present({}, bars, start_date=BT_START_DATE)  # must not raise
+
+    def test_no_anchor_after_prod_start_date_raises(self):
+        """Missing anchor for a prod bar after PROD_REAL_TRADE_START_DATE must raise."""
+        bars = [
+            {
+                "strategy_table_name": "test_strategy",
+                "strategy_id": 1,
+                "strategy_name": "Test",
+                "underlying": "btc",
+                "config_timeframe": "5m",
+                "weighting": 1.0,
+                "ts": "2026-03-01 00:00:00",
+                "position": 1.0,
+                "bar_price": 100.0,
+                "final_signal": 1.0,
+                "bar_benchmark": 100.0,
+            }
+        ]
+        with pytest.raises(RuntimeError, match="Missing PnL anchor"):
+            assert_anchors_present({}, bars, start_date=PROD_REAL_TRADE_START_DATE)
+
+    def test_no_anchor_after_bt_start_date_raises(self):
+        """Missing anchor for a bt bar after BT_START_DATE must raise."""
+        bars = [
+            {
+                "strategy_table_name": "test_bt_strategy",
+                "strategy_id": 2,
+                "strategy_name": "BT Test",
+                "underlying": "btc",
+                "config_timeframe": "5m",
+                "weighting": 1.0,
+                "ts": "2024-01-01 00:00:00",
+                "position": 1.0,
+                "bar_price": 50.0,
+                "final_signal": 1.0,
+                "bar_benchmark": 50.0,
+            }
+        ]
+        with pytest.raises(RuntimeError, match="Missing PnL anchor"):
+            assert_anchors_present({}, bars, start_date=BT_START_DATE)
 
     def test_anchor_chaining_two_bars(self):
         """Two consecutive bars should chain PnL correctly."""
