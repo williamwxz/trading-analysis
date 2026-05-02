@@ -58,7 +58,6 @@ SELECT
     position       AS anchor_position
 FROM analytics.{target_table}
 WHERE underlying = '{underlying}'
-  AND ts >= now() - INTERVAL 2 HOUR
 ORDER BY strategy_table_name, ts DESC, updated_at DESC
 LIMIT 1 BY strategy_table_name
 """
@@ -105,8 +104,7 @@ def assert_anchors_present(
         raise RuntimeError(
             f"Missing PnL anchor for strategies: {missing}. "
             f"This would silently reset cumulative_pnl to zero. "
-            f"Check that the previous partition ran successfully or that the "
-            f"anchor window (2 hours) covers the last committed row."
+            f"Check that the previous partition ran successfully and has committed rows in the target table."
         )
 
 
