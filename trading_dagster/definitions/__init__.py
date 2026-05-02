@@ -23,7 +23,6 @@ from ..assets.pnl_safety_scan import pnl_daily_safety_scan_asset
 from ..assets.clickhouse_connectivity_check import clickhouse_connectivity_check_asset
 from ..assets.postgres_cleanup import postgres_cleanup_asset
 from ..sensors.automation_sensors import build_automation_sensors
-from ..jobs.backfill_job import backfill_job
 
 
 all_assets = [
@@ -51,5 +50,4 @@ all_sensors = build_automation_sensors()
 defs = Definitions(
     assets=all_assets,
     sensors=all_sensors,
-    jobs=[backfill_job],
 )
