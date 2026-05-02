@@ -94,9 +94,9 @@ PnL formula: `cumulative_pnl = anchor_pnl + position * (live_price - anchor_pric
 
 ### Real Trade vs Prod/Bt
 
-`real_trade` bars have multiple revisions per bar (live updates). `fetch_new_bars_real_trade` uses a ClickHouse window function (`lagInFrame`/`leadInFrame`) to group revisions by `execution_ts = toStartOfMinute(revision_ts + 59s)` and keeps only the latest revision per group. `compute_real_trade_pnl` advances `active_position` as each `execution_ts` is reached while iterating 1-min intervals. Prod/bt use `argMin(row_json, revision_ts)` (first revision wins) and a simpler `compute_prod_pnl`.
+`real_trade` bars have multiple revisions per bar (live updates). `fetch_new_bars_real_trade` fetches all revisions that arrive before bar close (`revision_ts < ts + tf_minutes`), computing `execution_ts = toStartOfMinute(revision_ts + 59s)` per revision. All revisions are returned ordered by `ts, revision_ts`. `compute_real_trade_pnl` iterates by `execution_ts` and advances `active_position` as each revision is reached. Prod/bt use `argMin(row_json, revision_ts)` (first revision wins) and a simpler `compute_prod_pnl`.
 
-**Note**: `_refresh_pnl_real_trade` in `pnl_strategy_v2.py` is currently a stub — it returns an empty `MaterializeResult` without running the actual computation. The computation logic exists in `pnl_compute.py` (`fetch_new_bars_real_trade`, `compute_real_trade_pnl`) but is not wired up yet.
+`_refresh_pnl_real_trade` in `pnl_strategy_v2.py` is fully implemented for both live and daily paths, using `fetch_new_bars_real_trade` and `compute_real_trade_pnl` from `pnl_compute.py`.
 
 ### ClickHouse Patterns
 
