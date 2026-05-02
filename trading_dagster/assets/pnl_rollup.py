@@ -36,10 +36,9 @@ def _get_source_watermark(underlying: str, source_table: str) -> Optional[str]:
     return None if not v or v == "1970-01-01 00:00:00" else v
 
 
-def _get_rollup_watermark(underlying: str, rollup_table: str, buffer_hours: int) -> Optional[str]:
+def _get_rollup_watermark(underlying: str, rollup_table: str) -> Optional[str]:
     v = query_scalar(
-        f"SELECT if(max(ts) = toDateTime(0), '', toString(max(ts) - INTERVAL {buffer_hours} HOUR)) "
-        f"FROM {rollup_table} FINAL WHERE underlying = '{underlying}'"
+        f"SELECT toString(max(updated_at)) FROM {rollup_table} FINAL WHERE underlying = '{underlying}'"
     )
     v = str(v).strip() if v else None
     return None if not v or v == "1970-01-01 00:00:00" else v
@@ -119,12 +118,17 @@ def _run_rollup(
                 skipped.append(f"{variant}/{underlying}")
                 continue
 
-            rollup_wm = _get_rollup_watermark(underlying, rollup_table, buffer_hours)
+            rollup_wm = _get_rollup_watermark(underlying, rollup_table)
             if rollup_wm and source_wm <= rollup_wm:
                 skipped.append(f"{variant}/{underlying}")
                 continue
 
-            since = rollup_wm or "2020-01-01 00:00:00"
+            since = query_scalar(
+                f"SELECT if(max(ts) = toDateTime(0), '2020-01-01 00:00:00', "
+                f"toString(max(ts) - INTERVAL {buffer_hours} HOUR)) "
+                f"FROM {rollup_table} FINAL WHERE underlying = '{underlying}'"
+            ) or "2020-01-01 00:00:00"
+            since = str(since).strip() or "2020-01-01 00:00:00"
             context.log.info(f"[{variant}/{underlying}] Rolling up since {since}")
 
             sql = _rollup_sql(underlying, source_table, rollup_table, bucket_fn, since)
