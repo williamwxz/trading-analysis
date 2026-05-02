@@ -1024,7 +1024,7 @@ resource "aws_ecs_task_definition" "ws_consumer" {
       { name = "REDPANDA_BROKERS", value = "redpanda.${local.name_prefix}.local:9092" }
     ]
     healthCheck = {
-      command     = ["CMD-SHELL", "pgrep -f binance_ws_consumer > /dev/null || exit 1"]
+      command     = ["CMD-SHELL", "python -c 'import os; os.kill(1, 0)'"]
       interval    = 30
       timeout     = 5
       retries     = 3
@@ -1067,7 +1067,7 @@ resource "aws_ecs_task_definition" "pnl_consumer" {
       { name = "REDPANDA_BROKERS",    value = "redpanda.${local.name_prefix}.local:9092" },
     ]
     healthCheck = {
-      command     = ["CMD-SHELL", "pgrep -f pnl_consumer > /dev/null || exit 1"]
+      command     = ["CMD-SHELL", "python -c 'import os; os.kill(1, 0)'"]
       interval    = 30
       timeout     = 5
       retries     = 3
