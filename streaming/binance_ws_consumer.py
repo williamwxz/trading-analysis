@@ -86,8 +86,14 @@ async def _consume_forever(producer: Producer, buffer: deque) -> None:
                     publish_candle(producer, candle)
                     buffer.popleft()     # only remove after successful publish
                 logger.info("Connected. Listening for closed candles...")
+                frame_count = 0
                 async for raw in ws:
                     msg_str = raw if isinstance(raw, str) else raw.decode()
+                    frame_count += 1
+                    if frame_count <= 3:
+                        logger.info("RAW frame #%d: %s", frame_count, msg_str[:300])
+                    elif frame_count % 50 == 0:
+                        logger.info("WS frames received so far: %d (still connected)", frame_count)
                     candle = parse_and_filter(msg_str)
                     if candle is not None:
                         try:
