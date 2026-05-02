@@ -435,10 +435,7 @@ def _refresh_pnl_real_trade(context, is_daily: bool) -> MaterializeResult:
         underlyings = _get_underlyings(source_table)
         total_rows = 0
         for underlying in underlyings:
-            bars = fetch_new_bars_real_trade(source_table, underlying, start_ts)
-            if not bars:
-                continue
-            bars = [b for b in bars if b["closing_ts"] >= start_ts and b["closing_ts"] < end_ts]
+            bars = fetch_new_bars_real_trade(source_table, underlying, start_ts, ts_end=end_ts)
             if not bars:
                 continue
             ts_min = min(b["ts"] for b in bars)
