@@ -26,15 +26,3 @@ backfill_job = define_asset_job(
     tags={"dagster/max_concurrent_runs": "5"},
 )
 
-bt_backfill_job = define_asset_job(
-    name="bt_backfill_job",
-    selection=AssetSelection.assets(
-        "binance_futures_backfill",
-        "pnl_bt_v2_daily",
-    ),
-    description=(
-        "Manual backfill: price fetch → backtest PnL. "
-        "Select one or more daily partition dates in the Launchpad."
-    ),
-    tags={"dagster/max_concurrent_runs": "5"},
-)
