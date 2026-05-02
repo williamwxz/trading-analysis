@@ -1,3 +1,0 @@
-apache-flink==1.19.0
-clickhouse-connect>=0.8
-loguru>=0.7
