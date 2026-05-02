@@ -15,7 +15,7 @@ from trading_dagster.utils.pnl_compute import PROD_INSERT_COLUMNS
 
 logger = logging.getLogger(__name__)
 
-FLUSH_EVERY = 50
+FLUSH_EVERY = 10
 TOPIC = "binance.price.ticks"
 GROUP_ID = "flink-pnl-consumer"
 
@@ -177,6 +177,11 @@ def run() -> None:
                 low=data["low"],
                 close=data["close"],
                 volume=data["volume"],
+            )
+            logger.info(
+                "Received %s close=%.2f ts=%s batch=%d/%d",
+                candle.instrument, candle.close, candle.ts,
+                len(price_batch) + 1, FLUSH_EVERY,
             )
 
             for row in process_candle(candle, state):

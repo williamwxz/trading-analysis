@@ -92,6 +92,11 @@ async def _consume_forever(producer: Producer, buffer: deque) -> None:
                     if candle is not None:
                         try:
                             publish_candle(producer, candle)
+                            logger.info(
+                                "Published %s %s close=%.2f ts=%s",
+                                candle.instrument, candle.exchange,
+                                candle.close, candle.ts,
+                            )
                         except Exception as publish_exc:
                             logger.warning(
                                 "Failed to publish candle, buffering: %s",
