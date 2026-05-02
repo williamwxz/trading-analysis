@@ -30,12 +30,11 @@ class CandleEvent:
 
     @classmethod
     def from_binance_kline(cls, stream_data: dict) -> "CandleEvent":
-        """Parse a Binance combined stream kline message.
+        """Parse a Binance raw kline message.
 
-        stream_data is the full WS message dict, e.g.:
-        {"stream": "btcusdt@kline_1m", "data": {"e": "kline", "k": {...}}}
+        stream_data is the raw WS payload: {"e":"kline","s":"BTCUSDT","k":{...}}
         """
-        k = stream_data["data"]["k"]
+        k = stream_data["k"]
         if k.get("x") is not True:
             raise ValueError(f"Candle for {k.get('s')} is not closed (x={k.get('x')})")
         # Convert to naive UTC datetime (strip timezone info)

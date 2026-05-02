@@ -1,7 +1,7 @@
 """
-Binance Futures WebSocket consumer.
+Binance Spot WebSocket consumer.
 
-Subscribes to kline_1m combined stream for INSTRUMENTS.
+Subscribes to kline_1m stream for INSTRUMENTS via SUBSCRIBE message.
 Filters for closed candles only (k.x == true).
 Publishes JSON CandleEvent to Redpanda topic binance.price.ticks.
 Reconnects with exponential backoff on disconnect.
@@ -35,16 +35,23 @@ TOPIC = "binance.price.ticks"
 _BACKOFF_CAPS = [1, 2, 4, 8, 16, 32, 60]  # seconds
 
 
-def build_stream_url(instruments: list[str]) -> str:
-    streams = "/".join(f"{s.lower()}@kline_1m" for s in instruments)
-    return f"wss://stream.binance.com:443/stream?streams={streams}"
+_WS_BASE_URL = "wss://stream.binance.com:443/ws"
+
+
+def build_subscribe_msg(instruments: list[str], req_id: int = 1) -> str:
+    params = [f"{s.lower()}@kline_1m" for s in instruments]
+    return json.dumps({"method": "SUBSCRIBE", "params": params, "id": req_id})
 
 
 def parse_and_filter(raw_message: str) -> CandleEvent | None:
-    """Return CandleEvent only for closed candles; None otherwise."""
+    """Return CandleEvent only for closed candles; None otherwise.
+
+    Handles raw kline payload: {"e":"kline","s":"BTCUSDT","k":{...}}
+    """
     try:
         data = json.loads(raw_message)
-        if data.get("data", {}).get("k", {}).get("x") is not True:
+        k = data.get("k", {})
+        if k.get("x") is not True:
             return None
         return CandleEvent.from_binance_kline(data)
     except (KeyError, ValueError, TypeError) as exc:
@@ -72,28 +79,34 @@ def _make_producer() -> Producer:
 
 
 async def _consume_forever(producer: Producer, buffer: deque) -> None:
-    url = build_stream_url(INSTRUMENTS)
+    subscribe_msg = build_subscribe_msg(INSTRUMENTS)
     backoff_idx = 0
 
     while True:
         try:
-            logger.info("Connecting to Binance WS: %s", url)
-            async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
-                backoff_idx = 0  # reset on successful connection
+            logger.info("Connecting to Binance WS: %s", _WS_BASE_URL)
+            async with websockets.connect(_WS_BASE_URL, ping_interval=20, ping_timeout=10) as ws:
+                backoff_idx = 0
+                await ws.send(subscribe_msg)
+                logger.info("Sent SUBSCRIBE for %d instruments", len(INSTRUMENTS))
                 # flush buffer accumulated during outage
                 while buffer:
-                    candle = buffer[0]   # peek without removing
+                    candle = buffer[0]
                     publish_candle(producer, candle)
-                    buffer.popleft()     # only remove after successful publish
-                logger.info("Connected. Listening for closed candles...")
+                    buffer.popleft()
                 frame_count = 0
                 async for raw in ws:
                     msg_str = raw if isinstance(raw, str) else raw.decode()
+                    data = json.loads(msg_str)
+                    # subscription ack — {"result": null, "id": 1}
+                    if "result" in data:
+                        logger.info("Subscription ack: %s", msg_str)
+                        continue
                     frame_count += 1
                     if frame_count <= 10:
                         logger.info("RAW frame #%d: %s", frame_count, msg_str[:500])
                     elif frame_count % 10 == 0:
-                        logger.info("WS frames received so far: %d (still connected)", frame_count)
+                        logger.info("WS frames received: %d (still connected)", frame_count)
                     candle = parse_and_filter(msg_str)
                     if candle is not None:
                         try:
@@ -104,10 +117,7 @@ async def _consume_forever(producer: Producer, buffer: deque) -> None:
                                 candle.close, candle.ts,
                             )
                         except Exception as publish_exc:
-                            logger.warning(
-                                "Failed to publish candle, buffering: %s",
-                                publish_exc,
-                            )
+                            logger.warning("Failed to publish candle, buffering: %s", publish_exc)
                             buffer.append(candle)
         except Exception as exc:
             delay = _BACKOFF_CAPS[min(backoff_idx, len(_BACKOFF_CAPS) - 1)]

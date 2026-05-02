@@ -9,19 +9,17 @@ from streaming.models import CandleEvent
 @pytest.mark.unit
 def test_from_binance_kline_parses_correctly():
     msg = {
-        "stream": "btcusdt@kline_1m",
-        "data": {
-            "e": "kline",
-            "k": {
-                "s": "BTCUSDT",
-                "t": 1777161600000,  # 2026-04-26T00:00:00 UTC in ms
-                "o": "93100.0",
-                "h": "93250.0",
-                "l": "93050.0",
-                "c": "93200.0",
-                "v": "12.34",
-                "x": True,
-            },
+        "e": "kline",
+        "s": "BTCUSDT",
+        "k": {
+            "s": "BTCUSDT",
+            "t": 1777161600000,  # 2026-04-26T00:00:00 UTC in ms
+            "o": "93100.0",
+            "h": "93250.0",
+            "l": "93050.0",
+            "c": "93200.0",
+            "v": "12.34",
+            "x": True,
         },
     }
     candle = CandleEvent.from_binance_kline(msg)
@@ -54,19 +52,17 @@ def test_to_json_round_trips():
 @pytest.mark.unit
 def test_from_binance_kline_raises_for_open_candle():
     msg = {
-        "stream": "btcusdt@kline_1m",
-        "data": {
-            "e": "kline",
-            "k": {
-                "s": "BTCUSDT",
-                "t": 1777161600000,
-                "o": "93100.0",
-                "h": "93250.0",
-                "l": "93050.0",
-                "c": "93200.0",
-                "v": "12.34",
-                "x": False,  # NOT closed
-            },
+        "e": "kline",
+        "s": "BTCUSDT",
+        "k": {
+            "s": "BTCUSDT",
+            "t": 1777161600000,
+            "o": "93100.0",
+            "h": "93250.0",
+            "l": "93050.0",
+            "c": "93200.0",
+            "v": "12.34",
+            "x": False,  # NOT closed
         },
     }
     with pytest.raises(ValueError, match="not closed"):
