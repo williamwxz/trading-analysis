@@ -585,6 +585,22 @@ resource "aws_cloudwatch_log_group" "streaming" {
   tags              = local.common_tags
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CloudWatch Metric Filter — pnl-consumer throughput
+# ─────────────────────────────────────────────────────────────────────────────
+
+resource "aws_cloudwatch_log_metric_filter" "pnl_messages_received" {
+  name           = "pnl-consumer-messages-received"
+  log_group_name = aws_cloudwatch_log_group.streaming.name
+  pattern        = "\"Received \""
+
+  metric_transformation {
+    name      = "MessagesReceived"
+    namespace = "trading-analysis"
+    value     = "1"
+    unit      = "Count"
+  }
+}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
