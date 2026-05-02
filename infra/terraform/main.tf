@@ -988,6 +988,13 @@ resource "aws_ecs_task_definition" "redpanda" {
       "rpk redpanda start --smp 1 --memory 1500M --reserve-memory 0M --node-id 0 --kafka-addr PLAINTEXT://0.0.0.0:9092 --advertise-kafka-addr PLAINTEXT://redpanda.${local.name_prefix}.local:9092 & sleep 15 && rpk topic create binance.price.ticks --brokers localhost:9092 --partitions 1 --replicas 1; wait"
     ]
     portMappings = [{ containerPort = 9092, protocol = "tcp" }]
+    healthCheck = {
+      command     = ["CMD-SHELL", "rpk cluster info --brokers localhost:9092 > /dev/null 2>&1 || exit 1"]
+      interval    = 15
+      timeout     = 5
+      retries     = 3
+      startPeriod = 30
+    }
     logConfiguration = {
       logDriver = "awslogs"
       options = {
@@ -1016,6 +1023,13 @@ resource "aws_ecs_task_definition" "ws_consumer" {
     environment = [
       { name = "REDPANDA_BROKERS", value = "redpanda.${local.name_prefix}.local:9092" }
     ]
+    healthCheck = {
+      command     = ["CMD-SHELL", "pgrep -f binance_ws_consumer > /dev/null || exit 1"]
+      interval    = 30
+      timeout     = 5
+      retries     = 3
+      startPeriod = 15
+    }
     logConfiguration = {
       logDriver = "awslogs"
       options = {
@@ -1052,6 +1066,13 @@ resource "aws_ecs_task_definition" "pnl_consumer" {
       { name = "CLICKHOUSE_SECURE",   value = "true" },
       { name = "REDPANDA_BROKERS",    value = "redpanda.${local.name_prefix}.local:9092" },
     ]
+    healthCheck = {
+      command     = ["CMD-SHELL", "pgrep -f pnl_consumer > /dev/null || exit 1"]
+      interval    = 30
+      timeout     = 5
+      retries     = 3
+      startPeriod = 15
+    }
     logConfiguration = {
       logDriver = "awslogs"
       options = {

@@ -29,6 +29,8 @@ def fetch_strategies_for_candle(
     Uses LIMIT 1 BY to get the most recent bar per strategy without FINAL.
     Looks back up to _LOOKBACK to handle gaps in strategy data.
     """
+    # strategy_output_history_v2 uses short names (BTC, ETH) not BTCUSDT
+    underlying = instrument.removesuffix("USDT")
     ts_str = candle_ts.strftime("%Y-%m-%d %H:%M:%S")
     sql = f"""\
 SELECT
@@ -41,7 +43,7 @@ SELECT
     max(ts) AS latest_ts,
     argMin(row_json, revision_ts) AS row_json
 FROM analytics.strategy_output_history_v2
-WHERE underlying = '{instrument}'
+WHERE underlying = '{underlying}'
   AND ts <= '{ts_str}'
   AND ts >= '{ts_str}'::DateTime - INTERVAL {_LOOKBACK}
 GROUP BY

@@ -8,12 +8,13 @@ from pnl_consumer.ch_lookup import fetch_strategies_for_candle
 
 @pytest.mark.unit
 def test_fetch_strategies_returns_list_of_strategy_bars():
+    # ClickHouse stores short names (BTC, ETH); instrument arg is full symbol (BTCUSDT)
     mock_rows = [
         {
             "strategy_table_name": "strat_prod_1",
             "strategy_id": 1,
             "strategy_name": "momentum",
-            "underlying": "BTCUSDT",
+            "underlying": "BTC",
             "config_timeframe": "5m",
             "weighting": 1.0,
             "row_json": '{"position": 0.5, "final_signal": 1.0, "benchmark": 0.0}',
@@ -27,7 +28,7 @@ def test_fetch_strategies_returns_list_of_strategy_bars():
     assert len(bars) == 1
     assert bars[0].strategy_table_name == "strat_prod_1"
     assert bars[0].position == 0.5
-    assert bars[0].underlying == "BTCUSDT"
+    assert bars[0].underlying == "BTC"
 
 
 @pytest.mark.unit
@@ -47,7 +48,7 @@ def test_strategy_bar_position_parsed_from_row_json():
             "strategy_table_name": "strat_prod_2",
             "strategy_id": 2,
             "strategy_name": "mean_rev",
-            "underlying": "ETHUSDT",
+            "underlying": "ETH",
             "config_timeframe": "15m",
             "weighting": 0.5,
             "row_json": '{"position": -1.0, "final_signal": -1.0, "benchmark": 0.01}',
