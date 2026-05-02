@@ -66,6 +66,63 @@
           "dimensions": {}
         }
       ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Messages Published / min",
+      "description": "Count of Binance candles published to Redpanda by ws-consumer per minute, derived from CloudWatch log metric filter on the 'Published ' log pattern.",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "displayName": "msg/min",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "spanNulls": false
+          }
+        }
+      },
+      "options": {
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "region": "ap-northeast-1",
+          "namespace": "trading-analysis",
+          "metricName": "MessagesPublished",
+          "statistics": ["Sum"],
+          "period": "60",
+          "matchExact": true,
+          "dimensions": {}
+        }
+      ]
     }
   ]
 }

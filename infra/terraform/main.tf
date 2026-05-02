@@ -602,6 +602,19 @@ resource "aws_cloudwatch_log_metric_filter" "pnl_messages_received" {
   }
 }
 
+resource "aws_cloudwatch_log_metric_filter" "ws_messages_published" {
+  name           = "ws-consumer-messages-published"
+  log_group_name = aws_cloudwatch_log_group.streaming.name
+  pattern        = "\"Published \""
+
+  metric_transformation {
+    name      = "MessagesPublished"
+    namespace = "trading-analysis"
+    value     = "1"
+    unit      = "Count"
+  }
+}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Secrets Manager
