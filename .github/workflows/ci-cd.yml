@@ -13,7 +13,7 @@ jobs:
     outputs:
       dagster:   ${{ steps.filter.outputs.dagster   == 'true' || steps.filter.outputs.terraform == 'true' }}
       streaming: ${{ steps.filter.outputs.streaming == 'true' || steps.filter.outputs.terraform == 'true' }}
-      flink:     ${{ steps.filter.outputs.flink     == 'true' || steps.filter.outputs.terraform == 'true' }}
+      pnl-consumer: ${{ steps.filter.outputs.pnl-consumer == 'true' || steps.filter.outputs.terraform == 'true' }}
       terraform: ${{ steps.filter.outputs.terraform == 'true' }}
       grafana:   ${{ steps.filter.outputs.grafana   == 'true' || steps.filter.outputs.terraform == 'true' }}
     steps:
@@ -29,8 +29,8 @@ jobs:
               - '.github/workflows/ci-cd.yml'
             streaming:
               - 'streaming/**'
-            flink:
-              - 'flink_job/**'
+            pnl-consumer:
+              - 'pnl_consumer/**'
             terraform:
               - 'infra/terraform/**'
             grafana:
@@ -168,14 +168,14 @@ jobs:
             --push .
           echo "image_tag=${{ github.sha }}" >> $GITHUB_OUTPUT
 
-  build-flink:
+  build-pnl-consumer:
     runs-on: ubuntu-latest
     needs: [test, terraform, detect-changes]
     if: |
       always() &&
       needs.test.result == 'success' &&
       (needs.terraform.result == 'success' || needs.terraform.result == 'skipped') &&
-      needs.detect-changes.outputs.flink == 'true'
+      needs.detect-changes.outputs.pnl-consumer == 'true'
     permissions:
       id-token: write
       contents: read
@@ -196,29 +196,17 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Download Flink connector JARs
-        run: |
-          mkdir -p flink_job/connectors
-          if [ ! -f flink_job/connectors/flink-sql-connector-kafka-3.2.0-1.19.jar ]; then
-            curl -fL -o flink_job/connectors/flink-sql-connector-kafka-3.2.0-1.19.jar \
-              https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka/3.2.0-1.19/flink-sql-connector-kafka-3.2.0-1.19.jar
-          fi
-          if [ ! -f flink_job/connectors/clickhouse-jdbc-0.6.0-all.jar ]; then
-            curl -fL -o flink_job/connectors/clickhouse-jdbc-0.6.0-all.jar \
-              https://github.com/ClickHouse/clickhouse-java/releases/download/v0.6.0/clickhouse-jdbc-0.6.0-all.jar
-          fi
-
-      - name: Build and push Flink job image
+      - name: Build and push pnl-consumer image
         id: build
         env:
           REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
         run: |
           [ -n "$REGISTRY" ] || { echo "ERROR: REGISTRY is empty"; exit 1; }
-          IMAGE_URI=$REGISTRY/trading-analysis-flink-job:${{ github.sha }}
-          IMAGE_LATEST=$REGISTRY/trading-analysis-flink-job:latest
-          IMAGE_CACHE=$REGISTRY/trading-analysis-flink-job:cache
+          IMAGE_URI=$REGISTRY/trading-analysis-pnl-consumer:${{ github.sha }}
+          IMAGE_LATEST=$REGISTRY/trading-analysis-pnl-consumer:latest
+          IMAGE_CACHE=$REGISTRY/trading-analysis-pnl-consumer:cache
           docker buildx build \
-            -f flink_job/Dockerfile \
+            -f pnl_consumer/Dockerfile \
             --cache-from type=registry,ref=$IMAGE_CACHE \
             --cache-to   type=registry,ref=$IMAGE_CACHE,mode=max \
             --provenance=false \
@@ -402,13 +390,13 @@ jobs:
             sleep 15
           done
 
-  deploy-flink:
+  deploy-pnl-consumer:
     runs-on: ubuntu-latest
-    needs: [build-flink, detect-changes]
+    needs: [build-pnl-consumer, detect-changes]
     if: |
       always() &&
-      needs.build-flink.result == 'success' &&
-      needs.detect-changes.outputs.flink == 'true'
+      needs.build-pnl-consumer.result == 'success' &&
+      needs.detect-changes.outputs.pnl-consumer == 'true'
     permissions:
       id-token: write
       contents: read
@@ -419,24 +407,24 @@ jobs:
           role-to-assume: ${{ secrets.GHA_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Deploy Flink job to ECS
+      - name: Deploy pnl-consumer to ECS
         env:
-          IMAGE_TAG: ${{ needs.build-flink.outputs.image_tag }}
+          IMAGE_TAG: ${{ needs.build-pnl-consumer.outputs.image_tag }}
           DEPLOY_REGION: ${{ secrets.AWS_REGION }}
           ECS_CLUSTER: trading-analysis
           REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
         run: |
           set -eu
-          IMAGE_URI=$REGISTRY/trading-analysis-flink-job:$IMAGE_TAG
+          IMAGE_URI=$REGISTRY/trading-analysis-pnl-consumer:$IMAGE_TAG
           TASK_DEF=$(aws ecs describe-task-definition \
-            --task-definition trading-analysis-flink-job \
+            --task-definition trading-analysis-pnl-consumer \
             --region $DEPLOY_REGION --query taskDefinition --output json)
           NEW_TASK=$(echo "$TASK_DEF" | python3 -c "
           import sys, json
           img = sys.argv[1]
           td = json.load(sys.stdin)
           for c in td['containerDefinitions']:
-              if c['name'] == 'flink-job':
+              if c['name'] == 'pnl-consumer':
                   c['image'] = img
           for k in ('taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy'):
               td.pop(k, None)
@@ -450,22 +438,22 @@ jobs:
           echo "Registered: $NEW_ARN"
           aws ecs update-service \
             --cluster $ECS_CLUSTER \
-            --service trading-analysis-flink-job \
+            --service trading-analysis-pnl-consumer \
             --task-definition "$NEW_ARN" \
             --force-new-deployment \
             --region $DEPLOY_REGION \
             --output json > /dev/null
 
-      - name: Wait for Flink job stability
+      - name: Wait for pnl-consumer stability
         env:
           DEPLOY_REGION: ${{ secrets.AWS_REGION }}
           ECS_CLUSTER: trading-analysis
         run: |
-          echo "Waiting up to 20 min for trading-analysis-flink-job to stabilise..."
+          echo "Waiting up to 20 min for trading-analysis-pnl-consumer to stabilise..."
           for i in $(seq 1 80); do
             STATUS=$(aws ecs describe-services \
               --cluster $ECS_CLUSTER \
-              --services trading-analysis-flink-job \
+              --services trading-analysis-pnl-consumer \
               --region $DEPLOY_REGION \
               --query 'services[0].deployments' --output json)
             PRIMARIES=$(echo "$STATUS" | python3 -c "
@@ -476,11 +464,11 @@ jobs:
           import sys,json; d=json.load(sys.stdin); print(len(d))")
             echo "Poll $i/80: deployments=$TOTAL primary_stable=$PRIMARIES"
             if [ "$PRIMARIES" = "1" ] && [ "$TOTAL" = "1" ]; then
-              echo "Flink deploy complete."
+              echo "pnl-consumer deploy complete."
               break
             fi
             if [ "$i" = "80" ]; then
-              echo "ERROR: timed out waiting for flink-job stability"; exit 1
+              echo "ERROR: timed out waiting for pnl-consumer stability"; exit 1
             fi
             sleep 15
           done
