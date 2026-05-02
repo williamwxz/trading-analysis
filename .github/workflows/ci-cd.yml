@@ -322,15 +322,15 @@ jobs:
               --region $DEPLOY_REGION \
               --query 'services[*].deployments' --output json)
             STABLE=$(echo "$STATUS" | python3 -c "
-import sys, json
-svcs = json.load(sys.stdin)
-stable = sum(
-    1 for d_list in svcs
-    for d in d_list
-    if d['status']=='PRIMARY' and d['runningCount']>=d['desiredCount'] and d['failedTasks']==0
-    and len(d_list)==1
-)
-print(stable)")
+          import sys, json
+          svcs = json.load(sys.stdin)
+          stable = sum(
+            1 for d_list in svcs
+            for d in d_list
+            if d['status']=='PRIMARY' and d['runningCount']>=d['desiredCount'] and d['failedTasks']==0
+            and len(d_list)==1
+          )
+          print(stable)")
             echo "Poll $i/80: stable_services=$STABLE/2"
             if [ "$STABLE" = "2" ]; then
               echo "Streaming deploy complete."
