@@ -196,11 +196,25 @@ jobs:
           DEPLOY_REGION: ${{ secrets.AWS_REGION }}
           ECS_CLUSTER: trading-analysis
         run: |
-          aws ecs wait services-stable \
-            --cluster $ECS_CLUSTER \
-            --services trading-analysis-dagster \
-            --region $DEPLOY_REGION
-          echo "Dagster deploy complete."
+          echo "Waiting up to 20 min for trading-analysis-dagster to stabilise..."
+          for i in $(seq 1 80); do
+            STATUS=$(aws ecs describe-services \
+              --cluster $ECS_CLUSTER \
+              --services trading-analysis-dagster \
+              --region $DEPLOY_REGION \
+              --query 'services[0].deployments' --output json)
+            PRIMARIES=$(echo "$STATUS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(sum(1 for x in d if x['status']=='PRIMARY' and x['runningCount']>=x['desiredCount'] and x['failedTasks']==0))")
+            TOTAL=$(echo "$STATUS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d))")
+            echo "Poll $i/80: deployments=$TOTAL primary_stable=$PRIMARIES"
+            if [ "$PRIMARIES" = "1" ] && [ "$TOTAL" = "1" ]; then
+              echo "Dagster deploy complete."
+              break
+            fi
+            if [ "$i" = "80" ]; then
+              echo "ERROR: timed out waiting for Dagster stability"; exit 1
+            fi
+            sleep 15
+          done
           aws ecs describe-services \
             --cluster $ECS_CLUSTER \
             --services trading-analysis-dagster \
@@ -300,11 +314,33 @@ jobs:
           DEPLOY_REGION: ${{ secrets.AWS_REGION }}
           ECS_CLUSTER: trading-analysis
         run: |
-          aws ecs wait services-stable \
-            --cluster $ECS_CLUSTER \
-            --services trading-analysis-ws-consumer trading-analysis-flink-job \
-            --region $DEPLOY_REGION
-          echo "Streaming deploy complete."
+          echo "Waiting up to 20 min for streaming services to stabilise..."
+          for i in $(seq 1 80); do
+            STATUS=$(aws ecs describe-services \
+              --cluster $ECS_CLUSTER \
+              --services trading-analysis-ws-consumer trading-analysis-flink-job \
+              --region $DEPLOY_REGION \
+              --query 'services[*].deployments' --output json)
+            STABLE=$(echo "$STATUS" | python3 -c "
+import sys, json
+svcs = json.load(sys.stdin)
+stable = sum(
+    1 for d_list in svcs
+    for d in d_list
+    if d['status']=='PRIMARY' and d['runningCount']>=d['desiredCount'] and d['failedTasks']==0
+    and len(d_list)==1
+)
+print(stable)")
+            echo "Poll $i/80: stable_services=$STABLE/2"
+            if [ "$STABLE" = "2" ]; then
+              echo "Streaming deploy complete."
+              break
+            fi
+            if [ "$i" = "80" ]; then
+              echo "ERROR: timed out waiting for streaming stability"; exit 1
+            fi
+            sleep 15
+          done
           aws ecs describe-services \
             --cluster $ECS_CLUSTER \
             --services trading-analysis-ws-consumer trading-analysis-flink-job \
