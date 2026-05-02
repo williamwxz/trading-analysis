@@ -523,7 +523,11 @@ jobs:
 
   deploy-grafana-cloud:
     runs-on: ubuntu-latest
-    needs: terraform
+    needs: [terraform, detect-changes]
+    if: |
+      always() &&
+      (needs.terraform.result == 'success' || needs.terraform.result == 'skipped') &&
+      needs.detect-changes.outputs.grafana == 'true'
     permissions:
       id-token: write
       contents: read
