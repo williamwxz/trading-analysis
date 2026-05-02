@@ -18,8 +18,8 @@ jobs:
       terraform:    ${{ steps.filter.outputs.terraform    == 'true' || steps.force.outputs.terraform    == 'true' }}
       grafana:      ${{ steps.filter.outputs.grafana      == 'true' || steps.filter.outputs.terraform == 'true' || steps.force.outputs.grafana      == 'true' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@v4.2.2
+      - uses: dorny/paths-filter@v3.0.2
         if: github.event_name == 'push'
         id: filter
         with:
@@ -52,7 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: detect-changes
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - uses: actions/setup-python@v5
         with:
@@ -73,7 +73,7 @@ jobs:
     needs: [test, detect-changes]
     if: needs.detect-changes.outputs.streaming == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - uses: actions/setup-python@v5
         with:
@@ -103,7 +103,7 @@ jobs:
     outputs:
       image_tag: ${{ steps.build.outputs.image_tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -148,7 +148,7 @@ jobs:
     outputs:
       image_tag: ${{ steps.build.outputs.image_tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -194,7 +194,7 @@ jobs:
     outputs:
       image_tag: ${{ steps.build.outputs.image_tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -497,7 +497,7 @@ jobs:
       run:
         working-directory: infra/terraform
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -533,7 +533,7 @@ jobs:
       id-token: write
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
