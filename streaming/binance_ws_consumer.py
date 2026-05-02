@@ -37,7 +37,7 @@ _BACKOFF_CAPS = [1, 2, 4, 8, 16, 32, 60]  # seconds
 
 def build_stream_url(instruments: list[str]) -> str:
     streams = "/".join(f"{s.lower()}@kline_1m" for s in instruments)
-    return f"wss://fstream.binance.com/stream?streams={streams}"
+    return f"wss://stream.binance.com:443/stream?streams={streams}"
 
 
 def parse_and_filter(raw_message: str) -> CandleEvent | None:
