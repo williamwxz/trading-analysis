@@ -117,10 +117,10 @@ def _flush(
     """Insert batches to ClickHouse, then commit offsets. Raises on failure."""
     if price_batch:
         insert_rows("analytics.futures_price_1min", PRICE_COLUMNS, price_batch)
-        price_batch.clear()
     if pnl_batch:
         insert_rows("analytics.strategy_pnl_1min_prod_v2", PROD_INSERT_COLUMNS, pnl_batch)
-        pnl_batch.clear()
+    price_batch.clear()
+    pnl_batch.clear()
     consumer.commit(asynchronous=False)
 
 
