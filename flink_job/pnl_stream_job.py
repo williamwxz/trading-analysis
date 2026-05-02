@@ -199,6 +199,7 @@ def run_flink_job() -> None:
             self._flush_pnl()
 
     env = StreamExecutionEnvironment.get_execution_environment()
+    env.set_parallelism(1)
     env.enable_checkpointing(30_000, CheckpointingMode.AT_LEAST_ONCE)
 
     brokers = os.environ["REDPANDA_BROKERS"]
