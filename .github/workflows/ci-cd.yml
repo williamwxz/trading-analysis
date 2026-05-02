@@ -77,14 +77,19 @@ jobs:
       - name: Run streaming integration tests
         run: pytest tests/streaming/test_streaming_integration.py -v --tb=short -m streaming_integration
 
-  build:
+  build-dagster:
     runs-on: ubuntu-latest
-    needs: [test, terraform]
+    needs: [test, terraform, detect-changes]
+    if: |
+      always() &&
+      needs.test.result == 'success' &&
+      (needs.terraform.result == 'success' || needs.terraform.result == 'skipped') &&
+      needs.detect-changes.outputs.dagster == 'true'
     permissions:
       id-token: write
       contents: read
     outputs:
-      image_tag: ${{ steps.build_dagster.outputs.image_tag }}
+      image_tag: ${{ steps.build.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -101,7 +106,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build and push Dagster image
-        id: build_dagster
+        id: build
         env:
           REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
         run: |
@@ -115,23 +120,38 @@ jobs:
             --provenance=false \
             -t $IMAGE_URI -t $IMAGE_LATEST \
             --push .
-          # Output only the image tag (not the full URI) to avoid GitHub
-          # suppressing the output because it contains a masked secret (AWS account ID).
           echo "image_tag=${{ github.sha }}" >> $GITHUB_OUTPUT
 
-      - name: Download Flink connector JARs
-        run: |
-          mkdir -p flink_job/connectors
-          if [ ! -f flink_job/connectors/flink-sql-connector-kafka-3.2.0-1.19.jar ]; then
-            curl -fL -o flink_job/connectors/flink-sql-connector-kafka-3.2.0-1.19.jar \
-              https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka/3.2.0-1.19/flink-sql-connector-kafka-3.2.0-1.19.jar
-          fi
-          if [ ! -f flink_job/connectors/clickhouse-jdbc-0.6.0-all.jar ]; then
-            curl -fL -o flink_job/connectors/clickhouse-jdbc-0.6.0-all.jar \
-              https://github.com/ClickHouse/clickhouse-java/releases/download/v0.6.0/clickhouse-jdbc-0.6.0-all.jar
-          fi
+  build-streaming:
+    runs-on: ubuntu-latest
+    needs: [test, terraform, detect-changes]
+    if: |
+      always() &&
+      needs.test.result == 'success' &&
+      (needs.terraform.result == 'success' || needs.terraform.result == 'skipped') &&
+      needs.detect-changes.outputs.streaming == 'true'
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      image_tag: ${{ steps.build.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.GHA_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Build and push WS consumer image
+        id: build
         env:
           REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
         run: |
@@ -146,8 +166,50 @@ jobs:
             --provenance=false \
             -t $IMAGE_URI -t $IMAGE_LATEST \
             --push .
+          echo "image_tag=${{ github.sha }}" >> $GITHUB_OUTPUT
+
+  build-flink:
+    runs-on: ubuntu-latest
+    needs: [test, terraform, detect-changes]
+    if: |
+      always() &&
+      needs.test.result == 'success' &&
+      (needs.terraform.result == 'success' || needs.terraform.result == 'skipped') &&
+      needs.detect-changes.outputs.flink == 'true'
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      image_tag: ${{ steps.build.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.GHA_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Download Flink connector JARs
+        run: |
+          mkdir -p flink_job/connectors
+          if [ ! -f flink_job/connectors/flink-sql-connector-kafka-3.2.0-1.19.jar ]; then
+            curl -fL -o flink_job/connectors/flink-sql-connector-kafka-3.2.0-1.19.jar \
+              https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka/3.2.0-1.19/flink-sql-connector-kafka-3.2.0-1.19.jar
+          fi
+          if [ ! -f flink_job/connectors/clickhouse-jdbc-0.6.0-all.jar ]; then
+            curl -fL -o flink_job/connectors/clickhouse-jdbc-0.6.0-all.jar \
+              https://github.com/ClickHouse/clickhouse-java/releases/download/v0.6.0/clickhouse-jdbc-0.6.0-all.jar
+          fi
 
       - name: Build and push Flink job image
+        id: build
         env:
           REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
         run: |
@@ -162,6 +224,7 @@ jobs:
             --provenance=false \
             -t $IMAGE_URI -t $IMAGE_LATEST \
             --push .
+          echo "image_tag=${{ github.sha }}" >> $GITHUB_OUTPUT
 
   deploy-dagster:
     runs-on: ubuntu-latest
