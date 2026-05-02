@@ -415,6 +415,7 @@ jobs:
           REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
         run: |
           set -eu
+          [ -n "$IMAGE_TAG" ] || { echo "ERROR: IMAGE_TAG is empty — build job output missing"; exit 1; }
           IMAGE_URI=$REGISTRY/trading-analysis-pnl-consumer:$IMAGE_TAG
           TASK_DEF=$(aws ecs describe-task-definition \
             --task-definition trading-analysis-pnl-consumer \
