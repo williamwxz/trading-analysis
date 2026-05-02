@@ -11,7 +11,7 @@ COPY pnl_consumer/ ./pnl_consumer/
 COPY trading_dagster/utils/clickhouse_client.py ./trading_dagster/utils/clickhouse_client.py
 COPY trading_dagster/utils/__init__.py ./trading_dagster/utils/__init__.py
 COPY trading_dagster/utils/pnl_compute.py ./trading_dagster/utils/pnl_compute.py
-RUN echo "" > ./trading_dagster/__init__.py
+COPY trading_dagster/__init__.py ./trading_dagster/__init__.py
 
 ENV PYTHONUNBUFFERED=1
 
