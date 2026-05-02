@@ -3,6 +3,7 @@ name: CI/CD
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -11,14 +12,15 @@ jobs:
   detect-changes:
     runs-on: ubuntu-latest
     outputs:
-      dagster:   ${{ steps.filter.outputs.dagster   == 'true' || steps.filter.outputs.terraform == 'true' }}
-      streaming: ${{ steps.filter.outputs.streaming == 'true' || steps.filter.outputs.terraform == 'true' }}
-      pnl-consumer: ${{ steps.filter.outputs.pnl-consumer == 'true' || steps.filter.outputs.terraform == 'true' }}
-      terraform: ${{ steps.filter.outputs.terraform == 'true' }}
-      grafana:   ${{ steps.filter.outputs.grafana   == 'true' || steps.filter.outputs.terraform == 'true' }}
+      dagster:      ${{ steps.filter.outputs.dagster      == 'true' || steps.filter.outputs.terraform == 'true' || steps.force.outputs.dagster      == 'true' }}
+      streaming:    ${{ steps.filter.outputs.streaming    == 'true' || steps.filter.outputs.terraform == 'true' || steps.force.outputs.streaming    == 'true' }}
+      pnl-consumer: ${{ steps.filter.outputs.pnl-consumer == 'true' || steps.filter.outputs.terraform == 'true' || steps.force.outputs.pnl-consumer == 'true' }}
+      terraform:    ${{ steps.filter.outputs.terraform    == 'true' || steps.force.outputs.terraform    == 'true' }}
+      grafana:      ${{ steps.filter.outputs.grafana      == 'true' || steps.filter.outputs.terraform == 'true' || steps.force.outputs.grafana      == 'true' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
+        if: github.event_name == 'push'
         id: filter
         with:
           filters: |
@@ -35,6 +37,16 @@ jobs:
               - 'infra/terraform/**'
             grafana:
               - 'infra/grafana/**'
+
+      - name: Force all outputs on manual dispatch
+        id: force
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "dagster=true"      >> $GITHUB_OUTPUT
+          echo "streaming=true"    >> $GITHUB_OUTPUT
+          echo "pnl-consumer=true" >> $GITHUB_OUTPUT
+          echo "terraform=true"    >> $GITHUB_OUTPUT
+          echo "grafana=true"      >> $GITHUB_OUTPUT
 
   test:
     runs-on: ubuntu-latest
