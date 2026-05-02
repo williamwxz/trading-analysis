@@ -228,7 +228,11 @@ jobs:
 
   deploy-dagster:
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build-dagster, detect-changes]
+    if: |
+      always() &&
+      needs.build-dagster.result == 'success' &&
+      needs.detect-changes.outputs.dagster == 'true'
     permissions:
       id-token: write
       contents: read
@@ -241,7 +245,7 @@ jobs:
 
       - name: Deploy Dagster to ECS
         env:
-          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+          IMAGE_TAG: ${{ needs.build-dagster.outputs.image_tag }}
           DEPLOY_REGION: ${{ secrets.AWS_REGION }}
           ECS_CLUSTER: trading-analysis
           REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
