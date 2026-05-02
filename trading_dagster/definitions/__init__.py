@@ -13,7 +13,6 @@ from ..assets.binance_futures_ohlcv import (
 from ..assets.pnl_strategy_v2 import (
     pnl_prod_v2_live_asset,
     pnl_prod_v2_daily_asset,
-    pnl_bt_v2_live_asset,
     pnl_bt_v2_daily_asset,
     pnl_real_trade_v2_live_asset,
     pnl_real_trade_v2_daily_asset,
@@ -31,7 +30,6 @@ all_assets = [
     binance_futures_ohlcv_minutely_asset,
     # Strategy PnL v2 (Live)
     pnl_prod_v2_live_asset,
-    pnl_bt_v2_live_asset,
     pnl_real_trade_v2_live_asset,
     # Strategy PnL v2 (Daily Backfills)
     pnl_prod_v2_daily_asset,
