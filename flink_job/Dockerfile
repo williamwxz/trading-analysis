@@ -27,5 +27,7 @@ RUN echo "" > ./trading_dagster/__init__.py
 
 ENV PYTHONUNBUFFERED=1
 ENV PYFLINK_PYTHON=python3
+# Redirect Flink/Log4j JVM logs to stdout so CloudWatch captures them
+ENV FLINK_ENV_JAVA_OPTS="-Dlog4j.configurationFile=log4j-console.properties"
 
 CMD ["python", "-m", "flink_job.pnl_stream_job"]
