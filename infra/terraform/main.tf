@@ -840,18 +840,18 @@ resource "aws_ecr_repository" "ws_consumer" {
   tags                 = local.common_tags
 }
 
-resource "aws_ecr_repository" "flink_job" {
-  name                 = "trading-analysis-flink-job"
+resource "aws_ecr_repository" "pnl_consumer" {
+  name                 = "trading-analysis-pnl-consumer"
   image_tag_mutability = "MUTABLE"
   tags                 = local.common_tags
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# IAM — Flink task role (S3 checkpoint access)
+# IAM — pnl-consumer task role
 # ─────────────────────────────────────────────────────────────────────────────
 
-resource "aws_iam_role" "flink_task" {
-  name = "${local.name_prefix}-flink-task"
+resource "aws_iam_role" "pnl_consumer_task" {
+  name = "${local.name_prefix}-pnl-consumer-task"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -861,22 +861,6 @@ resource "aws_iam_role" "flink_task" {
     }]
   })
   tags = local.common_tags
-}
-
-resource "aws_iam_role_policy" "flink_s3" {
-  name = "flink-s3-checkpoints"
-  role = aws_iam_role.flink_task.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
-      Resource = [
-        "arn:aws:s3:::trading-analysis-data-v2",
-        "arn:aws:s3:::trading-analysis-data-v2/flink-checkpoints/*"
-      ]
-    }]
-  })
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -968,18 +952,18 @@ resource "aws_ecs_task_definition" "ws_consumer" {
   tags = local.common_tags
 }
 
-resource "aws_ecs_task_definition" "flink_job" {
-  family                   = "${local.name_prefix}-flink-job"
+resource "aws_ecs_task_definition" "pnl_consumer" {
+  family                   = "${local.name_prefix}-pnl-consumer"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = 512
   memory                   = 2048
   execution_role_arn       = aws_iam_role.ecs_execution.arn
-  task_role_arn            = aws_iam_role.flink_task.arn
+  task_role_arn            = aws_iam_role.pnl_consumer_task.arn
 
   container_definitions = jsonencode([{
-    name      = "flink-job"
-    image     = "${aws_ecr_repository.flink_job.repository_url}:latest"
+    name      = "pnl-consumer"
+    image     = "${aws_ecr_repository.pnl_consumer.repository_url}:latest"
     essential = true
     secrets = [
       { name = "CLICKHOUSE_HOST",     valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
@@ -990,14 +974,13 @@ resource "aws_ecs_task_definition" "flink_job" {
       { name = "CLICKHOUSE_USER",     value = "dev_ro3" },
       { name = "CLICKHOUSE_SECURE",   value = "true" },
       { name = "REDPANDA_BROKERS",    value = "redpanda.${local.name_prefix}.local:9092" },
-      { name = "S3_BUCKET",           value = "trading-analysis-data-v2" },
     ]
     logConfiguration = {
       logDriver = "awslogs"
       options = {
         "awslogs-group"         = aws_cloudwatch_log_group.streaming.name
         "awslogs-region"        = var.aws_region
-        "awslogs-stream-prefix" = "flink-job"
+        "awslogs-stream-prefix" = "pnl-consumer"
       }
     }
   }])
@@ -1083,10 +1066,10 @@ resource "aws_ecs_service" "ws_consumer" {
   tags = local.common_tags
 }
 
-resource "aws_ecs_service" "flink_job" {
-  name            = "${local.name_prefix}-flink-job"
+resource "aws_ecs_service" "pnl_consumer" {
+  name            = "${local.name_prefix}-pnl-consumer"
   cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.flink_job.arn
+  task_definition = aws_ecs_task_definition.pnl_consumer.arn
   desired_count   = 1
 
   capacity_provider_strategy {
