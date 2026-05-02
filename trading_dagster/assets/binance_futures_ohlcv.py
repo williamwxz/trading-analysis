@@ -1,21 +1,19 @@
 """
-Binance Futures OHLCV Assets — Dual Strategy
+Binance Futures OHLCV Assets
 
-1. binance_futures_backfill: Daily partitioned asset for historical data.
-2. binance_futures_ohlcv_minutely: Unpartitioned asset for live 5-min updates.
+binance_futures_backfill: Daily partitioned asset for historical data.
+Real-time market data is handled by the pnl_consumer (Kafka → ClickHouse).
 """
 
 import time
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import List
 import pandas as pd
 
 from dagster import (
     DailyPartitionsDefinition,
     AssetExecutionContext,
     MaterializeResult,
-    MetadataValue,
-    AutomationCondition,
     asset,
 )
 
@@ -124,63 +122,3 @@ def binance_futures_backfill_asset(context: AssetExecutionContext) -> Materializ
         context.log.info(f"[{instrument}] Finished partition {partition_date_str}, inserted {instrument_inserted} rows.")
 
     return MaterializeResult(metadata={"date": partition_date_str, "total_rows": total_inserted})
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. Live Asset (Real-time Polling)
-# ─────────────────────────────────────────────────────────────────────────────
-
-@asset(
-    name="binance_futures_ohlcv_minutely",
-    group_name="market_data",
-    automation_condition=AutomationCondition.on_cron("*/5 * * * *") & ~AutomationCondition.in_progress(),
-    description="Live 5-min polling asset. Fetches latest data since last max(ts).",
-    compute_kind="binance",
-)
-def binance_futures_ohlcv_minutely_asset(context: AssetExecutionContext) -> MaterializeResult:
-    client = get_client()
-    total_inserted = 0
-    instruments_updated = []
-
-    for instrument in INSTRUMENTS:
-        # Find latest timestamp in DB
-        # Cast to String to avoid any type issues with query_scalar
-        max_ts = query_scalar(
-            f"SELECT toString(max(ts)) FROM {TARGET_TABLE} WHERE instrument = '{instrument}'", client
-        )
-        
-        # Check if max_ts is valid. CCXT 'date_since' will use this.
-        if not max_ts or str(max_ts) in ["1970-01-01 00:00:00", "None", "0000-00-00 00:00:00"]:
-            # Default to last 10 minutes if DB is empty or has placeholder
-            start_dt = datetime.now(timezone.utc) - timedelta(minutes=10)
-            context.log.info(f"[{instrument}] No valid data found in DB. Bootstrapping from 10 mins ago.")
-        else:
-            # Start 1 minute after the latest record
-            try:
-                start_dt = datetime.strptime(str(max_ts), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc) + timedelta(minutes=1)
-            except Exception as e:
-                context.log.warning(f"[{instrument}] Error parsing max_ts '{max_ts}': {e}. Falling back to 10 mins.")
-                start_dt = datetime.now(timezone.utc) - timedelta(minutes=10)
-
-        context.log.info(f"[{instrument}] Live poll from {start_dt}")
-
-        df = ExchangePriceDataService.fetch_ohlcv_times_series_df(
-            symbol=_get_ccxt_symbol(instrument), exchange_name="binance_perp",
-            timeframe="1m", date_since=start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"), limit=1000
-        )
-
-        if df is not None and not df.empty:
-            # Ensure timestamp is datetime
-            if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
-                df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
-            
-            rows = _df_to_rows(instrument, df)
-            insert_rows(TARGET_TABLE, INSERT_COLUMNS, rows, client)
-            total_inserted += len(rows)
-            instruments_updated.append(f"{instrument}({len(rows)})")
-
-    return MaterializeResult(
-        metadata={
-            "total_inserted": MetadataValue.int(total_inserted),
-            "instruments": MetadataValue.text(", ".join(instruments_updated) or "none"),
-        }
-    )

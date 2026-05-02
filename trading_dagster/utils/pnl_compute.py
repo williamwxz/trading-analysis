@@ -98,7 +98,9 @@ def assert_anchors_present(
     missing = [
         stn
         for stn, ts in earliest.items()
-        if stn not in anchors and not ts.startswith(start_date)
+        if stn not in anchors
+        and not ts.startswith(start_date)
+        and not stn.startswith("manual_probe_")
     ]
     if missing:
         raise RuntimeError(

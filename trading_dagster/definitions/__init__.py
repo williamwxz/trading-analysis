@@ -10,10 +10,8 @@ from ..assets.binance_futures_ohlcv import (
     binance_futures_backfill_asset,
 )
 from ..assets.pnl_strategy_v2 import (
-    pnl_prod_v2_live_asset,
     pnl_prod_v2_daily_asset,
     pnl_bt_v2_daily_asset,
-    pnl_real_trade_v2_live_asset,
     pnl_real_trade_v2_daily_asset,
 )
 from ..assets.pnl_rollup import pnl_1hour_rollup_asset
@@ -24,11 +22,8 @@ from ..sensors.automation_sensors import build_automation_sensors
 
 
 all_assets = [
-    # Market data
+    # Market data (backfill only — real-time via pnl_consumer)
     binance_futures_backfill_asset,
-    # Strategy PnL v2 (Live)
-    pnl_prod_v2_live_asset,
-    pnl_real_trade_v2_live_asset,
     # Strategy PnL v2 (Daily Backfills)
     pnl_prod_v2_daily_asset,
     pnl_bt_v2_daily_asset,

@@ -53,7 +53,9 @@ PARTITION BY toYYYYMM(ts)
 ORDER BY (strategy_table_name, config_timeframe, ts, revision_ts);
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 2. Market Data (Input from Dagster binance_futures_ohlcv_minutely)
+-- 2. Market Data
+--    Real-time: pnl_consumer (Kafka → ClickHouse, via ws_consumer WebSocket feed)
+--    Backfill:  Dagster binance_futures_backfill (daily partitioned)
 -- ─────────────────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS analytics.futures_price_1min
@@ -214,16 +216,3 @@ ENGINE = ReplacingMergeTree(updated_at)
 PARTITION BY toYYYYMM(ts)
 ORDER BY (strategy_table_name, ts);
 
--- ─────────────────────────────────────────────────────────────────────────────
--- 5. Orchestration Metadata
--- ─────────────────────────────────────────────────────────────────────────────
-
-CREATE TABLE IF NOT EXISTS analytics.pnl_refresh_watermarks
-(
-    underlying       String,
-    target_table     String,
-    last_revision_ts DateTime,
-    updated_at       DateTime DEFAULT now()
-)
-ENGINE = ReplacingMergeTree(updated_at)
-ORDER BY (underlying, target_table);
