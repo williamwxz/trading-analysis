@@ -90,9 +90,9 @@ async def _consume_forever(producer: Producer, buffer: deque) -> None:
                 async for raw in ws:
                     msg_str = raw if isinstance(raw, str) else raw.decode()
                     frame_count += 1
-                    if frame_count <= 3:
-                        logger.info("RAW frame #%d: %s", frame_count, msg_str[:300])
-                    elif frame_count % 50 == 0:
+                    if frame_count <= 10:
+                        logger.info("RAW frame #%d: %s", frame_count, msg_str[:500])
+                    elif frame_count % 10 == 0:
                         logger.info("WS frames received so far: %d (still connected)", frame_count)
                     candle = parse_and_filter(msg_str)
                     if candle is not None:

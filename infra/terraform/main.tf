@@ -615,6 +615,54 @@ resource "aws_cloudwatch_log_metric_filter" "ws_messages_published" {
   }
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CloudWatch Dashboard — streaming throughput
+# ─────────────────────────────────────────────────────────────────────────────
+
+resource "aws_cloudwatch_dashboard" "streaming_throughput" {
+  dashboard_name = "streaming-throughput"
+
+  dashboard_body = jsonencode({
+    widgets = [
+      {
+        type   = "metric"
+        x      = 0
+        y      = 0
+        width  = 24
+        height = 6
+        properties = {
+          title  = "Messages Published / min (ws-consumer → Redpanda)"
+          region = "ap-northeast-1"
+          metrics = [
+            ["trading-analysis", "MessagesPublished"]
+          ]
+          stat   = "Sum"
+          period = 60
+          view   = "timeSeries"
+          yAxis  = { left = { min = 0 } }
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 6
+        width  = 24
+        height = 6
+        properties = {
+          title  = "Messages Received / min (Redpanda → pnl-consumer)"
+          region = "ap-northeast-1"
+          metrics = [
+            ["trading-analysis", "MessagesReceived"]
+          ]
+          stat   = "Sum"
+          period = 60
+          view   = "timeSeries"
+          yAxis  = { left = { min = 0 } }
+        }
+      }
+    ]
+  })
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Secrets Manager
