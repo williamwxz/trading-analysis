@@ -38,6 +38,7 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    needs: detect-changes
     steps:
       - uses: actions/checkout@v4
 
@@ -57,7 +58,8 @@ jobs:
 
   integration-test:
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, detect-changes]
+    if: needs.detect-changes.outputs.streaming == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -378,7 +380,8 @@ jobs:
 
   terraform:
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, detect-changes]
+    if: needs.detect-changes.outputs.terraform == 'true'
     permissions:
       id-token: write
       contents: read
