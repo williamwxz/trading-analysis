@@ -14,7 +14,7 @@ jobs:
       dagster:   ${{ steps.filter.outputs.dagster   == 'true' || steps.filter.outputs.terraform == 'true' }}
       streaming: ${{ steps.filter.outputs.streaming == 'true' || steps.filter.outputs.terraform == 'true' }}
       flink:     ${{ steps.filter.outputs.flink     == 'true' || steps.filter.outputs.terraform == 'true' }}
-      terraform: ${{ steps.filter.outputs.terraform }}
+      terraform: ${{ steps.filter.outputs.terraform == 'true' }}
       grafana:   ${{ steps.filter.outputs.grafana   == 'true' || steps.filter.outputs.terraform == 'true' }}
     steps:
       - uses: actions/checkout@v4
@@ -26,6 +26,7 @@ jobs:
               - 'trading_dagster/**'
               - 'Dockerfile'
               - 'pyproject.toml'
+              - '.github/workflows/ci-cd.yml'
             streaming:
               - 'streaming/**'
             flink:
