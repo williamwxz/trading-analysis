@@ -208,6 +208,110 @@ jobs:
             --query 'services[*].{Name:serviceName,Status:status,Running:runningCount,Desired:desiredCount}' \
             --output table
 
+  deploy-streaming:
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.GHA_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Deploy WS consumer to ECS
+        env:
+          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+          DEPLOY_REGION: ${{ secrets.AWS_REGION }}
+          ECS_CLUSTER: trading-analysis
+          REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+        run: |
+          set -eu
+          IMAGE_URI=$REGISTRY/trading-analysis-ws-consumer:$IMAGE_TAG
+          TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition trading-analysis-ws-consumer \
+            --region $DEPLOY_REGION --query taskDefinition --output json)
+          NEW_TASK=$(echo "$TASK_DEF" | python3 -c "
+          import sys, json
+          img = sys.argv[1]
+          td = json.load(sys.stdin)
+          for c in td['containerDefinitions']:
+              if c['name'] == 'ws-consumer':
+                  c['image'] = img
+          for k in ('taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy'):
+              td.pop(k, None)
+          print(json.dumps(td))
+          " "$IMAGE_URI")
+          NEW_ARN=$(aws ecs register-task-definition \
+            --cli-input-json "$NEW_TASK" \
+            --region $DEPLOY_REGION \
+            --query taskDefinition.taskDefinitionArn --output text)
+          [ -n "$NEW_ARN" ] || { echo "ERROR: register-task-definition returned empty ARN"; exit 1; }
+          echo "Registered: $NEW_ARN"
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service trading-analysis-ws-consumer \
+            --task-definition "$NEW_ARN" \
+            --force-new-deployment \
+            --region $DEPLOY_REGION \
+            --output json > /dev/null
+
+      - name: Deploy Flink job to ECS
+        env:
+          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+          DEPLOY_REGION: ${{ secrets.AWS_REGION }}
+          ECS_CLUSTER: trading-analysis
+          REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+        run: |
+          set -eu
+          IMAGE_URI=$REGISTRY/trading-analysis-flink-job:$IMAGE_TAG
+          TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition trading-analysis-flink-job \
+            --region $DEPLOY_REGION --query taskDefinition --output json)
+          NEW_TASK=$(echo "$TASK_DEF" | python3 -c "
+          import sys, json
+          img = sys.argv[1]
+          td = json.load(sys.stdin)
+          for c in td['containerDefinitions']:
+              if c['name'] == 'flink-job':
+                  c['image'] = img
+          for k in ('taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy'):
+              td.pop(k, None)
+          print(json.dumps(td))
+          " "$IMAGE_URI")
+          NEW_ARN=$(aws ecs register-task-definition \
+            --cli-input-json "$NEW_TASK" \
+            --region $DEPLOY_REGION \
+            --query taskDefinition.taskDefinitionArn --output text)
+          [ -n "$NEW_ARN" ] || { echo "ERROR: register-task-definition returned empty ARN"; exit 1; }
+          echo "Registered: $NEW_ARN"
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service trading-analysis-flink-job \
+            --task-definition "$NEW_ARN" \
+            --force-new-deployment \
+            --region $DEPLOY_REGION \
+            --output json > /dev/null
+
+      - name: Wait for streaming services stability
+        env:
+          DEPLOY_REGION: ${{ secrets.AWS_REGION }}
+          ECS_CLUSTER: trading-analysis
+        run: |
+          aws ecs wait services-stable \
+            --cluster $ECS_CLUSTER \
+            --services trading-analysis-ws-consumer trading-analysis-flink-job \
+            --region $DEPLOY_REGION
+          echo "Streaming deploy complete."
+          aws ecs describe-services \
+            --cluster $ECS_CLUSTER \
+            --services trading-analysis-ws-consumer trading-analysis-flink-job \
+            --region $DEPLOY_REGION \
+            --query 'services[*].{Name:serviceName,Status:status,Running:runningCount,Desired:desiredCount}' \
+            --output table
+
   terraform:
     runs-on: ubuntu-latest
     needs: test
