@@ -27,6 +27,7 @@ RUN echo "" > ./trading_dagster/__init__.py
 
 ENV PYTHONUNBUFFERED=1
 ENV PYFLINK_PYTHON=python3
+ENV FLINK_CONF_DIR=/opt/flink/conf
 # Point Flink's log4j config to the console variant so JVM logs go to stdout
 RUN cp /opt/flink/conf/log4j-console.properties /opt/flink/conf/log4j.properties
 
