@@ -181,7 +181,7 @@ FROM (
         weighting,
         revision_ts,
         row_json,
-        toDateTime(ts + toIntervalMinute(multiIf(
+        toDateTime(toDateTime(ts) + toIntervalMinute(multiIf(
             config_timeframe = '1m',  1,
             config_timeframe = '3m',  3,
             config_timeframe = '5m',  5,
@@ -192,9 +192,11 @@ FROM (
             config_timeframe = '1d',  1440,
             5
         ))) AS closing_ts
-    FROM analytics.strategy_output_history_v2 FINAL
+    FROM analytics.strategy_output_history_v2
     WHERE underlying = '{underlying}'
-      AND ts = toDateTime('{ts_str}')
+      AND toDateTime(ts) = toDateTime('{ts_str}')
+    ORDER BY strategy_table_name, config_timeframe, revision_ts, updated_at DESC
+    LIMIT 1 BY strategy_table_name, config_timeframe, revision_ts
 )
 WHERE revision_ts <= closing_ts
 ORDER BY strategy_table_name, revision_ts
