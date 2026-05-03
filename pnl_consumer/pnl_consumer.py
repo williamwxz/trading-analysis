@@ -14,8 +14,11 @@ from pnl_consumer.ch_lookup import (
     fetch_strategies_for_candle,
 )
 from streaming.models import CandleEvent
-from trading_dagster.utils.clickhouse_client import insert_rows
-from trading_dagster.utils.pnl_compute import PROD_INSERT_COLUMNS
+from trading_dagster.utils.clickhouse_client import insert_rows, query_dicts
+from trading_dagster.utils.pnl_compute import (
+    PROD_INSERT_COLUMNS,
+    REAL_TRADE_INSERT_COLUMNS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -187,58 +190,67 @@ def process_candle(
     return rows
 
 
-def _bootstrap_anchors(state: AnchorState) -> None:
-    """On cold start, seed anchor state from last known PnL rows in ClickHouse."""
-    from trading_dagster.utils.clickhouse_client import query_dicts
-
-    sql = """\
+def _bootstrap_anchors(state_prod: AnchorState, state_real_trade: AnchorState) -> None:
+    """On cold start, seed prod and real_trade anchor states from ClickHouse."""
+    for table, state in [
+        ("analytics.strategy_pnl_1min_prod_v2", state_prod),
+        ("analytics.strategy_pnl_1min_real_trade_v2", state_real_trade),
+    ]:
+        sql = f"""\
 SELECT
     strategy_table_name,
     cumulative_pnl  AS anchor_pnl,
     price           AS anchor_price,
     position        AS anchor_position
-FROM analytics.strategy_pnl_1min_prod_v2
+FROM {table}
 WHERE ts >= now() - INTERVAL 2 HOUR
 ORDER BY strategy_table_name, ts DESC, updated_at DESC
 LIMIT 1 BY strategy_table_name
 """
-    for row in query_dicts(sql):
-        state.update(
-            row["strategy_table_name"],
-            AnchorRecord(
-                anchor_pnl=row["anchor_pnl"],
-                anchor_price=row["anchor_price"],
-                anchor_position=row["anchor_position"],
-            ),
-        )
-    logger.info("Bootstrapped %d anchor(s) from ClickHouse", len(state))
+        for row in query_dicts(sql):
+            state.update(
+                row["strategy_table_name"],
+                AnchorRecord(
+                    anchor_pnl=row["anchor_pnl"],
+                    anchor_price=row["anchor_price"],
+                    anchor_position=row["anchor_position"],
+                ),
+            )
+    logger.info(
+        "Bootstrapped %d prod anchor(s) and %d real_trade anchor(s) from ClickHouse",
+        len(state_prod),
+        len(state_real_trade),
+    )
 
 
 def _flush(
     consumer: Consumer,
     price_batch: list[list],
-    pnl_batch: list[list],
+    pnl_prod_batch: list[list],
+    pnl_real_trade_batch: list[list],
+    pnl_bt_batch: list[list],
 ) -> None:
-    """Insert price and PnL batches to ClickHouse, aggregate PnL to hourly snapshots.
-
-    Raises on failure. Commits offsets after successful insert.
-    """
+    """Insert batches to ClickHouse, then commit offsets. Raises on failure."""
     if price_batch:
         insert_rows("analytics.futures_price_1min", PRICE_COLUMNS, price_batch)
-    if pnl_batch:
+    if pnl_prod_batch:
         insert_rows(
-            "analytics.strategy_pnl_1min_prod_v2", PROD_INSERT_COLUMNS, pnl_batch
+            "analytics.strategy_pnl_1min_prod_v2", PROD_INSERT_COLUMNS, pnl_prod_batch
         )
-        hourly_rows = _aggregate_hourly(pnl_batch)
-        if hourly_rows:
-            insert_rows(
-                "analytics.strategy_pnl_1hour_prod_v2",
-                HOUR_INSERT_COLUMNS,
-                hourly_rows,
-            )
-            logger.info("Upserted %d hourly snapshot(s)", len(hourly_rows))
+    if pnl_real_trade_batch:
+        insert_rows(
+            "analytics.strategy_pnl_1min_real_trade_v2",
+            REAL_TRADE_INSERT_COLUMNS,
+            pnl_real_trade_batch,
+        )
+    if pnl_bt_batch:
+        insert_rows(
+            "analytics.strategy_pnl_1min_bt_v2", PROD_INSERT_COLUMNS, pnl_bt_batch
+        )
     price_batch.clear()
-    pnl_batch.clear()
+    pnl_prod_batch.clear()
+    pnl_real_trade_batch.clear()
+    pnl_bt_batch.clear()
     consumer.commit(asynchronous=False)
 
 
@@ -247,7 +259,7 @@ def run() -> None:
 
     state_prod = AnchorState()
     state_real_trade = AnchorState()
-    _bootstrap_anchors(state_prod)
+    _bootstrap_anchors(state_prod, state_real_trade)
 
     consumer = Consumer(
         {
@@ -261,12 +273,20 @@ def run() -> None:
     logger.info("Subscribed to %s as group %s", TOPIC, GROUP_ID)
 
     price_batch: list[list] = []
-    pnl_batch: list[list] = []
+    pnl_prod_batch: list[list] = []
+    pnl_real_trade_batch: list[list] = []
+    pnl_bt_batch: list[list] = []
 
     def _shutdown(signum, frame):
         logger.info("Shutdown signal received, flushing and closing")
         try:
-            _flush(consumer, price_batch, pnl_batch)
+            _flush(
+                consumer,
+                price_batch,
+                pnl_prod_batch,
+                pnl_real_trade_batch,
+                pnl_bt_batch,
+            )
         except Exception:
             logger.exception("Error during shutdown flush")
         consumer.close()
@@ -323,12 +343,39 @@ def run() -> None:
                         ]
                     )
                 elif row["_sink"] == "pnl_prod":
-                    pnl_batch.append([row[c] for c in PROD_INSERT_COLUMNS])
+                    pnl_prod_batch.append([row[c] for c in PROD_INSERT_COLUMNS])
+                elif row["_sink"] == "pnl_real_trade":
+                    pnl_real_trade_batch.append(
+                        [row[c] for c in REAL_TRADE_INSERT_COLUMNS]
+                    )
+                elif row["_sink"] == "pnl_bt":
+                    pnl_bt_batch.append([row[c] for c in PROD_INSERT_COLUMNS])
 
-            if len(price_batch) >= FLUSH_EVERY or len(pnl_batch) >= FLUSH_EVERY:
-                n_price, n_pnl = len(price_batch), len(pnl_batch)
-                _flush(consumer, price_batch, pnl_batch)
-                logger.info("Flushed %d price + %d pnl rows", n_price, n_pnl)
+            total_batch = (
+                len(price_batch)
+                + len(pnl_prod_batch)
+                + len(pnl_real_trade_batch)
+                + len(pnl_bt_batch)
+            )
+            if total_batch >= FLUSH_EVERY:
+                n_price = len(price_batch)
+                n_prod = len(pnl_prod_batch)
+                n_rt = len(pnl_real_trade_batch)
+                n_bt = len(pnl_bt_batch)
+                _flush(
+                    consumer,
+                    price_batch,
+                    pnl_prod_batch,
+                    pnl_real_trade_batch,
+                    pnl_bt_batch,
+                )
+                logger.info(
+                    "Flushed %d price + %d prod + %d real_trade + %d bt rows",
+                    n_price,
+                    n_prod,
+                    n_rt,
+                    n_bt,
+                )
 
     except Exception:
         logger.exception("Fatal error in consumer loop")

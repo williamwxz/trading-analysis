@@ -1,13 +1,21 @@
 from datetime import datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from pnl_consumer.anchor_state import AnchorRecord, AnchorState
 from pnl_consumer.ch_lookup import BtStrategyBar, StrategyBar, StrategyRevision
-from pnl_consumer.pnl_consumer import _aggregate_hourly, process_candle
+from pnl_consumer.pnl_consumer import (
+    _aggregate_hourly,
+    _bootstrap_anchors,
+    _flush,
+    process_candle,
+)
 from streaming.models import CandleEvent
-from trading_dagster.utils.pnl_compute import PROD_INSERT_COLUMNS
+from trading_dagster.utils.pnl_compute import (
+    PROD_INSERT_COLUMNS,
+    REAL_TRADE_INSERT_COLUMNS,
+)
 
 _MOD = "pnl_consumer.pnl_consumer"
 
@@ -313,3 +321,101 @@ def test_process_candle_bt_uses_cumulative_pnl_from_bar_not_anchor():
 
     bt_rows = [r for r in rows if r.get("_sink") == "pnl_bt"]
     assert bt_rows[0]["cumulative_pnl"] == 0.99
+
+
+@pytest.mark.unit
+def test_flush_writes_to_all_three_pnl_tables():
+    consumer = MagicMock()
+    price_batch = [
+        [
+            "binance",
+            "BTCUSDT",
+            datetime(2026, 4, 26, 0, 1),
+            93100.0,
+            93250.0,
+            93050.0,
+            93200.0,
+            12.0,
+        ]
+    ]
+    pnl_prod_batch = [["strat_prod_1"] + [None] * (len(PROD_INSERT_COLUMNS) - 1)]
+    pnl_real_trade_batch = [
+        ["strat_rt_1"] + [None] * (len(REAL_TRADE_INSERT_COLUMNS) - 1)
+    ]
+    pnl_bt_batch = [["strat_bt_1"] + [None] * (len(PROD_INSERT_COLUMNS) - 1)]
+
+    with patch("pnl_consumer.pnl_consumer.insert_rows") as mock_insert:
+        _flush(
+            consumer, price_batch, pnl_prod_batch, pnl_real_trade_batch, pnl_bt_batch
+        )
+
+    assert mock_insert.call_count == 4
+    tables_called = [c.args[0] for c in mock_insert.call_args_list]
+    assert "analytics.futures_price_1min" in tables_called
+    assert "analytics.strategy_pnl_1min_prod_v2" in tables_called
+    assert "analytics.strategy_pnl_1min_real_trade_v2" in tables_called
+    assert "analytics.strategy_pnl_1min_bt_v2" in tables_called
+    consumer.commit.assert_called_once_with(asynchronous=False)
+
+
+@pytest.mark.unit
+def test_flush_skips_empty_batches():
+    consumer = MagicMock()
+    with patch("pnl_consumer.pnl_consumer.insert_rows") as mock_insert:
+        _flush(consumer, [], [], [], [])
+    mock_insert.assert_not_called()
+    consumer.commit.assert_called_once_with(asynchronous=False)
+
+
+@pytest.mark.unit
+def test_flush_clears_all_batches_after_insert():
+    consumer = MagicMock()
+    price_batch = [["row"]]
+    pnl_prod_batch = [["row"]]
+    pnl_real_trade_batch = [["row"]]
+    pnl_bt_batch = [["row"]]
+    with patch("pnl_consumer.pnl_consumer.insert_rows"):
+        _flush(
+            consumer, price_batch, pnl_prod_batch, pnl_real_trade_batch, pnl_bt_batch
+        )
+    assert price_batch == []
+    assert pnl_prod_batch == []
+    assert pnl_real_trade_batch == []
+    assert pnl_bt_batch == []
+
+
+@pytest.mark.unit
+def test_bootstrap_anchors_seeds_prod_and_real_trade():
+    prod_rows = [
+        {
+            "strategy_table_name": "strat_prod_1",
+            "anchor_pnl": 0.1,
+            "anchor_price": 93000.0,
+            "anchor_position": 1.0,
+        }
+    ]
+    rt_rows = [
+        {
+            "strategy_table_name": "strat_rt_1",
+            "anchor_pnl": 0.2,
+            "anchor_price": 92000.0,
+            "anchor_position": -1.0,
+        }
+    ]
+    state_prod = AnchorState()
+    state_real_trade = AnchorState()
+
+    def mock_query(sql):
+        if "strategy_pnl_1min_prod_v2" in sql:
+            return prod_rows
+        if "strategy_pnl_1min_real_trade_v2" in sql:
+            return rt_rows
+        return []
+
+    with patch("pnl_consumer.pnl_consumer.query_dicts", side_effect=mock_query):
+        _bootstrap_anchors(state_prod, state_real_trade)
+
+    assert state_prod.get("strat_prod_1").anchor_price == 93000.0
+    assert state_real_trade.get("strat_rt_1").anchor_price == 92000.0
+    assert len(state_prod) == 1
+    assert len(state_real_trade) == 1
