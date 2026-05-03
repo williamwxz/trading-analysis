@@ -520,36 +520,20 @@
       {
         "name": "resolution",
         "label": "Resolution",
-        "type": "custom",
-        "query": "1min,1hour,1day",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "dfjc5vjyfcc8wf"
+        },
+        "query": "SELECT if($__range_ms < 604800000, '1min', '1hour') FROM system.one",
         "refresh": 2,
         "sort": 0,
-        "hide": 0,
+        "hide": 2,
         "multi": false,
         "includeAll": false,
-        "current": {
-          "selected": true,
-          "text": "1min",
-          "value": "1min"
-        },
-        "options": [
-          {
-            "selected": true,
-            "text": "1min",
-            "value": "1min"
-          },
-          {
-            "selected": false,
-            "text": "1hour",
-            "value": "1hour"
-          },
-          {
-            "selected": false,
-            "text": "1day",
-            "value": "1day"
-          }
-        ],
-        "description": "Resolution for PnL tables"
+        "current": {},
+        "options": [],
+        "description": "Auto-selected resolution: 1min (< 7d), 1hour (>= 7d)"
       }
     ]
   },
