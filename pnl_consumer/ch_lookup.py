@@ -180,7 +180,6 @@ FROM (
         config_timeframe,
         weighting,
         revision_ts,
-        updated_at,
         row_json,
         toDateTime(toDateTime(ts) + toIntervalMinute(multiIf(
             config_timeframe = '1m',  1,
@@ -196,7 +195,7 @@ FROM (
     FROM analytics.strategy_output_history_v2
     WHERE underlying = '{underlying}'
       AND toDateTime(ts) = toDateTime('{ts_str}')
-    ORDER BY strategy_table_name, config_timeframe, revision_ts, updated_at DESC
+    ORDER BY strategy_table_name, config_timeframe, revision_ts
     LIMIT 1 BY strategy_table_name, config_timeframe, revision_ts
 )
 WHERE revision_ts <= closing_ts
