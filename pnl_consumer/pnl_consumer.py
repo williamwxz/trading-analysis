@@ -3,12 +3,16 @@ import logging
 import os
 import signal
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from confluent_kafka import Consumer, KafkaError, KafkaException
 
 from pnl_consumer.anchor_state import AnchorRecord, AnchorState
-from pnl_consumer.ch_lookup import fetch_strategies_for_candle
+from pnl_consumer.ch_lookup import (
+    fetch_bt_strategies_for_candle,
+    fetch_real_trade_revisions_for_candle,
+    fetch_strategies_for_candle,
+)
 from streaming.models import CandleEvent
 from trading_dagster.utils.clickhouse_client import insert_rows
 from trading_dagster.utils.pnl_compute import PROD_INSERT_COLUMNS
@@ -19,7 +23,16 @@ FLUSH_EVERY = 10
 TOPIC = "binance.price.ticks"
 GROUP_ID = "flink-pnl-consumer"
 
-PRICE_COLUMNS = ["exchange", "instrument", "ts", "open", "high", "low", "close", "volume"]
+PRICE_COLUMNS = [
+    "exchange",
+    "instrument",
+    "ts",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+]
 HOUR_INSERT_COLUMNS = PROD_INSERT_COLUMNS
 
 
@@ -53,60 +66,123 @@ def _aggregate_hourly(pnl_batch: list[list]) -> list[list]:
 
 def process_candle(
     candle: CandleEvent,
-    state: AnchorState,
+    state_prod: AnchorState,
+    state_real_trade: AnchorState,
 ) -> list[dict]:
     """Pure business logic: lookup strategies, compute PnL, return rows.
 
     Returns a list of dicts. Each dict has a '_sink' key:
-      '_sink' == 'price'  → write to futures_price_1min
-      '_sink' == 'pnl'    → write to strategy_pnl_1min_prod_v2
+      '_sink' == 'price'          → write to futures_price_1min
+      '_sink' == 'pnl_prod'       → write to strategy_pnl_1min_prod_v2
+      '_sink' == 'pnl_real_trade' → write to strategy_pnl_1min_real_trade_v2
+      '_sink' == 'pnl_bt'         → write to strategy_pnl_1min_bt_v2
 
-    Always emits one price row. Emits one pnl row per active strategy.
+    Always emits one price row. Emits one pnl row per active strategy per sink.
     """
     now = datetime.now(UTC).replace(tzinfo=None)
     rows: list[dict] = []
 
-    rows.append({
-        "_sink": "price",
-        "exchange": candle.exchange,
-        "instrument": candle.instrument,
-        "ts": candle.ts,
-        "open": candle.open,
-        "high": candle.high,
-        "low": candle.low,
-        "close": candle.close,
-        "volume": candle.volume,
-    })
+    rows.append(
+        {
+            "_sink": "price",
+            "exchange": candle.exchange,
+            "instrument": candle.instrument,
+            "ts": candle.ts,
+            "open": candle.open,
+            "high": candle.high,
+            "low": candle.low,
+            "close": candle.close,
+            "volume": candle.volume,
+        }
+    )
 
-    strategies = fetch_strategies_for_candle(candle.instrument, candle.ts)
-    if not strategies:
-        logger.debug("No strategies for %s at %s — skipping PnL", candle.instrument, candle.ts)
-        return rows
-
-    for bar in strategies:
-        pnl = state.compute_pnl(
+    # --- prod ---
+    prod_strategies = fetch_strategies_for_candle(candle.instrument, candle.ts)
+    for bar in prod_strategies:
+        pnl = state_prod.compute_pnl(
             strategy_table_name=bar.strategy_table_name,
             close_price=candle.close,
             position=bar.position,
         )
-        rows.append({
-            "_sink": "pnl",
-            "strategy_table_name": bar.strategy_table_name,
-            "strategy_id": bar.strategy_id,
-            "strategy_name": bar.strategy_name,
-            "underlying": bar.underlying,
-            "config_timeframe": bar.config_timeframe,
-            "source": "production",
-            "version": "v2",
-            "ts": candle.ts,
-            "cumulative_pnl": pnl,
-            "benchmark": bar.benchmark,
-            "position": bar.position,
-            "price": candle.close,
-            "final_signal": bar.final_signal,
-            "weighting": bar.weighting,
-            "updated_at": now,
-        })
+        rows.append(
+            {
+                "_sink": "pnl_prod",
+                "strategy_table_name": bar.strategy_table_name,
+                "strategy_id": bar.strategy_id,
+                "strategy_name": bar.strategy_name,
+                "underlying": bar.underlying,
+                "config_timeframe": bar.config_timeframe,
+                "source": "production",
+                "version": "v2",
+                "ts": candle.ts,
+                "cumulative_pnl": pnl,
+                "benchmark": bar.benchmark,
+                "position": bar.position,
+                "price": candle.close,
+                "final_signal": bar.final_signal,
+                "weighting": bar.weighting,
+                "updated_at": now,
+            }
+        )
+
+    # --- real_trade ---
+    real_trade_revisions = fetch_real_trade_revisions_for_candle(
+        candle.instrument, candle.ts
+    )
+    for rev in real_trade_revisions:
+        pnl = state_real_trade.compute_pnl(
+            strategy_table_name=rev.strategy_table_name,
+            close_price=candle.close,
+            position=rev.position,
+        )
+        execution_ts = (rev.revision_ts + timedelta(seconds=59)).replace(second=0)
+        rows.append(
+            {
+                "_sink": "pnl_real_trade",
+                "strategy_table_name": rev.strategy_table_name,
+                "strategy_id": rev.strategy_id,
+                "strategy_name": rev.strategy_name,
+                "underlying": rev.underlying,
+                "config_timeframe": rev.config_timeframe,
+                "source": "real_trade",
+                "version": "v2",
+                "ts": candle.ts,
+                "cumulative_pnl": pnl,
+                "benchmark": rev.benchmark,
+                "position": rev.position,
+                "price": candle.close,
+                "final_signal": rev.final_signal,
+                "weighting": rev.weighting,
+                "updated_at": now,
+                "closing_ts": rev.closing_ts,
+                "execution_ts": execution_ts,
+                "traded": False,
+            }
+        )
+
+    # --- bt ---
+    bt_bars = fetch_bt_strategies_for_candle(candle.instrument, candle.ts)
+    for bar in bt_bars:
+        rows.append(
+            {
+                "_sink": "pnl_bt",
+                "strategy_table_name": bar.strategy_table_name,
+                "strategy_id": bar.strategy_id,
+                "strategy_name": bar.strategy_name,
+                "underlying": bar.underlying,
+                "config_timeframe": bar.config_timeframe,
+                "source": "backtest",
+                "version": "v2",
+                "ts": candle.ts,
+                "cumulative_pnl": bar.cumulative_pnl,
+                "benchmark": bar.benchmark,
+                "position": bar.position,
+                "price": candle.close,
+                "final_signal": bar.final_signal,
+                "weighting": bar.weighting,
+                "updated_at": now,
+            }
+        )
 
     return rows
 
@@ -143,14 +219,23 @@ def _flush(
     price_batch: list[list],
     pnl_batch: list[list],
 ) -> None:
-    """Insert price and PnL batches to ClickHouse, aggregate PnL to hourly snapshots, then commit offsets. Raises on failure."""
+    """Insert price and PnL batches to ClickHouse, aggregate PnL to hourly snapshots.
+
+    Raises on failure. Commits offsets after successful insert.
+    """
     if price_batch:
         insert_rows("analytics.futures_price_1min", PRICE_COLUMNS, price_batch)
     if pnl_batch:
-        insert_rows("analytics.strategy_pnl_1min_prod_v2", PROD_INSERT_COLUMNS, pnl_batch)
+        insert_rows(
+            "analytics.strategy_pnl_1min_prod_v2", PROD_INSERT_COLUMNS, pnl_batch
+        )
         hourly_rows = _aggregate_hourly(pnl_batch)
         if hourly_rows:
-            insert_rows("analytics.strategy_pnl_1hour_prod_v2", HOUR_INSERT_COLUMNS, hourly_rows)
+            insert_rows(
+                "analytics.strategy_pnl_1hour_prod_v2",
+                HOUR_INSERT_COLUMNS,
+                hourly_rows,
+            )
             logger.info("Upserted %d hourly snapshot(s)", len(hourly_rows))
     price_batch.clear()
     pnl_batch.clear()
@@ -160,15 +245,18 @@ def _flush(
 def run() -> None:
     logging.basicConfig(level=logging.INFO)
 
-    state = AnchorState()
-    _bootstrap_anchors(state)
+    state_prod = AnchorState()
+    state_real_trade = AnchorState()
+    _bootstrap_anchors(state_prod)
 
-    consumer = Consumer({
-        "bootstrap.servers": os.environ["REDPANDA_BROKERS"],
-        "group.id": GROUP_ID,
-        "auto.offset.reset": "earliest",
-        "enable.auto.commit": False,
-    })
+    consumer = Consumer(
+        {
+            "bootstrap.servers": os.environ["REDPANDA_BROKERS"],
+            "group.id": GROUP_ID,
+            "auto.offset.reset": "earliest",
+            "enable.auto.commit": False,
+        }
+    )
     consumer.subscribe([TOPIC])
     logger.info("Subscribed to %s as group %s", TOPIC, GROUP_ID)
 
@@ -213,18 +301,28 @@ def run() -> None:
             )
             logger.info(
                 "Received %s close=%.2f ts=%s batch=%d/%d",
-                candle.instrument, candle.close, candle.ts,
-                len(price_batch) + 1, FLUSH_EVERY,
+                candle.instrument,
+                candle.close,
+                candle.ts,
+                len(price_batch) + 1,
+                FLUSH_EVERY,
             )
 
-            for row in process_candle(candle, state):
+            for row in process_candle(candle, state_prod, state_real_trade):
                 if row["_sink"] == "price":
-                    price_batch.append([
-                        row["exchange"], row["instrument"], row["ts"],
-                        row["open"], row["high"], row["low"],
-                        row["close"], row["volume"],
-                    ])
-                elif row["_sink"] == "pnl":
+                    price_batch.append(
+                        [
+                            row["exchange"],
+                            row["instrument"],
+                            row["ts"],
+                            row["open"],
+                            row["high"],
+                            row["low"],
+                            row["close"],
+                            row["volume"],
+                        ]
+                    )
+                elif row["_sink"] == "pnl_prod":
                     pnl_batch.append([row[c] for c in PROD_INSERT_COLUMNS])
 
             if len(price_batch) >= FLUSH_EVERY or len(pnl_batch) >= FLUSH_EVERY:
