@@ -38,9 +38,12 @@ class AnchorState:
                 rec.anchor_pnl
                 + position * (close_price - rec.anchor_price) / rec.anchor_price
             )
-        self.update(strategy_table_name, AnchorRecord(
-            anchor_pnl=new_pnl,
-            anchor_price=close_price,
-            anchor_position=position,
-        ))
+        self.update(
+            strategy_table_name,
+            AnchorRecord(
+                anchor_pnl=new_pnl,
+                anchor_price=close_price,
+                anchor_position=position,
+            ),
+        )
         return new_pnl

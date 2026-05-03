@@ -136,24 +136,24 @@ def process_candle(
 
     # --- bt ---
     bt_bars = fetch_bt_strategies_for_candle(candle.instrument, candle.ts)
-    for bar in bt_bars:
+    for bt_bar in bt_bars:
         rows.append(
             {
                 "_sink": "pnl_bt",
-                "strategy_table_name": bar.strategy_table_name,
-                "strategy_id": bar.strategy_id,
-                "strategy_name": bar.strategy_name,
-                "underlying": bar.underlying,
-                "config_timeframe": bar.config_timeframe,
+                "strategy_table_name": bt_bar.strategy_table_name,
+                "strategy_id": bt_bar.strategy_id,
+                "strategy_name": bt_bar.strategy_name,
+                "underlying": bt_bar.underlying,
+                "config_timeframe": bt_bar.config_timeframe,
                 "source": "backtest",
                 "version": "v2",
                 "ts": candle.ts,
-                "cumulative_pnl": bar.cumulative_pnl,
-                "benchmark": bar.benchmark,
-                "position": bar.position,
+                "cumulative_pnl": bt_bar.cumulative_pnl,
+                "benchmark": bt_bar.benchmark,
+                "position": bt_bar.position,
                 "price": candle.close,
-                "final_signal": bar.final_signal,
-                "weighting": bar.weighting,
+                "final_signal": bt_bar.final_signal,
+                "weighting": bt_bar.weighting,
                 "updated_at": now,
             }
         )
@@ -271,15 +271,17 @@ def run() -> None:
             msg = consumer.poll(timeout=1.0)
             if msg is None:
                 continue
-            if msg.error():
-                if msg.error().code() == KafkaError._PARTITION_EOF:
+            err = msg.error()
+            if err is not None:
+                if err.code() == KafkaError._PARTITION_EOF:
                     continue
-                if msg.error().fatal():
-                    raise KafkaException(msg.error())
-                logger.warning("Kafka error: %s", msg.error())
+                if err.fatal():
+                    raise KafkaException(err)
+                logger.warning("Kafka error: %s", err)
                 continue
 
-            data = json.loads(msg.value().decode())
+            raw = msg.value()
+            data = json.loads(raw.decode() if raw is not None else "{}")
             candle = CandleEvent(
                 exchange=data["exchange"],
                 instrument=data["instrument"],
