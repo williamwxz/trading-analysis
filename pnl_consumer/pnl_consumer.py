@@ -36,35 +36,6 @@ PRICE_COLUMNS = [
     "close",
     "volume",
 ]
-HOUR_INSERT_COLUMNS = PROD_INSERT_COLUMNS
-
-
-def _aggregate_hourly(pnl_batch: list[list]) -> list[list]:
-    """From a 1min PnL batch, produce one hourly snapshot row per strategy.
-
-    Groups by (strategy_table_name, hour_bucket). For each group, picks the
-    row with the latest ts as the representative snapshot for that hour.
-    Returns rows in HOUR_INSERT_COLUMNS order with ts replaced by the hour bucket.
-    """
-    COL = {name: i for i, name in enumerate(PROD_INSERT_COLUMNS)}
-
-    groups: dict[tuple, list] = {}
-    for row in pnl_batch:
-        ts: datetime = row[COL["ts"]]
-        hour_bucket = ts.replace(minute=0, second=0, microsecond=0)
-        key = (row[COL["strategy_table_name"]], hour_bucket)
-        existing = groups.get(key)
-        if existing is None or ts > existing[COL["ts"]]:
-            groups[key] = row
-
-    now = datetime.now(UTC).replace(tzinfo=None)
-    result: list[list] = []
-    for (_, hour_bucket), row in groups.items():
-        hourly_row = list(row)
-        hourly_row[COL["ts"]] = hour_bucket
-        hourly_row[COL["updated_at"]] = now
-        result.append(hourly_row)
-    return result
 
 
 def process_candle(

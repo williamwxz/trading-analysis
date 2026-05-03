@@ -6,7 +6,6 @@ import pytest
 from pnl_consumer.anchor_state import AnchorRecord, AnchorState
 from pnl_consumer.ch_lookup import BtStrategyBar, StrategyBar, StrategyRevision
 from pnl_consumer.pnl_consumer import (
-    _aggregate_hourly,
     _bootstrap_anchors,
     _flush,
     process_candle,
@@ -129,63 +128,6 @@ def _make_row(strategy: str, ts: datetime, cumulative_pnl: float) -> list:
     row[COL["weighting"]] = 1.0
     row[COL["updated_at"]] = datetime(2026, 3, 1, 10, 5, 0)
     return row
-
-
-class TestAggregateHourly:
-    def test_single_row_snaps_to_hour(self):
-        ts = datetime(2026, 3, 1, 10, 5, 0)
-        rows = _aggregate_hourly([_make_row("strat_a", ts, 1.5)])
-        assert len(rows) == 1
-        assert rows[0][COL["ts"]] == datetime(2026, 3, 1, 10, 0, 0)
-        assert rows[0][COL["cumulative_pnl"]] == 1.5
-
-    def test_two_rows_same_strategy_same_hour_picks_latest(self):
-        ts1 = datetime(2026, 3, 1, 10, 5, 0)
-        ts2 = datetime(2026, 3, 1, 10, 10, 0)
-        rows = _aggregate_hourly(
-            [
-                _make_row("strat_a", ts1, 1.0),
-                _make_row("strat_a", ts2, 2.0),
-            ]
-        )
-        assert len(rows) == 1
-        assert rows[0][COL["cumulative_pnl"]] == 2.0
-
-    def test_two_strategies_same_hour_produces_two_rows(self):
-        ts = datetime(2026, 3, 1, 10, 5, 0)
-        rows = _aggregate_hourly(
-            [
-                _make_row("strat_a", ts, 1.0),
-                _make_row("strat_b", ts, 2.0),
-            ]
-        )
-        assert len(rows) == 2
-
-    def test_same_strategy_different_hours_produces_two_rows(self):
-        ts1 = datetime(2026, 3, 1, 10, 5, 0)
-        ts2 = datetime(2026, 3, 1, 11, 5, 0)
-        rows = _aggregate_hourly(
-            [
-                _make_row("strat_a", ts1, 1.0),
-                _make_row("strat_a", ts2, 2.0),
-            ]
-        )
-        assert len(rows) == 2
-        hours = {r[COL["ts"]] for r in rows}
-        assert datetime(2026, 3, 1, 10, 0, 0) in hours
-        assert datetime(2026, 3, 1, 11, 0, 0) in hours
-
-    def test_empty_batch_returns_empty(self):
-        assert _aggregate_hourly([]) == []
-
-    def test_updated_at_is_refreshed(self):
-        """Each hourly row gets a fresh updated_at, not the source row's value."""
-        ts = datetime(2026, 3, 1, 10, 5, 0)
-        original_updated_at = datetime(2026, 1, 1)
-        row = _make_row("strat_a", ts, 1.0)
-        row[COL["updated_at"]] = original_updated_at
-        result = _aggregate_hourly([row])
-        assert result[0][COL["updated_at"]] != original_updated_at
 
 
 def _make_revision(
