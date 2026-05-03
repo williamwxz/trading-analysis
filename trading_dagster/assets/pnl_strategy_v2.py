@@ -233,14 +233,14 @@ WITH bars AS (
         config_timeframe,
         {tf_sql} AS tf_minutes,
         argMin(weighting, revision_ts)                                    AS weighting,
-        ts + toIntervalMinute({tf_sql})                                    AS execution_ts,
+        toDateTime(ts) + toIntervalMinute({tf_sql})                       AS execution_ts,
         JSONExtractFloat(argMin(row_json, revision_ts), 'cumulative_pnl') AS anchor_pnl,
         JSONExtractFloat(argMin(row_json, revision_ts), 'position')       AS position,
         JSONExtractFloat(argMin(row_json, revision_ts), 'price')          AS bar_price,
         JSONExtractFloat(argMin(row_json, revision_ts), 'final_signal')   AS final_signal,
         JSONExtractFloat(argMin(row_json, revision_ts), 'benchmark')      AS benchmark
     FROM analytics.{source_table}
-    WHERE ts >= toDateTime('{start_ts}') AND ts < toDateTime('{end_ts}')
+    WHERE toDateTime(ts) >= toDateTime('{start_ts}') AND toDateTime(ts) < toDateTime('{end_ts}')
       AND strategy_table_name NOT LIKE 'manual_probe%'
     GROUP BY strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, ts
 ),
@@ -272,7 +272,7 @@ SELECT
     now()                                                                          AS updated_at
 FROM bars_with_next b
 JOIN analytics.futures_price_1min p
-    ON p.instrument = b.underlying
+    ON p.instrument = if(endsWith(upper(b.underlying), 'USDT'), upper(b.underlying), concat(upper(b.underlying), 'USDT'))
    AND p.ts >= b.execution_ts
    AND p.ts < b.next_execution_ts
 ORDER BY b.strategy_table_name, p.ts

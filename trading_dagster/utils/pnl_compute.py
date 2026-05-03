@@ -241,7 +241,7 @@ FROM analytics.{source_table}
 WHERE underlying = '{underlying}'
   AND strategy_table_name NOT LIKE 'manual_probe%'
   AND {ts_filter}
-  AND revision_ts < ts + toIntervalMinute(multiIf(
+  AND revision_ts < toDateTime(ts) + toIntervalMinute(multiIf(
         config_timeframe = '5m', 5, config_timeframe = '10m', 10,
         config_timeframe = '15m', 15, config_timeframe = '30m', 30,
         config_timeframe = '1h', 60, config_timeframe = '4h', 240,
