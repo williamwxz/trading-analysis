@@ -534,20 +534,36 @@
       {
         "name": "resolution",
         "label": "Resolution",
-        "type": "query",
-        "datasource": {
-          "type": "grafana-clickhouse-datasource",
-          "uid": "dfjc5vjyfcc8wf"
-        },
-        "query": "SELECT multiIf(${__to} - ${__from} < 604800000, '1min', ${__to} - ${__from} < 7776000000, '1hour', '1day') FROM system.one",
+        "type": "custom",
+        "query": "1min,1hour,1day",
         "refresh": 2,
         "sort": 0,
-        "hide": 2,
+        "hide": 0,
         "multi": false,
         "includeAll": false,
-        "current": {},
-        "options": [],
-        "description": "Auto-selected resolution based on time range: 1min (< 7d), 1hour (7-90d), 1day (> 90d)."
+        "current": {
+          "selected": true,
+          "text": "1min",
+          "value": "1min"
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "1min",
+            "value": "1min"
+          },
+          {
+            "selected": false,
+            "text": "1hour",
+            "value": "1hour"
+          },
+          {
+            "selected": false,
+            "text": "1day",
+            "value": "1day"
+          }
+        ],
+        "description": "Resolution for PnL tables"
       }
     ]
   },
