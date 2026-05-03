@@ -4,9 +4,9 @@ from unittest.mock import patch
 import pytest
 
 from pnl_consumer.ch_lookup import (
-    fetch_strategies_for_candle,
-    fetch_real_trade_revisions_for_candle,
     StrategyRevision,
+    fetch_real_trade_revisions_for_candle,
+    fetch_strategies_for_candle,
 )
 
 
@@ -122,4 +122,4 @@ def test_fetch_real_trade_revisions_filters_by_exact_candle_ts():
             candle_ts=datetime(2026, 4, 26, 0, 1, 0),
         )
     assert "2026-04-26 00:01:00" in captured_sql[0]
-    assert "revision_ts <= closing_ts" in captured_sql[0] or "revision_ts <=" in captured_sql[0]
+    assert "revision_ts <= closing_ts" in captured_sql[0]
