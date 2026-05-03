@@ -84,6 +84,7 @@ def _get_pg_conn(context: AssetExecutionContext):
         "to keep DB size and Supabase egress low."
     ),
     compute_kind="postgres",
+    op_tags={"dagster/timeout": 300},
 )
 def postgres_cleanup_asset(context: AssetExecutionContext) -> MaterializeResult:
     deleted: dict[str, int] = {}

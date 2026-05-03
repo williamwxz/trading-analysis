@@ -19,6 +19,7 @@ from ..utils.clickhouse_client import get_client
     group_name="infra",
     description="Periodic connectivity probe to ClickHouse Cloud via HTTPS/8443. Confirms NAT egress IP is allowlisted.",
     automation_condition=AutomationCondition.on_cron("*/5 * * * *"),
+    op_tags={"dagster/timeout": 60},
 )
 def clickhouse_connectivity_check_asset(context: AssetExecutionContext):
     client = get_client()

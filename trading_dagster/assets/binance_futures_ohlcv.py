@@ -63,6 +63,7 @@ def _df_to_rows(instrument: str, df: pd.DataFrame) -> List[list]:
     partitions_def=DailyPartitionsDefinition(start_date=START_DATE),
     description="Historical daily backfill asset. Trigger manually for specific dates.",
     compute_kind="binance",
+    op_tags={"dagster/timeout": 300},
 )
 def binance_futures_backfill_asset(context: AssetExecutionContext) -> MaterializeResult:
     partition_date_str = context.partition_key

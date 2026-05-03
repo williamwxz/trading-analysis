@@ -82,6 +82,7 @@ def _prepare_rows_for_clickhouse(rows: List[list]) -> List[list]:
     deps=["binance_futures_backfill"],
     partitions_def=daily_partitions,
     compute_kind="clickhouse",
+    op_tags={"dagster/timeout": 300},
 )
 def pnl_prod_v2_daily_asset(context: AssetExecutionContext) -> MaterializeResult:
     """Daily partitioned production PnL backfill."""
@@ -97,6 +98,7 @@ def pnl_prod_v2_daily_asset(context: AssetExecutionContext) -> MaterializeResult
     deps=["binance_futures_backfill"],
     partitions_def=bt_daily_partitions,
     compute_kind="clickhouse",
+    op_tags={"dagster/timeout": 300},
 )
 def pnl_bt_v2_daily_asset(context: AssetExecutionContext) -> MaterializeResult:
     """Daily partitioned backtest PnL backfill. Uses cumulative_pnl from strategy JSON directly."""
@@ -112,6 +114,7 @@ def pnl_bt_v2_daily_asset(context: AssetExecutionContext) -> MaterializeResult:
     deps=["binance_futures_backfill"],
     partitions_def=daily_partitions,
     compute_kind="clickhouse",
+    op_tags={"dagster/timeout": 300},
 )
 def pnl_real_trade_v2_daily_asset(context: AssetExecutionContext) -> MaterializeResult:
     """Daily partitioned real trade PnL backfill."""

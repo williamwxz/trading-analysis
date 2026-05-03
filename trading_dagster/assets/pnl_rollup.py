@@ -122,6 +122,7 @@ GROUP BY
     automation_condition=AutomationCondition.eager(),
     compute_kind="clickhouse",
     description="Rolls up strategy_pnl_1min_prod_v2 → strategy_pnl_1hour_prod_v2, daily partition.",
+    op_tags={"dagster/timeout": 300},
 )
 def pnl_1hour_prod_rollup_asset(context: AssetExecutionContext) -> MaterializeResult:
     return _rollup_day(
@@ -139,6 +140,7 @@ def pnl_1hour_prod_rollup_asset(context: AssetExecutionContext) -> MaterializeRe
     automation_condition=AutomationCondition.eager(),
     compute_kind="clickhouse",
     description="Rolls up strategy_pnl_1min_real_trade_v2 → strategy_pnl_1hour_real_trade_v2, daily partition.",
+    op_tags={"dagster/timeout": 300},
 )
 def pnl_1hour_real_trade_rollup_asset(context: AssetExecutionContext) -> MaterializeResult:
     return _rollup_day(
@@ -157,6 +159,7 @@ def pnl_1hour_real_trade_rollup_asset(context: AssetExecutionContext) -> Materia
     automation_condition=AutomationCondition.eager(),
     compute_kind="clickhouse",
     description="Rolls up strategy_pnl_1min_bt_v2 → strategy_pnl_1hour_bt_v2, daily partition.",
+    op_tags={"dagster/timeout": 300},
 )
 def pnl_1hour_bt_rollup_asset(context: AssetExecutionContext) -> MaterializeResult:
     return _rollup_day(
