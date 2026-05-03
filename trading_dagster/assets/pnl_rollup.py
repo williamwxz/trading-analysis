@@ -92,8 +92,8 @@ FROM (
         ts AS src_ts,
         cumulative_pnl, benchmark, position, price, final_signal, weighting{inner_extra}
     FROM {source_table} FINAL
-    WHERE ts >= toDateTime('{start_ts}')
-      AND ts < toDateTime('{end_ts}')
+    WHERE toDateTime(ts) >= toDateTime('{start_ts}')
+      AND toDateTime(ts) < toDateTime('{end_ts}')
 )
 GROUP BY
     strategy_table_name, strategy_id, strategy_name, underlying,
@@ -104,7 +104,7 @@ GROUP BY
     rows_inserted = int(
         query_scalar(
             f"SELECT count() FROM {target_table} FINAL "
-            f"WHERE ts >= toDateTime('{start_ts}') AND ts < toDateTime('{end_ts}')",
+            f"WHERE toDateTime(ts) >= toDateTime('{start_ts}') AND toDateTime(ts) < toDateTime('{end_ts}')",
             client=client,
         )
         or 0

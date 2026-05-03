@@ -218,7 +218,7 @@ def fetch_new_bars_real_trade(
     Daily path: since=start_ts, ts_end=end_ts — filter on ts in [since, ts_end).
     """
     if ts_end is not None:
-        ts_filter = f"ts >= toDateTime('{since}') AND ts < toDateTime('{ts_end}')"
+        ts_filter = f"toDateTime(ts) >= toDateTime('{since}') AND toDateTime(ts) < toDateTime('{ts_end}')"
     else:
         ts_filter = f"revision_ts >= toDateTime('{since}')"
     sql = f"""\
