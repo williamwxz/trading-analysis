@@ -72,6 +72,7 @@ def process_candle(
 
     # --- prod ---
     prod_strategies = fetch_strategies_for_candle(candle.instrument, candle.ts)
+    logger.info("Lookup prod: instrument=%s ts=%s count=%d", candle.instrument, candle.ts, len(prod_strategies))
     for bar in prod_strategies:
         pnl = state_prod.compute_pnl(
             strategy_table_name=bar.strategy_table_name,
@@ -103,6 +104,7 @@ def process_candle(
     real_trade_revisions = fetch_real_trade_revisions_for_candle(
         candle.instrument, candle.ts
     )
+    logger.info("Lookup real_trade: instrument=%s ts=%s count=%d", candle.instrument, candle.ts, len(real_trade_revisions))
     for rev in real_trade_revisions:
         pnl = state_real_trade.compute_pnl(
             strategy_table_name=rev.strategy_table_name,
@@ -136,6 +138,7 @@ def process_candle(
 
     # --- bt ---
     bt_bars = fetch_bt_strategies_for_candle(candle.instrument, candle.ts)
+    logger.info("Lookup bt: instrument=%s ts=%s count=%d", candle.instrument, candle.ts, len(bt_bars))
     for bt_bar in bt_bars:
         rows.append(
             {
