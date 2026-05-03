@@ -39,17 +39,24 @@ def _rollup_day(
     start_ts = start_dt.strftime("%Y-%m-%d %H:%M:%S")
     end_ts = end_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    # Build extra column fragments for inner and outer SELECT
-    inner_extra = (", " + extra_agg_cols) if extra_agg_cols else ""
+    # Build extra column fragments for inner SELECT, outer SELECT, and INSERT column list
+    extra_cols = [c.strip() for c in extra_agg_cols.split(",")] if extra_agg_cols else []
+    inner_extra = (", " + ", ".join(extra_cols)) if extra_cols else ""
     outer_extra = ""
-    if extra_agg_cols:
+    if extra_cols:
         col_aggs = []
-        for col in [c.strip() for c in extra_agg_cols.split(",")]:
+        for col in extra_cols:
             if col == "traded":
                 col_aggs.append(f"any({col}) AS {col}")
             else:
                 col_aggs.append(f"argMax({col}, src_ts) AS {col}")
         outer_extra = ",\n    " + ",\n    ".join(col_aggs)
+    col_list = (
+        "strategy_table_name, strategy_id, strategy_name, underlying, "
+        "config_timeframe, source, version, ts, cumulative_pnl, benchmark, "
+        "position, price, final_signal, weighting, updated_at"
+        + (", " + ", ".join(extra_cols) if extra_cols else "")
+    )
 
     client = get_client()
 
@@ -61,7 +68,7 @@ def _rollup_day(
     )
 
     sql = f"""\
-INSERT INTO {target_table}
+INSERT INTO {target_table} ({col_list})
 SELECT
     strategy_table_name,
     strategy_id,

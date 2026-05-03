@@ -91,16 +91,16 @@ Rollup asset (hourly, argMax aggregation)
 
 **Active assets** (registered in `definitions/__init__.py`):
 - `binance_futures_backfill` — daily partitioned market data
-- `binance_futures_ohlcv_minutely` — live 5-min market data
-- `pnl_prod_v2_daily` / `pnl_prod_v2_live` — production PnL, live + backfill
-- `pnl_real_trade_v2_daily` / `pnl_real_trade_v2_live` — real trade PnL, live + backfill
+- `pnl_prod_v2_daily` — production PnL daily backfill
+- `pnl_real_trade_v2_daily` — real trade PnL daily backfill
 - `pnl_bt_v2_daily` — backtest PnL daily backfill
 - `pnl_1hour_prod_rollup` — hourly rollup prod 1min → 1hour, daily partition, auto-triggered by `pnl_prod_v2_daily`
 - `pnl_1hour_real_trade_rollup` — hourly rollup real_trade 1min → 1hour, daily partition, auto-triggered by `pnl_real_trade_v2_daily`
 - `pnl_1hour_bt_rollup` — hourly rollup bt 1min → 1hour, daily partition, auto-triggered by `pnl_bt_v2_daily`
-- `pnl_daily_safety_scan` — row-count validation (02:00 UTC daily)
+- `clickhouse_connectivity_check` — infra health check
+- `postgres_cleanup` — Dagster metadata DB cleanup
 
-**Commented out** (defined in `pnl_strategy_v2.py` but not registered): `pnl_bt_v2_live_asset`, `pnl_prod_v2_live_asset` — live paths are not currently active.
+**Not registered** (defined in `pnl_strategy_v2.py` but inactive): `pnl_bt_v2_live_asset`, `pnl_prod_v2_live_asset`, `pnl_real_trade_v2_live_asset` — live paths not currently active.
 
 ### Dual Asset Strategy
 

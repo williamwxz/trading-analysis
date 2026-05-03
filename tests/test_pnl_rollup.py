@@ -80,9 +80,10 @@ class TestRollupDay:
             extra_agg_cols="closing_ts, execution_ts, traded",
         )
         insert_sql = mock_execute.call_args_list[1][0][0]
-        assert "closing_ts" in insert_sql
-        assert "execution_ts" in insert_sql
-        assert "traded" in insert_sql
+        assert "argMax(closing_ts, src_ts)" in insert_sql
+        assert "argMax(execution_ts, src_ts)" in insert_sql
+        assert "any(traded)" in insert_sql
+        assert "argMax(traded" not in insert_sql
 
 
 class TestAssetPartitionDefs:
