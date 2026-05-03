@@ -63,6 +63,7 @@ Binance WebSocket (1m closed candles)
     → pnl_consumer/pnl_consumer.py  (GROUP_ID: flink-pnl-consumer, flush every 10 candles)
     → analytics.futures_price_1min
     → analytics.strategy_pnl_1min_prod_v2
+    → analytics.strategy_pnl_1hour_prod_v2  (hourly snapshot upsert on each flush)
 ```
 
 **Batch path** (Dagster, every ~5 min or daily):
@@ -91,12 +92,15 @@ Rollup asset (hourly, argMax aggregation)
 **Active assets** (registered in `definitions/__init__.py`):
 - `binance_futures_backfill` — daily partitioned market data
 - `binance_futures_ohlcv_minutely` — live 5-min market data
-- `pnl_prod_v2_live` / `pnl_prod_v2_daily` — production PnL, live + backfill
-- `pnl_real_trade_v2_live` / `pnl_real_trade_v2_daily` — real trade PnL, live + backfill
-- `pnl_1hour_rollup` — hourly aggregation (runs 15 min past each hour)
+- `pnl_prod_v2_daily` / `pnl_prod_v2_live` — production PnL, live + backfill
+- `pnl_real_trade_v2_daily` / `pnl_real_trade_v2_live` — real trade PnL, live + backfill
+- `pnl_bt_v2_daily` — backtest PnL daily backfill
+- `pnl_1hour_prod_rollup` — hourly rollup prod 1min → 1hour, daily partition, auto-triggered by `pnl_prod_v2_daily`
+- `pnl_1hour_real_trade_rollup` — hourly rollup real_trade 1min → 1hour, daily partition, auto-triggered by `pnl_real_trade_v2_daily`
+- `pnl_1hour_bt_rollup` — hourly rollup bt 1min → 1hour, daily partition, auto-triggered by `pnl_bt_v2_daily`
 - `pnl_daily_safety_scan` — row-count validation (02:00 UTC daily)
 
-**Commented out** (defined in `pnl_strategy_v2.py` but not registered): `pnl_bt_v2_live_asset`, `pnl_bt_v2_daily_asset` — backtest PnL is not currently active.
+**Commented out** (defined in `pnl_strategy_v2.py` but not registered): `pnl_bt_v2_live_asset`, `pnl_prod_v2_live_asset` — live paths are not currently active.
 
 ### Dual Asset Strategy
 
