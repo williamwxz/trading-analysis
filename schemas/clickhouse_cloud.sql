@@ -210,7 +210,10 @@ CREATE TABLE IF NOT EXISTS analytics.strategy_pnl_1hour_real_trade_v2
     price               Float64,
     final_signal        Float64,
     weighting           Float64,
-    updated_at          DateTime DEFAULT now()
+    updated_at          DateTime DEFAULT now(),
+    closing_ts          DateTime,
+    execution_ts        DateTime,
+    traded              Bool     DEFAULT false
 )
 ENGINE = ReplacingMergeTree(updated_at)
 PARTITION BY toYYYYMM(ts)
