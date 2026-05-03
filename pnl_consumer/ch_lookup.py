@@ -5,6 +5,7 @@ from datetime import datetime
 from trading_dagster.utils.clickhouse_client import query_dicts
 
 _LOOKBACK = "1 DAY"
+_REAL_TRADE_REVISION_GRACE_MINUTES = 15
 
 
 @dataclass
@@ -198,7 +199,7 @@ FROM (
     ORDER BY strategy_table_name, config_timeframe, revision_ts
     LIMIT 1 BY strategy_table_name, config_timeframe, revision_ts
 )
-WHERE revision_ts <= closing_ts
+WHERE revision_ts <= closing_ts + toIntervalMinute({_REAL_TRADE_REVISION_GRACE_MINUTES})
 ORDER BY strategy_table_name, revision_ts
 """
     rows = query_dicts(sql)
