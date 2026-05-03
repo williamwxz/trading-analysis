@@ -35,6 +35,20 @@ class StrategyRevision:
     closing_ts: datetime
 
 
+@dataclass
+class BtStrategyBar:
+    strategy_table_name: str
+    strategy_id: int
+    strategy_name: str
+    underlying: str
+    config_timeframe: str
+    weighting: float
+    position: float
+    final_signal: float
+    benchmark: float
+    cumulative_pnl: float
+
+
 def fetch_strategies_for_candle(
     instrument: str,
     candle_ts: datetime,
@@ -82,6 +96,54 @@ LIMIT 1 BY strategy_table_name
                 position=float(rj.get("position", 0.0)),
                 final_signal=float(rj.get("final_signal", 0.0)),
                 benchmark=float(rj.get("benchmark", 0.0)),
+            )
+        )
+    return result
+
+
+def fetch_bt_strategies_for_candle(
+    instrument: str,
+    candle_ts: datetime,
+) -> list[BtStrategyBar]:
+    """Return latest bt strategy bar per strategy for instrument at candle_ts.
+
+    cumulative_pnl is extracted from row_json — no anchor-chain computation needed.
+    """
+    underlying = instrument.removesuffix("USDT")
+    ts_str = candle_ts.strftime("%Y-%m-%d %H:%M:%S")
+    sql = f"""\
+SELECT
+    strategy_table_name,
+    strategy_id,
+    strategy_name,
+    underlying,
+    config_timeframe,
+    weighting,
+    argMin(row_json, revision_ts) AS row_json
+FROM analytics.strategy_output_history_bt_v2
+WHERE underlying = '{underlying}'
+  AND ts = toDateTime('{ts_str}')
+GROUP BY
+    strategy_table_name, strategy_id, strategy_name,
+    underlying, config_timeframe, weighting
+ORDER BY strategy_table_name
+"""
+    rows = query_dicts(sql)
+    result = []
+    for row in rows:
+        rj = json.loads(row["row_json"])
+        result.append(
+            BtStrategyBar(
+                strategy_table_name=row["strategy_table_name"],
+                strategy_id=row["strategy_id"],
+                strategy_name=row["strategy_name"],
+                underlying=row["underlying"],
+                config_timeframe=row["config_timeframe"],
+                weighting=row["weighting"],
+                position=float(rj.get("position", 0.0)),
+                final_signal=float(rj.get("final_signal", 0.0)),
+                benchmark=float(rj.get("benchmark", 0.0)),
+                cumulative_pnl=float(rj.get("cumulative_pnl", 0.0)),
             )
         )
     return result

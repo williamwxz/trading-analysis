@@ -4,7 +4,9 @@ from unittest.mock import patch
 import pytest
 
 from pnl_consumer.ch_lookup import (
+    BtStrategyBar,
     StrategyRevision,
+    fetch_bt_strategies_for_candle,
     fetch_real_trade_revisions_for_candle,
     fetch_strategies_for_candle,
 )
@@ -123,3 +125,66 @@ def test_fetch_real_trade_revisions_filters_by_exact_candle_ts():
         )
     assert "2026-04-26 00:01:00" in captured_sql[0]
     assert "revision_ts <= closing_ts" in captured_sql[0]
+
+
+@pytest.mark.unit
+def test_fetch_bt_strategies_returns_list_of_bt_strategy_bars():
+    mock_rows = [
+        {
+            "strategy_table_name": "strat_bt_1",
+            "strategy_id": 2,
+            "strategy_name": "bt_momentum",
+            "underlying": "BTC",
+            "config_timeframe": "5m",
+            "weighting": 1.0,
+            "row_json": (
+                '{"position": -1.0, "final_signal": -1.0,'
+                ' "benchmark": 0.01, "cumulative_pnl": 0.05}'
+            ),
+        }
+    ]
+    with patch("pnl_consumer.ch_lookup.query_dicts", return_value=mock_rows):
+        bars = fetch_bt_strategies_for_candle(
+            instrument="BTCUSDT",
+            candle_ts=datetime(2026, 4, 26, 0, 1, 0),
+        )
+    assert len(bars) == 1
+    bar = bars[0]
+    assert isinstance(bar, BtStrategyBar)
+    assert bar.strategy_table_name == "strat_bt_1"
+    assert bar.cumulative_pnl == 0.05
+    assert bar.position == -1.0
+
+
+@pytest.mark.unit
+def test_fetch_bt_strategies_returns_empty_when_no_rows():
+    with patch("pnl_consumer.ch_lookup.query_dicts", return_value=[]):
+        bars = fetch_bt_strategies_for_candle(
+            instrument="BTCUSDT",
+            candle_ts=datetime(2026, 4, 26, 0, 1, 0),
+        )
+    assert bars == []
+
+
+@pytest.mark.unit
+def test_fetch_bt_strategies_reads_cumulative_pnl_from_row_json():
+    mock_rows = [
+        {
+            "strategy_table_name": "strat_bt_2",
+            "strategy_id": 3,
+            "strategy_name": "bt_mean_rev",
+            "underlying": "ETH",
+            "config_timeframe": "15m",
+            "weighting": 0.5,
+            "row_json": (
+                '{"position": 0.0, "final_signal": 0.0,'
+                ' "benchmark": 0.0, "cumulative_pnl": -0.02}'
+            ),
+        }
+    ]
+    with patch("pnl_consumer.ch_lookup.query_dicts", return_value=mock_rows):
+        bars = fetch_bt_strategies_for_candle(
+            instrument="ETHUSDT",
+            candle_ts=datetime(2026, 4, 26, 0, 1, 0),
+        )
+    assert bars[0].cumulative_pnl == -0.02
