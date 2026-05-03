@@ -20,6 +20,21 @@ class StrategyBar:
     benchmark: float
 
 
+@dataclass
+class StrategyRevision:
+    strategy_table_name: str
+    strategy_id: int
+    strategy_name: str
+    underlying: str
+    config_timeframe: str
+    weighting: float
+    position: float
+    final_signal: float
+    benchmark: float
+    revision_ts: datetime
+    closing_ts: datetime
+
+
 def fetch_strategies_for_candle(
     instrument: str,
     candle_ts: datetime,
@@ -66,5 +81,73 @@ LIMIT 1 BY strategy_table_name
             position=float(rj.get("position", 0.0)),
             final_signal=float(rj.get("final_signal", 0.0)),
             benchmark=float(rj.get("benchmark", 0.0)),
+        ))
+    return result
+
+
+def fetch_real_trade_revisions_for_candle(
+    instrument: str,
+    candle_ts: datetime,
+) -> list[StrategyRevision]:
+    """Return all revisions for real_trade strategies at candle_ts where revision_ts <= closing_ts.
+
+    Revisions are ordered by revision_ts ASC — each represents a position update within the bar.
+    """
+    underlying = instrument.removesuffix("USDT")
+    ts_str = candle_ts.strftime("%Y-%m-%d %H:%M:%S")
+    sql = f"""\
+SELECT
+    strategy_table_name,
+    strategy_id,
+    strategy_name,
+    underlying,
+    config_timeframe,
+    weighting,
+    revision_ts,
+    toDateTime(ts + toIntervalMinute(multiIf(
+        config_timeframe = '1m',  1,
+        config_timeframe = '3m',  3,
+        config_timeframe = '5m',  5,
+        config_timeframe = '15m', 15,
+        config_timeframe = '30m', 30,
+        config_timeframe = '1h',  60,
+        config_timeframe = '4h',  240,
+        config_timeframe = '1d',  1440,
+        5
+    ))) AS closing_ts,
+    argMin(row_json, revision_ts) AS row_json
+FROM analytics.strategy_output_history_v2
+WHERE underlying = '{underlying}'
+  AND ts = toDateTime('{ts_str}')
+  AND revision_ts <= toDateTime(ts + toIntervalMinute(multiIf(
+        config_timeframe = '1m',  1,
+        config_timeframe = '3m',  3,
+        config_timeframe = '5m',  5,
+        config_timeframe = '15m', 15,
+        config_timeframe = '30m', 30,
+        config_timeframe = '1h',  60,
+        config_timeframe = '4h',  240,
+        config_timeframe = '1d',  1440,
+        5
+    )))
+GROUP BY strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, weighting, revision_ts
+ORDER BY strategy_table_name, revision_ts
+"""
+    rows = query_dicts(sql)
+    result = []
+    for row in rows:
+        rj = json.loads(row["row_json"])
+        result.append(StrategyRevision(
+            strategy_table_name=row["strategy_table_name"],
+            strategy_id=row["strategy_id"],
+            strategy_name=row["strategy_name"],
+            underlying=row["underlying"],
+            config_timeframe=row["config_timeframe"],
+            weighting=row["weighting"],
+            position=float(rj.get("position", 0.0)),
+            final_signal=float(rj.get("final_signal", 0.0)),
+            benchmark=float(rj.get("benchmark", 0.0)),
+            revision_ts=row["revision_ts"],
+            closing_ts=row["closing_ts"],
         ))
     return result

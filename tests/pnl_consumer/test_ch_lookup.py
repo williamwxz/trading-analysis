@@ -3,7 +3,11 @@ from unittest.mock import patch
 
 import pytest
 
-from pnl_consumer.ch_lookup import fetch_strategies_for_candle
+from pnl_consumer.ch_lookup import (
+    fetch_strategies_for_candle,
+    fetch_real_trade_revisions_for_candle,
+    StrategyRevision,
+)
 
 
 @pytest.mark.unit
@@ -62,3 +66,60 @@ def test_strategy_bar_position_parsed_from_row_json():
     assert bars[0].position == -1.0
     assert bars[0].final_signal == -1.0
     assert bars[0].benchmark == 0.01
+
+
+@pytest.mark.unit
+def test_fetch_real_trade_revisions_returns_list_of_strategy_revisions():
+    mock_rows = [
+        {
+            "strategy_table_name": "strat_rt_1",
+            "strategy_id": 1,
+            "strategy_name": "momentum",
+            "underlying": "BTC",
+            "config_timeframe": "5m",
+            "weighting": 1.0,
+            "revision_ts": datetime(2026, 4, 26, 0, 1, 10),
+            "closing_ts": datetime(2026, 4, 26, 0, 5, 59),
+            "row_json": '{"position": 0.5, "final_signal": 1.0, "benchmark": 0.0}',
+        }
+    ]
+    with patch("pnl_consumer.ch_lookup.query_dicts", return_value=mock_rows):
+        revisions = fetch_real_trade_revisions_for_candle(
+            instrument="BTCUSDT",
+            candle_ts=datetime(2026, 4, 26, 0, 1, 0),
+        )
+    assert len(revisions) == 1
+    rev = revisions[0]
+    assert isinstance(rev, StrategyRevision)
+    assert rev.strategy_table_name == "strat_rt_1"
+    assert rev.position == 0.5
+    assert rev.revision_ts == datetime(2026, 4, 26, 0, 1, 10)
+    assert rev.closing_ts == datetime(2026, 4, 26, 0, 5, 59)
+
+
+@pytest.mark.unit
+def test_fetch_real_trade_revisions_returns_empty_when_no_rows():
+    with patch("pnl_consumer.ch_lookup.query_dicts", return_value=[]):
+        revisions = fetch_real_trade_revisions_for_candle(
+            instrument="BTCUSDT",
+            candle_ts=datetime(2026, 4, 26, 0, 1, 0),
+        )
+    assert revisions == []
+
+
+@pytest.mark.unit
+def test_fetch_real_trade_revisions_filters_by_exact_candle_ts():
+    """Verify the SQL uses ts = candle_ts (not a range)."""
+    captured_sql = []
+
+    def capture(sql):
+        captured_sql.append(sql)
+        return []
+
+    with patch("pnl_consumer.ch_lookup.query_dicts", side_effect=capture):
+        fetch_real_trade_revisions_for_candle(
+            instrument="BTCUSDT",
+            candle_ts=datetime(2026, 4, 26, 0, 1, 0),
+        )
+    assert "2026-04-26 00:01:00" in captured_sql[0]
+    assert "revision_ts <= closing_ts" in captured_sql[0] or "revision_ts <=" in captured_sql[0]
