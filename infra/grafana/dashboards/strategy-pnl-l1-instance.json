@@ -25,7 +25,7 @@
     {
       "datasource": {
         "type": "grafana-clickhouse-datasource",
-        "uid": "clickhouse"
+        "uid": "dfjc5vjyfcc8wf"
       },
       "title": "All Instances \u2014 Production PnL (Strategy ${strategy_id_derived})",
       "description": "All live instances sharing the same strategy ID as the selected instance. Each line = one strategy_table_name, colored by instance. Use this to compare configs/versions running the same strategy.",
@@ -83,7 +83,7 @@
         {
           "datasource": {
             "type": "grafana-clickhouse-datasource",
-            "uid": "clickhouse"
+            "uid": "dfjc5vjyfcc8wf"
           },
           "rawSql": "SELECT toStartOfFiveMinutes(ts) AS time, strategy_table_name, argMax(cumulative_pnl, ts) AS cumulative_pnl FROM analytics.strategy_pnl_${resolution}_prod_v2 WHERE (empty('${strategy_id_derived}') OR strategy_id = ${strategy_id_derived}) AND (empty('${underlying_derived}') OR `underlying` = '${underlying_derived}') AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time, strategy_table_name ORDER BY time",
           "refId": "A",
@@ -98,7 +98,7 @@
         {
           "datasource": {
             "type": "grafana-clickhouse-datasource",
-            "uid": "clickhouse"
+            "uid": "dfjc5vjyfcc8wf"
           },
           "rawSql": "SELECT toStartOfFiveMinutes(ts) AS time, strategy_table_name, argMax(cumulative_pnl, ts) AS cumulative_pnl FROM analytics.strategy_pnl_${resolution}_real_trade_v2 WHERE (empty('${strategy_id_derived}') OR strategy_id = ${strategy_id_derived}) AND (empty('${underlying_derived}') OR `underlying` = '${underlying_derived}') AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time, strategy_table_name ORDER BY time",
           "refId": "C",
@@ -109,7 +109,7 @@
     {
       "datasource": {
         "type": "grafana-clickhouse-datasource",
-        "uid": "clickhouse"
+        "uid": "dfjc5vjyfcc8wf"
       },
       "title": "All Instances \u2014 Backtest PnL (Strategy ${strategy_id_derived})",
       "description": "All backtest instances sharing the same strategy ID as the selected instance. Each line = one strategy_table_name. Use this to compare how different configs performed historically.",
@@ -167,7 +167,7 @@
         {
           "datasource": {
             "type": "grafana-clickhouse-datasource",
-            "uid": "clickhouse"
+            "uid": "dfjc5vjyfcc8wf"
           },
           "rawSql": "WITH raw AS (SELECT toStartOfFiveMinutes(ts) AS time, strategy_table_name, argMax(cumulative_pnl, ts) AS pnl FROM analytics.strategy_pnl_${resolution}_bt_v2 WHERE (empty('${strategy_id_derived}') OR strategy_id = ${strategy_id_derived}) AND (empty('${underlying_derived}') OR `underlying` = '${underlying_derived}') AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time, strategy_table_name) SELECT time, strategy_table_name, pnl - first_value(pnl) OVER (PARTITION BY strategy_table_name ORDER BY time) AS cumulative_pnl FROM raw ORDER BY time",
           "refId": "A",
@@ -185,7 +185,7 @@
     {
       "datasource": {
         "type": "grafana-clickhouse-datasource",
-        "uid": "clickhouse"
+        "uid": "dfjc5vjyfcc8wf"
       },
       "title": "Cumulative PnL (from backtest day 0) - Backtest vs Real-time",
       "description": "Cumulative PnL computed as sum(pnl) over all bars \u2014 immune to upstream writer drift/resets. Production is offset to continue from the backtest curve end.",
@@ -234,7 +234,7 @@
         {
           "datasource": {
             "type": "grafana-clickhouse-datasource",
-            "uid": "clickhouse"
+            "uid": "dfjc5vjyfcc8wf"
           },
           "rawSql": "WITH bt_at_start AS (SELECT JSONExtractFloat(argMin(row_json, revision_ts), 'cumulative_pnl') AS v FROM analytics.strategy_output_history_bt_v2 WHERE strategy_table_name = '${strategy_instance}' AND ts = (SELECT min(ts) FROM analytics.strategy_output_history_v2 WHERE strategy_table_name = '${strategy_instance}')), dedup AS (SELECT ts, row_json, row_number() OVER (PARTITION BY ts ORDER BY revision_ts ASC) AS rn FROM analytics.strategy_output_history_v2 WHERE strategy_table_name = '${strategy_instance}'), running AS (SELECT ts AS time, sum(JSONExtractFloat(row_json, 'pnl')) OVER (ORDER BY ts) + ifNull((SELECT v FROM bt_at_start), 0) AS cumulative_pnl FROM dedup WHERE rn = 1) SELECT time, cumulative_pnl AS `Production PnL (sum_pnl)` FROM running WHERE time >= toDateTime(intDiv(${__from},1000)) AND time <= toDateTime(intDiv(${__to},1000)) ORDER BY time",
           "refId": "A",
@@ -249,7 +249,7 @@
         {
           "datasource": {
             "type": "grafana-clickhouse-datasource",
-            "uid": "clickhouse"
+            "uid": "dfjc5vjyfcc8wf"
           },
           "rawSql": "WITH dedup AS (SELECT ts, row_json, row_number() OVER (PARTITION BY ts ORDER BY revision_ts ASC) AS rn FROM analytics.strategy_output_history_bt_v2 WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) SELECT d.ts AS time, JSONExtractFloat(d.row_json, 'cumulative_pnl') AS `Backtest PnL`, JSONExtractFloat(d.row_json, 'benchmark') AS `Benchmark` FROM dedup d WHERE d.rn = 1 ORDER BY d.ts ASC",
           "refId": "B",
@@ -265,7 +265,7 @@
         {
           "datasource": {
             "type": "grafana-clickhouse-datasource",
-            "uid": "clickhouse"
+            "uid": "dfjc5vjyfcc8wf"
           },
           "rawSql": "WITH bt_at_start AS (SELECT JSONExtractFloat(argMin(row_json, revision_ts), 'cumulative_pnl') AS v FROM analytics.strategy_output_history_bt_v2 WHERE strategy_table_name = '${strategy_instance}' AND ts = (SELECT min(ts) FROM analytics.strategy_pnl_${resolution}_real_trade_v2 FINAL WHERE strategy_table_name = '${strategy_instance}')), rt_at_start AS (SELECT argMin(cumulative_pnl, ts) AS v FROM analytics.strategy_pnl_${resolution}_real_trade_v2 FINAL WHERE strategy_table_name = '${strategy_instance}') SELECT $__timeInterval(ts) AS time, argMax(cumulative_pnl, ts) - (SELECT v FROM rt_at_start) + ifNull((SELECT v FROM bt_at_start), 0) AS `Real Trade PnL (sum_pnl)` FROM analytics.strategy_pnl_${resolution}_real_trade_v2 FINAL WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
           "refId": "C",
@@ -283,7 +283,7 @@
     {
       "datasource": {
         "type": "grafana-clickhouse-datasource",
-        "uid": "clickhouse"
+        "uid": "dfjc5vjyfcc8wf"
       },
       "title": "Cumulative PnL (from 0%) - Backtest vs Real-time",
       "description": "Cumulative PnL computed as sum(pnl) over all bars \u2014 all series rebased to 0 at the start of the selected time window. Use this to compare strategy vs buy-and-hold across any range.",
@@ -332,7 +332,7 @@
         {
           "datasource": {
             "type": "grafana-clickhouse-datasource",
-            "uid": "clickhouse"
+            "uid": "dfjc5vjyfcc8wf"
           },
           "rawSql": "WITH dedup AS (SELECT ts, row_json, row_number() OVER (PARTITION BY ts ORDER BY revision_ts ASC) AS rn FROM analytics.strategy_output_history_v2 WHERE strategy_table_name = '${strategy_instance}'), running AS (SELECT ts AS time, sum(JSONExtractFloat(row_json, 'pnl')) OVER (ORDER BY ts) AS cumulative_pnl FROM dedup WHERE rn = 1), windowed AS (SELECT time, cumulative_pnl FROM running WHERE time >= toDateTime(intDiv(${__from},1000)) AND time <= toDateTime(intDiv(${__to},1000))) SELECT time, cumulative_pnl - first_value(cumulative_pnl) OVER (ORDER BY time) AS `Production PnL (sum_pnl)` FROM windowed ORDER BY time",
           "refId": "A",
@@ -347,7 +347,7 @@
         {
           "datasource": {
             "type": "grafana-clickhouse-datasource",
-            "uid": "clickhouse"
+            "uid": "dfjc5vjyfcc8wf"
           },
           "rawSql": "WITH dedup AS (SELECT ts, row_json, row_number() OVER (PARTITION BY ts ORDER BY revision_ts ASC) AS rn FROM analytics.strategy_output_history_bt_v2 WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))), base AS (SELECT d.ts AS time, JSONExtractFloat(d.row_json, 'cumulative_pnl') AS cumulative_pnl, JSONExtractFloat(d.row_json, 'benchmark') AS benchmark FROM dedup d WHERE d.rn = 1) SELECT time, cumulative_pnl - first_value(cumulative_pnl) OVER (ORDER BY time) AS `Backtest PnL`, benchmark - first_value(benchmark) OVER (ORDER BY time) AS `Benchmark` FROM base ORDER BY time",
           "refId": "B",
@@ -363,7 +363,7 @@
         {
           "datasource": {
             "type": "grafana-clickhouse-datasource",
-            "uid": "clickhouse"
+            "uid": "dfjc5vjyfcc8wf"
           },
           "rawSql": "WITH rt_at_start AS (SELECT argMin(cumulative_pnl, ts) AS v FROM analytics.strategy_pnl_${resolution}_real_trade_v2 FINAL WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) SELECT $__timeInterval(ts) AS time, argMax(cumulative_pnl, ts) - (SELECT v FROM rt_at_start) AS `Real Trade PnL (sum_pnl)` FROM analytics.strategy_pnl_${resolution}_real_trade_v2 FINAL WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
           "refId": "C",
@@ -381,7 +381,7 @@
     {
       "datasource": {
         "type": "grafana-clickhouse-datasource",
-        "uid": "clickhouse"
+        "uid": "dfjc5vjyfcc8wf"
       },
       "title": "Drawdown",
       "description": "How far the strategy has fallen from its peak. Shows both production and backtest drawdowns, plus the benchmark (buy-and-hold) drawdown for comparison.",
@@ -427,7 +427,7 @@
         {
           "datasource": {
             "type": "grafana-clickhouse-datasource",
-            "uid": "clickhouse"
+            "uid": "dfjc5vjyfcc8wf"
           },
           "rawSql": "WITH dedup AS (SELECT ts, row_json, row_number() OVER (PARTITION BY ts ORDER BY revision_ts ASC) AS rn FROM analytics.strategy_output_history_v2 WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))), base AS (SELECT d.ts AS time, JSONExtractFloat(d.row_json, 'cumulative_pnl') AS cumulative_pnl, JSONExtractFloat(d.row_json, 'benchmark') AS benchmark FROM dedup d WHERE d.rn = 1) SELECT time, cumulative_pnl - max(cumulative_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Production Drawdown`, benchmark - max(benchmark) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Benchmark Drawdown` FROM base ORDER BY time",
           "refId": "A",
@@ -442,7 +442,7 @@
         {
           "datasource": {
             "type": "grafana-clickhouse-datasource",
-            "uid": "clickhouse"
+            "uid": "dfjc5vjyfcc8wf"
           },
           "rawSql": "WITH dedup AS (SELECT ts, row_json, row_number() OVER (PARTITION BY ts ORDER BY revision_ts ASC) AS rn FROM analytics.strategy_output_history_bt_v2 WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))), base AS (SELECT d.ts AS time, JSONExtractFloat(d.row_json, 'cumulative_pnl') AS cumulative_pnl FROM dedup d WHERE d.rn = 1) SELECT time, cumulative_pnl - max(cumulative_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Backtest Drawdown` FROM base ORDER BY time",
           "refId": "B",
@@ -458,7 +458,7 @@
         {
           "datasource": {
             "type": "grafana-clickhouse-datasource",
-            "uid": "clickhouse"
+            "uid": "dfjc5vjyfcc8wf"
           },
           "rawSql": "SELECT time, agg_pnl - max(agg_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Real Trade Drawdown` FROM (SELECT toStartOfMinute(ts) AS time, sum(p * weighting) / nullIf(sum(weighting), 0) AS agg_pnl FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts) AS p FROM analytics.strategy_pnl_${resolution}_real_trade_v2 FINAL WHERE (empty('${strategy_id_derived}') OR strategy_id = ${strategy_id_derived}) AND (empty('${underlying_derived}') OR `underlying` = '${underlying_derived}') AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) GROUP BY time) ORDER BY time",
           "refId": "C",
@@ -476,7 +476,7 @@
     {
       "datasource": {
         "type": "grafana-clickhouse-datasource",
-        "uid": "clickhouse"
+        "uid": "dfjc5vjyfcc8wf"
       },
       "title": "Position \u2014 Backtest vs Production",
       "description": "Position size held by this strategy. Shows both backtest and production positions. If showing 0, verify the strategy outputs a 'position' field in its row_json.",
@@ -519,7 +519,7 @@
         {
           "datasource": {
             "type": "grafana-clickhouse-datasource",
-            "uid": "clickhouse"
+            "uid": "dfjc5vjyfcc8wf"
           },
           "rawSql": "SELECT $__timeInterval(ts) AS time, argMax(position, ts) AS `Production Position` FROM analytics.strategy_pnl_${resolution}_prod_v2 WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
           "refId": "A",
@@ -534,7 +534,7 @@
         {
           "datasource": {
             "type": "grafana-clickhouse-datasource",
-            "uid": "clickhouse"
+            "uid": "dfjc5vjyfcc8wf"
           },
           "rawSql": "SELECT $__timeInterval(ts) AS time, argMax(position, ts) AS `Backtest Position` FROM analytics.strategy_pnl_${resolution}_bt_v2 WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
           "refId": "B",
@@ -549,7 +549,7 @@
         {
           "datasource": {
             "type": "grafana-clickhouse-datasource",
-            "uid": "clickhouse"
+            "uid": "dfjc5vjyfcc8wf"
           },
           "rawSql": "SELECT $__timeInterval(ts) AS time, argMax(position, ts) AS `Real Trade Position` FROM analytics.strategy_pnl_${resolution}_real_trade_v2 FINAL WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
           "refId": "C",
@@ -567,7 +567,7 @@
     {
       "datasource": {
         "type": "grafana-clickhouse-datasource",
-        "uid": "clickhouse"
+        "uid": "dfjc5vjyfcc8wf"
       },
       "title": "Position tX (Backtest) vs Position (Production)",
       "description": "Compares backtest position_tX (delayed target position) with production position. Both from raw history tables with earliest-revision dedup.",
@@ -610,7 +610,7 @@
         {
           "datasource": {
             "type": "grafana-clickhouse-datasource",
-            "uid": "clickhouse"
+            "uid": "dfjc5vjyfcc8wf"
           },
           "rawSql": "WITH dedup AS (SELECT ts, row_json, row_number() OVER (PARTITION BY ts ORDER BY revision_ts ASC) AS rn FROM analytics.strategy_output_history_v2 WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) SELECT d.ts AS time, JSONExtractFloat(d.row_json, 'position') AS `Production Position` FROM dedup d WHERE d.rn = 1 ORDER BY d.ts ASC",
           "refId": "A",
@@ -625,7 +625,7 @@
         {
           "datasource": {
             "type": "grafana-clickhouse-datasource",
-            "uid": "clickhouse"
+            "uid": "dfjc5vjyfcc8wf"
           },
           "rawSql": "WITH dedup AS (SELECT ts, row_json, row_number() OVER (PARTITION BY ts ORDER BY revision_ts ASC) AS rn FROM analytics.strategy_output_history_bt_v2 WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) SELECT d.ts AS time, JSONExtractFloat(d.row_json, 'position_tX') AS `Backtest Position tX` FROM dedup d WHERE d.rn = 1 ORDER BY d.ts ASC",
           "refId": "B",
@@ -643,7 +643,7 @@
     {
       "datasource": {
         "type": "grafana-clickhouse-datasource",
-        "uid": "clickhouse"
+        "uid": "dfjc5vjyfcc8wf"
       },
       "title": "Price",
       "type": "timeseries",
@@ -683,7 +683,7 @@
         {
           "datasource": {
             "type": "grafana-clickhouse-datasource",
-            "uid": "clickhouse"
+            "uid": "dfjc5vjyfcc8wf"
           },
           "rawSql": "WITH dedup AS (SELECT ts, row_json, row_number() OVER (PARTITION BY ts ORDER BY revision_ts ASC) AS rn FROM analytics.strategy_output_history_v2 WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) SELECT d.ts AS time, JSONExtractFloat(d.row_json, 'price') AS `Price` FROM dedup d WHERE d.rn = 1 ORDER BY d.ts ASC",
           "refId": "A",
@@ -698,7 +698,7 @@
         {
           "datasource": {
             "type": "grafana-clickhouse-datasource",
-            "uid": "clickhouse"
+            "uid": "dfjc5vjyfcc8wf"
           },
           "rawSql": "SELECT $__timeInterval(ts) AS time, argMax(price, ts) AS `Real Trade Price` FROM analytics.strategy_pnl_${resolution}_real_trade_v2 FINAL WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
           "refId": "C",
@@ -715,7 +715,7 @@
     {
       "datasource": {
         "type": "grafana-clickhouse-datasource",
-        "uid": "clickhouse"
+        "uid": "dfjc5vjyfcc8wf"
       },
       "title": "Final Signal",
       "description": "Composite model signal that drives position sizing. If showing 0, verify the strategy outputs a 'final_signal' field in its row_json.",
@@ -757,7 +757,7 @@
         {
           "datasource": {
             "type": "grafana-clickhouse-datasource",
-            "uid": "clickhouse"
+            "uid": "dfjc5vjyfcc8wf"
           },
           "rawSql": "WITH dedup AS (SELECT ts, row_json, row_number() OVER (PARTITION BY ts ORDER BY revision_ts ASC) AS rn FROM analytics.strategy_output_history_v2 WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) SELECT d.ts AS time, JSONExtractFloat(d.row_json, 'final_signal') AS `Final Signal` FROM dedup d WHERE d.rn = 1 ORDER BY d.ts ASC",
           "refId": "A",
@@ -774,7 +774,7 @@
     {
       "datasource": {
         "type": "grafana-clickhouse-datasource",
-        "uid": "clickhouse"
+        "uid": "dfjc5vjyfcc8wf"
       },
       "title": "Feature Explorer \u2014 ${feature}",
       "description": "Pick any numeric field from the strategy's raw output. Fields ending in _signal are model outputs; others are input features. Note: data is at bar-level resolution (not 1-min interpolated).",
@@ -816,7 +816,7 @@
         {
           "datasource": {
             "type": "grafana-clickhouse-datasource",
-            "uid": "clickhouse"
+            "uid": "dfjc5vjyfcc8wf"
           },
           "rawSql": "SELECT ts AS time, JSONExtractFloat(row_json, '${feature}') AS feature_value FROM analytics.strategy_output_history_v2 WHERE strategy_table_name = '${strategy_instance}' AND '${feature}' != '' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) ORDER BY time",
           "refId": "A",
@@ -839,7 +839,7 @@
         "type": "query",
         "datasource": {
           "type": "grafana-clickhouse-datasource",
-          "uid": "clickhouse"
+          "uid": "dfjc5vjyfcc8wf"
         },
         "definition": "SELECT strategy_table_name FROM analytics.strategy_output_history_v2 GROUP BY strategy_table_name ORDER BY min(strategy_no)",
         "query": "SELECT strategy_table_name FROM analytics.strategy_output_history_v2 GROUP BY strategy_table_name ORDER BY min(strategy_no)",
@@ -854,7 +854,7 @@
         "type": "query",
         "datasource": {
           "type": "grafana-clickhouse-datasource",
-          "uid": "clickhouse"
+          "uid": "dfjc5vjyfcc8wf"
         },
         "definition": "SELECT DISTINCT toString(strategy_id) FROM analytics.strategy_output_history_v2 WHERE strategy_table_name = '${strategy_instance}'",
         "query": "SELECT DISTINCT toString(strategy_id) FROM analytics.strategy_output_history_v2 WHERE strategy_table_name = '${strategy_instance}'",
@@ -870,7 +870,7 @@
         "type": "query",
         "datasource": {
           "type": "grafana-clickhouse-datasource",
-          "uid": "clickhouse"
+          "uid": "dfjc5vjyfcc8wf"
         },
         "definition": "SELECT DISTINCT underlying FROM analytics.strategy_output_history_v2 WHERE strategy_table_name = '${strategy_instance}'",
         "query": "SELECT DISTINCT underlying FROM analytics.strategy_output_history_v2 WHERE strategy_table_name = '${strategy_instance}'",
@@ -886,7 +886,7 @@
         "type": "query",
         "datasource": {
           "type": "grafana-clickhouse-datasource",
-          "uid": "clickhouse"
+          "uid": "dfjc5vjyfcc8wf"
         },
         "definition": "SELECT DISTINCT arrayJoin(JSONExtractKeys(row_json)) AS k FROM analytics.strategy_output_history_v2 WHERE strategy_table_name = '${strategy_instance}' AND ts >= now() - INTERVAL 7 DAY ORDER BY k",
         "query": "SELECT DISTINCT arrayJoin(JSONExtractKeys(row_json)) AS k FROM analytics.strategy_output_history_v2 WHERE strategy_table_name = '${strategy_instance}' AND ts >= now() - INTERVAL 7 DAY ORDER BY k",
@@ -901,7 +901,7 @@
         "type": "query",
         "datasource": {
           "type": "grafana-clickhouse-datasource",
-          "uid": "clickhouse"
+          "uid": "dfjc5vjyfcc8wf"
         },
         "query": "SELECT multiIf(${__to} - ${__from} < 604800000, '1min', ${__to} - ${__from} < 7776000000, '1hour', '1day') FROM system.one",
         "refresh": 2,
