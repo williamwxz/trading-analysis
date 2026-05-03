@@ -21,8 +21,9 @@ mypy .
 # Tests (unit tests require no external services)
 pytest
 pytest tests/test_pnl_compute.py -v
-pytest -m unit        # fast, no external deps
-pytest -m integration # requires live ClickHouse/S3
+pytest -m unit                    # fast, no external deps
+pytest -m integration             # requires live ClickHouse/S3
+pytest -m streaming_integration   # requires Docker + Binance network
 
 # Local Dagster (requires Postgres for metadata)
 docker compose up -d postgres
@@ -31,12 +32,40 @@ dagster dev           # http://localhost:3000
 # Full local stack (Dagster only — Grafana is Grafana Cloud, not local)
 docker compose up -d
 # Dagster: http://localhost:3000
+
+# Access production Dagster UI via SSM port-forward (no VPN required)
+./scripts/dagster-local.sh        # opens http://localhost:3000
+./scripts/dagster-local.sh 3001   # use alternate port if 3000 is busy
+# Requires: aws cli + session-manager-plugin, profile AdministratorAccess-068704208855
 ```
 
 ## Architecture
 
+### Services
+
+Three independent ECS Fargate services, each with its own Dockerfile:
+
+| Service | Directory | Role |
+|---------|-----------|------|
+| `trading-analysis-dagster` | `trading_dagster/` | Dagster orchestration — batch PnL refresh, market data backfill |
+| `trading-analysis-streaming` | `streaming/` | Binance WebSocket → Kafka/Redpanda topic `binance.price.ticks` |
+| `trading-analysis-pnl-consumer` | `pnl_consumer/` | Kafka consumer → real-time PnL → ClickHouse |
+
+Adding new instruments requires updating `INSTRUMENTS` in both `streaming/binance_ws_consumer.py` and the Dagster market data assets.
+
 ### Data Flow
 
+**Real-time path** (sub-minute latency):
+```
+Binance WebSocket (1m closed candles)
+    → streaming/binance_ws_consumer.py
+    → Kafka topic: binance.price.ticks  (CandleEvent JSON)
+    → pnl_consumer/pnl_consumer.py  (GROUP_ID: flink-pnl-consumer, flush every 10 candles)
+    → analytics.futures_price_1min
+    → analytics.strategy_pnl_1min_prod_v2
+```
+
+**Batch path** (Dagster, every ~5 min or daily):
 ```
 Binance Futures REST API (every 5 min, CCXT)
     → analytics.futures_price_1min
@@ -120,6 +149,13 @@ GitHub Actions drives all CI/CD. Workflows live in `.github/workflows/`.
 | Workflow | Trigger | Stages |
 |----------|---------|--------|
 | `ci-cd.yml` | Push to `main` | test → build + terraform (parallel) → deploy-dagster + deploy-grafana-cloud (parallel, terraform must pass first) |
+
+Each service rebuilds only if its paths changed (via `dorny/paths-filter`). `workflow_dispatch` forces rebuild of all services regardless. Path filters:
+- `dagster`: `trading_dagster/**`, `Dockerfile`, `pyproject.toml`
+- `streaming`: `streaming/**`
+- `pnl-consumer`: `pnl_consumer/**`
+- `terraform`: `infra/terraform/**`
+- `grafana`: `infra/grafana/**`
 
 AWS auth uses GitHub OIDC — no static credentials stored in GitHub. Each job that needs AWS access declares `permissions: id-token: write` at the job level and assumes the `trading-analysis-github-actions` IAM role via `aws-actions/configure-aws-credentials@v4`.
 
