@@ -615,6 +615,45 @@ resource "aws_cloudwatch_log_metric_filter" "ws_messages_published" {
   }
 }
 
+resource "aws_cloudwatch_log_metric_filter" "clickhouse_sink_prod" {
+  name           = "pnl-consumer-clickhouse-sink-prod"
+  log_group_name = aws_cloudwatch_log_group.streaming.name
+  pattern        = "\"ClickHouseSink prod\""
+
+  metric_transformation {
+    name      = "ClickHouseSinkProd"
+    namespace = "trading-analysis"
+    value     = "1"
+    unit      = "Count"
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "clickhouse_sink_real_trade" {
+  name           = "pnl-consumer-clickhouse-sink-real-trade"
+  log_group_name = aws_cloudwatch_log_group.streaming.name
+  pattern        = "\"ClickHouseSink real_trade\""
+
+  metric_transformation {
+    name      = "ClickHouseSinkRealTrade"
+    namespace = "trading-analysis"
+    value     = "1"
+    unit      = "Count"
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "clickhouse_sink_bt" {
+  name           = "pnl-consumer-clickhouse-sink-bt"
+  log_group_name = aws_cloudwatch_log_group.streaming.name
+  pattern        = "\"ClickHouseSink bt\""
+
+  metric_transformation {
+    name      = "ClickHouseSinkBt"
+    namespace = "trading-analysis"
+    value     = "1"
+    unit      = "Count"
+  }
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CloudWatch Dashboard — streaming throughput
 # ─────────────────────────────────────────────────────────────────────────────

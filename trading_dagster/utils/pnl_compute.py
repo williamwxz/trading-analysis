@@ -154,13 +154,20 @@ ORDER BY strategy_table_name, ts
 
 
 def fetch_new_bars_bt(
-    source_table: str, underlying: str, since: str,
+    source_table: str, underlying: str, since: str, ts_end: str | None = None,
 ) -> List[dict]:
     """Fetch new bars for bt: argMin(row_json, revision_ts) and extract cumulative_pnl.
 
     execution_ts = ts + tf_minutes (bar close), which is when the position takes effect
     and PnL starts being counted.
+
+    Daily path: since=start_ts, ts_end=end_ts — filter on ts in [since, ts_end).
+    Live path: since=watermark, ts_end=None — filter on revision_ts >= since.
     """
+    if ts_end is not None:
+        ts_filter = f"toDateTime(ts) >= toDateTime('{since}') AND toDateTime(ts) < toDateTime('{ts_end}')"
+    else:
+        ts_filter = f"revision_ts >= toDateTime('{since}')"
     sql = f"""\
 SELECT
     strategy_table_name,
@@ -178,7 +185,7 @@ SELECT
 FROM analytics.{source_table}
 WHERE underlying = '{underlying}'
   AND strategy_table_name NOT LIKE 'manual_probe%'
-  AND revision_ts >= toDateTime('{since}')
+  AND {ts_filter}
 GROUP BY strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, ts
 ORDER BY strategy_table_name, ts
 """
@@ -308,10 +315,11 @@ def fetch_prices_multi(
     underlyings: List[str], ts_min: str, ts_max: str,
     client=None,
     extend_minutes: int = 1440,
+    price_column: str = "open",
 ) -> Dict[str, Dict[str, float]]:
-    """Fetch 1-min open prices for multiple underlyings in a single query.
+    """Fetch 1-min prices for multiple underlyings in a single query.
 
-    Returns {underlying: {ts_string: open}} so the per-underlying loop can
+    Returns {underlying: {ts_string: price}} so the per-underlying loop can
     slice its own dict without firing a separate ClickHouse query each time.
     This avoids N sequential scans on futures_price_1min (one per underlying)
     which can exceed ClickHouse Cloud's memory limit for large partition runs.
@@ -319,6 +327,7 @@ def fetch_prices_multi(
     extend_minutes: extra minutes past ts_max to fetch (default 1440 = 1 day,
     for the live path where ts_max is the last bar open time). Pass 0 for
     the daily partition path where ts_max is already the exclusive end boundary.
+    price_column: "open" (default, prod/real_trade) or "close" (bt path).
     """
     if not underlyings:
         return {}
@@ -326,7 +335,7 @@ def fetch_prices_multi(
     instrument_list = ", ".join(f"'{i}'" for i in instruments)
     extend_clause = f" + toIntervalMinute({extend_minutes})" if extend_minutes > 0 else ""
     sql = f"""\
-SELECT instrument, toString(ts), open
+SELECT instrument, toString(ts), {price_column}
 FROM analytics.futures_price_1min
 WHERE exchange = 'binance'
   AND instrument IN ({instrument_list})

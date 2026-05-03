@@ -27,10 +27,12 @@ from ..utils.pnl_compute import (
     fetch_anchors,
     PROD_REAL_TRADE_START_DATE,
     BT_START_DATE,
+    fetch_new_bars_bt,
     fetch_new_bars_real_trade,
     fetch_prices,
     fetch_prices_multi,
     iter_compute_prod_pnl,
+    compute_bt_pnl,
     compute_real_trade_pnl,
     PROD_INSERT_COLUMNS,
     REAL_TRADE_INSERT_COLUMNS,
@@ -188,18 +190,6 @@ def _refresh_pnl_partitioned(context, target_table: str, source_table: str, labe
 
     return MaterializeResult(metadata={"partition": date_str, "rows_inserted": total_rows})
 
-_TF_MINUTES_SQL = (
-    "multiIf("
-    "config_timeframe='5m',5,"
-    "config_timeframe='10m',10,"
-    "config_timeframe='15m',15,"
-    "config_timeframe='30m',30,"
-    "config_timeframe='1h',60,"
-    "config_timeframe='4h',240,"
-    "config_timeframe='1d',1440,"
-    "5)"
-)
-
 def _refresh_pnl_bt(context) -> MaterializeResult:
     target_table = "strategy_pnl_1min_bt_v2"
     source_table = "strategy_output_history_bt_v2"
@@ -211,80 +201,35 @@ def _refresh_pnl_bt(context) -> MaterializeResult:
     end_ts = end_dt.strftime("%Y-%m-%d %H:%M:%S")
 
     client = get_client()
+    context.log.info(f"Backfilling backtest PnL for {date_str}")
+
     execute(
         f"DELETE FROM analytics.{target_table} "
         f"WHERE toDateTime(ts) >= toDateTime('{start_ts}') AND toDateTime(ts) < toDateTime('{end_ts}') "
         f"AND source='backtest'",
-        client
+        client,
     )
 
-    tf_sql = _TF_MINUTES_SQL
-    sql = f"""\
-INSERT INTO analytics.{target_table}
-    (strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe,
-     source, version, ts, cumulative_pnl, benchmark, position, price,
-     final_signal, weighting, updated_at)
-WITH bars AS (
-    SELECT
-        strategy_table_name,
-        strategy_id,
-        strategy_name,
-        underlying,
-        config_timeframe,
-        {tf_sql} AS tf_minutes,
-        argMin(weighting, revision_ts)                                    AS weighting,
-        toDateTime(ts) + toIntervalMinute({tf_sql})                       AS execution_ts,
-        JSONExtractFloat(argMin(row_json, revision_ts), 'cumulative_pnl') AS anchor_pnl,
-        JSONExtractFloat(argMin(row_json, revision_ts), 'position')       AS position,
-        JSONExtractFloat(argMin(row_json, revision_ts), 'price')          AS bar_price,
-        JSONExtractFloat(argMin(row_json, revision_ts), 'final_signal')   AS final_signal,
-        JSONExtractFloat(argMin(row_json, revision_ts), 'benchmark')      AS benchmark
-    FROM analytics.{source_table}
-    WHERE toDateTime(ts) >= toDateTime('{start_ts}') AND toDateTime(ts) < toDateTime('{end_ts}')
-      AND strategy_table_name NOT LIKE 'manual_probe%'
-    GROUP BY strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, ts
-),
-bars_with_next AS (
-    SELECT
-        *,
-        leadInFrame(execution_ts, 1, execution_ts + toIntervalMinute(tf_minutes))
-            OVER (PARTITION BY strategy_table_name ORDER BY execution_ts
-                  ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS next_execution_ts
-    FROM bars
-)
-SELECT
-    b.strategy_table_name,
-    b.strategy_id,
-    b.strategy_name,
-    b.underlying,
-    b.config_timeframe,
-    'backtest'                                                                     AS source,
-    'v2'                                                                           AS version,
-    p.ts                                                                           AS ts,
-    if(b.bar_price != 0,
-       b.anchor_pnl + b.position * (p.close - b.bar_price) / b.bar_price,
-       b.anchor_pnl)                                                               AS cumulative_pnl,
-    b.benchmark,
-    b.position,
-    p.close                                                                        AS price,
-    b.final_signal,
-    b.weighting,
-    now()                                                                          AS updated_at
-FROM bars_with_next b
-JOIN analytics.futures_price_1min p
-    ON p.instrument = if(endsWith(upper(b.underlying), 'USDT'), upper(b.underlying), concat(upper(b.underlying), 'USDT'))
-   AND p.ts >= b.execution_ts
-   AND p.ts < b.next_execution_ts
-ORDER BY b.strategy_table_name, p.ts
-"""
-    execute(sql, client)
+    underlyings = _get_underlyings(source_table)
 
-    count_row = client.query(
-        f"SELECT count() FROM analytics.{target_table} "
-        f"WHERE toDateTime(ts) >= toDateTime('{start_ts}') AND toDateTime(ts) < toDateTime('{end_ts}') "
-        f"AND source='backtest'"
+    # Fetch close prices for all underlyings in one query (bt uses close, not open).
+    # extend_minutes=0: end_ts is already the exclusive partition boundary.
+    all_prices = fetch_prices_multi(
+        underlyings, start_ts, end_ts, client, extend_minutes=0, price_column="close"
     )
-    total_rows = count_row.result_rows[0][0] if count_row.result_rows else 0
+
+    total_rows = 0
+    for underlying in underlyings:
+        bars = fetch_new_bars_bt(source_table, underlying, start_ts, ts_end=end_ts)
+        if not bars:
+            all_prices.pop(underlying, None)
+            continue
+
+        prices = all_prices.pop(underlying, {})
+        rows = compute_bt_pnl(bars, prices)
+        _prepare_rows_for_clickhouse(rows)
+        total_rows += insert_rows(f"analytics.{target_table}", PROD_INSERT_COLUMNS, rows, client)
+        del bars, prices
 
     return MaterializeResult(metadata={"partition": date_str, "rows_inserted": total_rows})
 

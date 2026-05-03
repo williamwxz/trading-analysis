@@ -349,6 +349,12 @@ def run() -> None:
                     n_rt,
                     n_bt,
                 )
+                if n_prod:
+                    logger.info("ClickHouseSink prod rows=%d", n_prod)
+                if n_rt:
+                    logger.info("ClickHouseSink real_trade rows=%d", n_rt)
+                if n_bt:
+                    logger.info("ClickHouseSink bt rows=%d", n_bt)
 
     except Exception:
         logger.exception("Fatal error in consumer loop")
