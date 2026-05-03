@@ -14,7 +14,11 @@ from ..assets.pnl_strategy_v2 import (
     pnl_bt_v2_daily_asset,
     pnl_real_trade_v2_daily_asset,
 )
-from ..assets.pnl_rollup import pnl_1hour_rollup_asset
+from ..assets.pnl_rollup import (
+    pnl_1hour_prod_rollup_asset,
+    pnl_1hour_real_trade_rollup_asset,
+    pnl_1hour_bt_rollup_asset,
+)
 from ..assets.clickhouse_connectivity_check import clickhouse_connectivity_check_asset
 from ..assets.postgres_cleanup import postgres_cleanup_asset
 from ..sensors.automation_sensors import build_automation_sensors
@@ -28,7 +32,9 @@ all_assets = [
     pnl_bt_v2_daily_asset,
     pnl_real_trade_v2_daily_asset,
     # Rollups & Scans
-    pnl_1hour_rollup_asset,
+    pnl_1hour_prod_rollup_asset,
+    pnl_1hour_real_trade_rollup_asset,
+    pnl_1hour_bt_rollup_asset,
     # Infra checks
     clickhouse_connectivity_check_asset,
     postgres_cleanup_asset,

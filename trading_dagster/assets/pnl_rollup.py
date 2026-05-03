@@ -1,58 +1,67 @@
 """
-ClickHouse PnL Rollup Asset
+ClickHouse PnL Hourly Rollup Assets
 
-Incrementally rolls up analytics.strategy_pnl_1min_*_v2 into
-analytics.strategy_pnl_1hour_*_v2.
+Daily-partitioned assets that roll up analytics.strategy_pnl_1min_*_v2
+into analytics.strategy_pnl_1hour_*_v2.
 
-V2-only — no v1 rollup pairs (simplified from falcon-lakehouse).
+One asset per variant (prod, bt, real_trade), each with the same
+DailyPartitionsDefinition as its upstream 1min asset.
 """
 
-import time
-from typing import List, Optional, Tuple
+from datetime import datetime, timedelta, timezone
 
 from dagster import (
-    AutomationCondition,
     AssetExecutionContext,
+    AutomationCondition,
+    DailyPartitionsDefinition,
     MaterializeResult,
-    MetadataValue,
     asset,
 )
 
-from ..utils.clickhouse_client import execute, query_rows, query_scalar
+from ..utils.clickhouse_client import execute, get_client, query_scalar
+from ..utils.pnl_compute import BT_START_DATE, PROD_REAL_TRADE_START_DATE
+
+_prod_real_trade_partitions = DailyPartitionsDefinition(
+    start_date=PROD_REAL_TRADE_START_DATE
+)
+_bt_partitions = DailyPartitionsDefinition(start_date=BT_START_DATE)
 
 
-def _get_underlyings(source_table: str) -> List[str]:
-    rows = query_rows(
-        f"SELECT DISTINCT underlying FROM {source_table} ORDER BY underlying"
-    )
-    return [str(r[0]) for r in rows]
-
-
-def _get_source_watermark(underlying: str, source_table: str) -> Optional[str]:
-    v = query_scalar(
-        f"SELECT toString(max(updated_at)) FROM {source_table} WHERE underlying = '{underlying}'"
-    )
-    v = str(v).strip() if v else None
-    return None if not v or v == "1970-01-01 00:00:00" else v
-
-
-def _get_rollup_watermark(underlying: str, rollup_table: str) -> Optional[str]:
-    v = query_scalar(
-        f"SELECT toString(max(updated_at)) FROM {rollup_table} FINAL WHERE underlying = '{underlying}'"
-    )
-    v = str(v).strip() if v else None
-    return None if not v or v == "1970-01-01 00:00:00" else v
-
-
-def _rollup_sql(
-    underlying: str,
+def _rollup_day(
+    context: AssetExecutionContext,
     source_table: str,
-    rollup_table: str,
-    bucket_fn: str,
-    since: str,
-) -> str:
-    return f"""\
-INSERT INTO {rollup_table}
+    target_table: str,
+    extra_agg_cols: str = "",
+) -> MaterializeResult:
+    date_str = context.partition_key
+    start_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    end_dt = start_dt + timedelta(days=1)
+    start_ts = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+    end_ts = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    # Build extra column fragments for inner and outer SELECT
+    inner_extra = (", " + extra_agg_cols) if extra_agg_cols else ""
+    outer_extra = ""
+    if extra_agg_cols:
+        col_aggs = []
+        for col in [c.strip() for c in extra_agg_cols.split(",")]:
+            if col == "traded":
+                col_aggs.append(f"any({col}) AS {col}")
+            else:
+                col_aggs.append(f"argMax({col}, src_ts) AS {col}")
+        outer_extra = ",\n    " + ",\n    ".join(col_aggs)
+
+    client = get_client()
+
+    execute(
+        f"DELETE FROM {target_table} "
+        f"WHERE toDateTime(ts) >= toDateTime('{start_ts}') "
+        f"AND toDateTime(ts) < toDateTime('{end_ts}')",
+        client=client,
+    )
+
+    sql = f"""\
+INSERT INTO {target_table}
 SELECT
     strategy_table_name,
     strategy_id,
@@ -61,119 +70,97 @@ SELECT
     config_timeframe,
     source,
     version,
-    bucket                          AS ts,
+    toStartOfHour(src_ts)           AS ts,
     argMax(cumulative_pnl, src_ts)  AS cumulative_pnl,
     argMax(benchmark, src_ts)       AS benchmark,
     argMax(position, src_ts)        AS position,
     argMax(price, src_ts)           AS price,
     argMax(final_signal, src_ts)    AS final_signal,
     argMax(weighting, src_ts)       AS weighting,
-    now()                           AS updated_at
+    now()                           AS updated_at{outer_extra}
 FROM (
     SELECT
         strategy_table_name, strategy_id, strategy_name, underlying,
         config_timeframe, source, version,
         ts AS src_ts,
-        {bucket_fn}(ts) AS bucket,
-        cumulative_pnl, benchmark, position, price, final_signal, weighting
+        cumulative_pnl, benchmark, position, price, final_signal, weighting{inner_extra}
     FROM {source_table} FINAL
-    WHERE underlying = '{underlying}'
-      AND ts >= toDateTime('{since}')
+    WHERE ts >= toDateTime('{start_ts}')
+      AND ts < toDateTime('{end_ts}')
 )
 GROUP BY
     strategy_table_name, strategy_id, strategy_name, underlying,
-    config_timeframe, source, version, bucket
+    config_timeframe, source, version, toStartOfHour(src_ts)
 """
+    execute(sql, client=client)
 
-
-# V2-only rollup pairs
-_ROLLUP_PAIRS: List[Tuple[str, str]] = [
-    ("analytics.strategy_pnl_1min_prod_v2",       "analytics.strategy_pnl_{resolution}_prod_v2"),
-    ("analytics.strategy_pnl_1min_bt_v2",         "analytics.strategy_pnl_{resolution}_bt_v2"),
-    ("analytics.strategy_pnl_1min_real_trade_v2",  "analytics.strategy_pnl_{resolution}_real_trade_v2"),
-]
-
-
-def _run_rollup(
-    context: AssetExecutionContext,
-    resolution: str,
-    bucket_fn: str,
-    buffer_hours: int,
-) -> MaterializeResult:
-    refreshed: List[str] = []
-    skipped: List[str] = []
-    failed: List[str] = []
-    total_elapsed = 0.0
-
-    for source_table, rollup_tmpl in _ROLLUP_PAIRS:
-        rollup_table = rollup_tmpl.format(resolution=resolution)
-        variant = source_table.split("_")[-1]  # prod_v2, bt_v2, real_trade_v2
-
-        underlyings = _get_underlyings(source_table)
-        context.log.info(f"[{variant}] Underlyings: {underlyings}")
-
-        for underlying in underlyings:
-            source_wm = _get_source_watermark(underlying, source_table)
-            if not source_wm:
-                skipped.append(f"{variant}/{underlying}")
-                continue
-
-            rollup_wm = _get_rollup_watermark(underlying, rollup_table)
-            if rollup_wm and source_wm <= rollup_wm:
-                skipped.append(f"{variant}/{underlying}")
-                continue
-
-            since = query_scalar(
-                f"SELECT if(max(ts) = toDateTime(0), '2020-01-01 00:00:00', "
-                f"toString(max(ts) - INTERVAL {buffer_hours} HOUR)) "
-                f"FROM {rollup_table} FINAL WHERE underlying = '{underlying}'"
-            ) or "2020-01-01 00:00:00"
-            since = str(since).strip() or "2020-01-01 00:00:00"
-            context.log.info(f"[{variant}/{underlying}] Rolling up since {since}")
-
-            sql = _rollup_sql(underlying, source_table, rollup_table, bucket_fn, since)
-            t0 = time.time()
-            try:
-                execute(sql)
-                elapsed = time.time() - t0
-                total_elapsed += elapsed
-                context.log.info(f"[{variant}/{underlying}] Done in {elapsed:.1f}s")
-                refreshed.append(f"{variant}/{underlying}")
-            except Exception as exc:
-                context.log.error(f"[{variant}/{underlying}] Failed: {exc}")
-                failed.append(f"{variant}/{underlying}")
-
-    if failed:
-        raise RuntimeError(f"Failed: {failed}")
-
+    rows_inserted = int(
+        query_scalar(
+            f"SELECT count() FROM {target_table} FINAL "
+            f"WHERE ts >= toDateTime('{start_ts}') AND ts < toDateTime('{end_ts}')",
+            client=client,
+        )
+        or 0
+    )
     return MaterializeResult(
-        metadata={
-            "refreshed": MetadataValue.text(", ".join(refreshed) or "none"),
-            "skipped": MetadataValue.text(", ".join(skipped) or "none"),
-            "elapsed_seconds": MetadataValue.float(round(total_elapsed, 1)),
-        }
+        metadata={"partition": date_str, "rows_inserted": rows_inserted}
     )
 
 
 @asset(
-    name="pnl_1hour_rollup",
+    name="pnl_1hour_prod_rollup",
     group_name="strategy_pnl",
-    deps=[
-        "pnl_prod_v2_daily",
-        "pnl_real_trade_v2_daily",
-    ],
-    automation_condition=(
-        AutomationCondition.on_cron("15 * * * *")
-        & ~AutomationCondition.in_progress()
-    ),
-    description=(
-        "Rolls up strategy_pnl_1min_*_v2 → strategy_pnl_1hour_*_v2. "
-        "Runs 15 min past each hour."
-    ),
+    deps=["pnl_prod_v2_daily"],
+    partitions_def=_prod_real_trade_partitions,
+    automation_condition=AutomationCondition.eager(),
     compute_kind="clickhouse",
+    description="Rolls up strategy_pnl_1min_prod_v2 → strategy_pnl_1hour_prod_v2, daily partition.",
 )
-def pnl_1hour_rollup_asset(context: AssetExecutionContext) -> MaterializeResult:
-    return _run_rollup(context, resolution="1hour", bucket_fn="toStartOfHour", buffer_hours=24)
+def pnl_1hour_prod_rollup_asset(context: AssetExecutionContext) -> MaterializeResult:
+    return _rollup_day(
+        context,
+        source_table="analytics.strategy_pnl_1min_prod_v2",
+        target_table="analytics.strategy_pnl_1hour_prod_v2",
+    )
 
 
-__all__ = ["pnl_1hour_rollup_asset"]
+@asset(
+    name="pnl_1hour_real_trade_rollup",
+    group_name="strategy_pnl",
+    deps=["pnl_real_trade_v2_daily"],
+    partitions_def=_prod_real_trade_partitions,
+    automation_condition=AutomationCondition.eager(),
+    compute_kind="clickhouse",
+    description="Rolls up strategy_pnl_1min_real_trade_v2 → strategy_pnl_1hour_real_trade_v2, daily partition.",
+)
+def pnl_1hour_real_trade_rollup_asset(context: AssetExecutionContext) -> MaterializeResult:
+    return _rollup_day(
+        context,
+        source_table="analytics.strategy_pnl_1min_real_trade_v2",
+        target_table="analytics.strategy_pnl_1hour_real_trade_v2",
+        extra_agg_cols="closing_ts, execution_ts, traded",
+    )
+
+
+@asset(
+    name="pnl_1hour_bt_rollup",
+    group_name="strategy_pnl",
+    deps=["pnl_bt_v2_daily"],
+    partitions_def=_bt_partitions,
+    automation_condition=AutomationCondition.eager(),
+    compute_kind="clickhouse",
+    description="Rolls up strategy_pnl_1min_bt_v2 → strategy_pnl_1hour_bt_v2, daily partition.",
+)
+def pnl_1hour_bt_rollup_asset(context: AssetExecutionContext) -> MaterializeResult:
+    return _rollup_day(
+        context,
+        source_table="analytics.strategy_pnl_1min_bt_v2",
+        target_table="analytics.strategy_pnl_1hour_bt_v2",
+    )
+
+
+__all__ = [
+    "pnl_1hour_prod_rollup_asset",
+    "pnl_1hour_real_trade_rollup_asset",
+    "pnl_1hour_bt_rollup_asset",
+]
