@@ -39,18 +39,6 @@ def _make_strategy(position=1.0, instrument="BTCUSDT") -> StrategyBar:
     )
 
 
-def _no_lookups(strategies=None, revisions=None, bt_bars=None):
-    """Context manager that patches all three lookup functions."""
-    return (
-        patch(f"{_MOD}.fetch_strategies_for_candle", return_value=strategies or []),
-        patch(
-            f"{_MOD}.fetch_real_trade_revisions_for_candle",
-            return_value=revisions or [],
-        ),
-        patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=bt_bars or []),
-    )
-
-
 @pytest.mark.unit
 def test_process_candle_produces_pnl_rows():
     state_prod = AnchorState()
