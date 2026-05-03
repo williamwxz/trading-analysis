@@ -180,6 +180,7 @@ FROM (
         config_timeframe,
         weighting,
         revision_ts,
+        updated_at,
         row_json,
         toDateTime(toDateTime(ts) + toIntervalMinute(multiIf(
             config_timeframe = '1m',  1,
