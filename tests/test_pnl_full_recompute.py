@@ -11,17 +11,17 @@ All ClickHouse calls are mocked. Tests verify:
 - empty underlying (no bars) is skipped gracefully
 """
 
-from datetime import datetime, timezone
-from unittest.mock import MagicMock, call, patch
-
-import pytest
+from datetime import date
+from unittest.mock import MagicMock, patch
 
 # Import will fail until Task 2 adds the function — that's expected.
-from trading_dagster.assets.pnl_strategy_v2 import _recompute_pnl_full
+from trading_dagster.assets.pnl_strategy_v2 import (
+    _recompute_pnl_full,
+)
 from trading_dagster.utils.pnl_compute import (
     PROD_INSERT_COLUMNS,
-    REAL_TRADE_INSERT_COLUMNS,
     PROD_REAL_TRADE_START_DATE,
+    REAL_TRADE_INSERT_COLUMNS,
 )
 
 
@@ -56,7 +56,7 @@ def _make_rt_bar(stn="strat_a", ts="2026-02-27 00:00:00", tf="5m", pos=1.0):
     }
 
 
-class TestRecomputePnlFullProd:
+class TestRecomputePnlFull:
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
@@ -67,7 +67,7 @@ class TestRecomputePnlFullProd:
     def test_prod_fetches_bars_for_full_range(
         self, mock_client, mock_get_und, mock_qd, mock_anchors, mock_prices, mock_insert
     ):
-        """Bars query must cover PROD_REAL_TRADE_START_DATE to now for all underlyings."""
+        """Bars query covers PROD_REAL_TRADE_START_DATE to now for all underlyings."""
         mock_get_und.return_value = ["btc"]
         mock_qd.return_value = [_make_bar()]
         mock_anchors.return_value = {}
@@ -75,7 +75,7 @@ class TestRecomputePnlFullProd:
         mock_insert.return_value = 5
 
         ctx = _make_context()
-        result = _recompute_pnl_full(
+        _recompute_pnl_full(
             ctx,
             target_table="strategy_pnl_1min_prod_v2",
             source_table="strategy_output_history_v2",
@@ -89,6 +89,8 @@ class TestRecomputePnlFullProd:
         assert PROD_REAL_TRADE_START_DATE in call_args
         assert "strategy_output_history_v2" in call_args
         assert "btc" in call_args
+        today_str = date.today().strftime("%Y-%m-%d")
+        assert today_str in call_args
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
@@ -177,7 +179,9 @@ class TestRecomputePnlFullProd:
             mode="real_trade",
         )
 
+        table_arg = mock_insert.call_args[0][0]
         cols_arg = mock_insert.call_args[0][1]
+        assert table_arg == "analytics.strategy_pnl_1min_real_trade_v2"
         assert cols_arg == REAL_TRADE_INSERT_COLUMNS
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
