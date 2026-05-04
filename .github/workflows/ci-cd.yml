@@ -28,6 +28,7 @@ jobs:
               - 'trading_dagster/**'
               - 'Dockerfile'
               - 'pyproject.toml'
+              - 'dagster.yaml'
               - '.github/workflows/ci-cd.yml'
             streaming:
               - 'streaming/**'
