@@ -115,7 +115,7 @@ SELECT
 FROM analytics.{source_table}
 WHERE underlying = '{underlying}'
   AND strategy_table_name NOT LIKE 'manual_probe%'
-  AND ts >= toDateTime('{start_ts}') AND ts < toDateTime('{end_ts}')
+  AND toDateTime(ts) >= toDateTime('{start_ts}') AND toDateTime(ts) < toDateTime('{end_ts}')
 GROUP BY strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, ts
 ORDER BY strategy_table_name, ts
 """
