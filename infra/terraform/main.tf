@@ -380,7 +380,7 @@ resource "aws_ecs_task_definition" "dagster" {
       ]
 
       healthCheck = {
-        command     = ["CMD-SHELL", "curl -f http://localhost:3000/server_info || exit 1"]
+        command     = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:3000/server_info', timeout=3)\" || exit 1"]
         interval    = 15
         timeout     = 5
         retries     = 3
