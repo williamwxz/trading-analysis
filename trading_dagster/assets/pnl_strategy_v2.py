@@ -5,6 +5,7 @@ Partitioned daily assets for historical PnL backfills (prod, bt, real_trade).
 Real-time PnL is handled by the pnl_consumer (Kafka → ClickHouse).
 """
 
+from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 
 from dagster import (
@@ -76,7 +77,7 @@ def _prepare_rows_for_clickhouse(rows: list[list]) -> list[list]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _recompute_pnl_full(context, target_table: str, source_table: str, label: str, insert_columns: list, mode: str):
+def _recompute_pnl_full(context: AssetExecutionContext, target_table: str, source_table: str, label: str, insert_columns: list, mode: str):
     """Recompute PnL for all underlyings from PROD_REAL_TRADE_START_DATE to now.
 
     mode: "prod" uses iter_compute_prod_pnl; "real_trade" uses compute_real_trade_pnl.
@@ -153,12 +154,27 @@ ORDER BY strategy_table_name, toDateTime(ts), revision_ts
                 n = insert_rows(f"analytics.{target_table}", insert_columns, strategy_rows, client)
                 total_rows += n
                 context.log.info(f"  [{underlying}] inserted {n} rows for strategy {_stn}")
+        elif mode == "real_trade":
+            # Group bars by strategy so we can process and free each one independently,
+            # avoiding accumulating all strategies' expanded rows into one flat list.
+            by_strategy: dict[str, list] = defaultdict(list)
+            for bar in rows_dict:
+                by_strategy[bar["strategy_table_name"]].append(bar)
+
+            for stn, strategy_bars in by_strategy.items():
+                strategy_rows = compute_real_trade_pnl(strategy_bars, anchors, prices)
+                _prepare_rows_for_clickhouse(strategy_rows)
+                n = insert_rows(
+                    f"analytics.{target_table}", insert_columns, strategy_rows, client
+                )
+                total_rows += n
+                context.log.info(
+                    f"  [{underlying}] inserted {n} real_trade rows for strategy {stn}"
+                )
         else:
-            all_rows = compute_real_trade_pnl(rows_dict, anchors, prices)
-            _prepare_rows_for_clickhouse(all_rows)
-            n = insert_rows(f"analytics.{target_table}", insert_columns, all_rows, client)
-            total_rows += n
-            context.log.info(f"  [{underlying}] inserted {n} real_trade rows")
+            raise ValueError(
+                f"Unknown mode: {mode!r}. Expected 'prod' or 'real_trade'."
+            )
 
         del rows_dict, prices, all_prices
 
