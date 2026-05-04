@@ -33,10 +33,8 @@ dagster dev           # http://localhost:3000
 docker compose up -d
 # Dagster: http://localhost:3000
 
-# Access production Dagster UI via SSM port-forward (no VPN required)
-./scripts/dagster-local.sh        # opens http://localhost:3000
-./scripts/dagster-local.sh 3001   # use alternate port if 3000 is busy
-# Requires: aws cli + session-manager-plugin, profile AdministratorAccess-068704208855
+# Access production Dagster UI (ALB — no tooling required)
+# http://trading-analysis-dagster-944050731.ap-northeast-1.elb.amazonaws.com
 ```
 
 ## Architecture
