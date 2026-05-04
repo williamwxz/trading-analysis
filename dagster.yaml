@@ -20,7 +20,7 @@ run_launcher:
 run_monitoring:
   enabled: true
   max_resume_run_attempts: 0
-  run_timeout_seconds: 300
+  max_runtime_seconds: 300
 
 compute_logs:
   module: dagster.core.storage.noop_compute_log_manager

@@ -22,14 +22,16 @@ services:
       DAGSTER_HOME: /app
       DAGSTER_PG_HOST: postgres
       DAGSTER_PG_PORT: "5432"
-      DAGSTER_PG_USERNAME: dagster
+      DAGSTER_PG_USER: dagster
       DAGSTER_PG_PASSWORD: dagster
-      DAGSTER_PG_DATABASE: dagster
+      DAGSTER_PG_DB: dagster
       CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-localhost}
       CLICKHOUSE_PORT: ${CLICKHOUSE_PORT:-8443}
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
       CLICKHOUSE_SECURE: ${CLICKHOUSE_SECURE:-true}
+    volumes:
+      - ./dagster.local.yaml:/app/dagster.yaml:ro
     depends_on:
       - postgres
 
@@ -40,14 +42,16 @@ services:
       DAGSTER_HOME: /app
       DAGSTER_PG_HOST: postgres
       DAGSTER_PG_PORT: "5432"
-      DAGSTER_PG_USERNAME: dagster
+      DAGSTER_PG_USER: dagster
       DAGSTER_PG_PASSWORD: dagster
-      DAGSTER_PG_DATABASE: dagster
+      DAGSTER_PG_DB: dagster
       CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-localhost}
       CLICKHOUSE_PORT: ${CLICKHOUSE_PORT:-8443}
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
       CLICKHOUSE_SECURE: ${CLICKHOUSE_SECURE:-true}
+    volumes:
+      - ./dagster.local.yaml:/app/dagster.yaml:ro
     depends_on:
       - postgres
 
