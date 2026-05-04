@@ -422,14 +422,6 @@ resource "aws_ecs_task_definition" "dagster" {
         { name = "DAGSTER_PG_USER", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:user::" },
       ]
 
-      healthCheck = {
-        command     = ["CMD-SHELL", "dagster-daemon liveness-check || exit 1"]
-        interval    = 30
-        timeout     = 10
-        retries     = 3
-        startPeriod = 60
-      }
-
       logConfiguration = {
         logDriver = "awslogs"
         options = {
