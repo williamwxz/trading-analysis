@@ -36,8 +36,8 @@ run_queue:
   max_concurrent_runs: 25
 
 concurrency:
-  default_op_concurrency_limit: 25
   pools:
+    default_limit: 25
     pnl_bt_v2_daily:
       slot_count: 5
 
