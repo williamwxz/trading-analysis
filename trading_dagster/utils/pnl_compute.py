@@ -19,6 +19,11 @@ from typing import Dict, List, Tuple
 
 from .clickhouse_client import query_dicts, query_rows
 
+
+def _parse_ts(s: str) -> datetime:
+    """Parse a datetime string with or without fractional seconds."""
+    return datetime.strptime(str(s)[:19], "%Y-%m-%d %H:%M:%S")
+
 # Partition start dates — strategies whose first bar falls on this date are
 # allowed to cold-start with no prior anchor (genuinely the first data point).
 PROD_REAL_TRADE_START_DATE = "2026-02-27"
@@ -196,7 +201,7 @@ ORDER BY strategy_table_name, ts
         if tf not in TIMEFRAME_MAP:
             raise ValueError(f"Unknown config_timeframe '{tf}' in {source_table} — add it to TIMEFRAME_MAP")
         tf_minutes = TIMEFRAME_MAP[tf]
-        bar_ts = datetime.strptime(str(r["ts"]), "%Y-%m-%d %H:%M:%S")
+        bar_ts = _parse_ts(r["ts"])
         execution_ts = (bar_ts + timedelta(minutes=tf_minutes)).strftime("%Y-%m-%d %H:%M:%S")
         result.append({
             "strategy_table_name": r["strategy_table_name"],
@@ -416,7 +421,7 @@ def iter_compute_prod_pnl(
 
         for bar in strategy_bars:
             tf_minutes = TIMEFRAME_MAP.get(bar["config_timeframe"], 5)
-            bar_ts = datetime.strptime(bar["ts"], "%Y-%m-%d %H:%M:%S")
+            bar_ts = _parse_ts(bar["ts"])
             position = bar["position"]
             bar_price = bar["bar_price"] # JSON price for initial fallback
 
@@ -480,7 +485,7 @@ def compute_real_trade_pnl(
 
         for bar in strategy_bars:
             tf_minutes = TIMEFRAME_MAP.get(bar["config_timeframe"], 5)
-            exec_ts = datetime.strptime(bar["execution_ts"], "%Y-%m-%d %H:%M:%S")
+            exec_ts = _parse_ts(bar["execution_ts"])
             position = bar["position"]
             bar_price = bar["bar_price"]
 
@@ -538,10 +543,10 @@ def compute_bt_pnl(
         strategy_bars.sort(key=lambda b: b["execution_ts"])
 
         for i, bar in enumerate(strategy_bars):
-            exec_ts = datetime.strptime(bar["execution_ts"], "%Y-%m-%d %H:%M:%S")
+            exec_ts = _parse_ts(bar["execution_ts"])
             # Hold position until next bar's execution_ts (or tf_minutes if last bar)
             if i + 1 < len(strategy_bars):
-                next_exec_ts = datetime.strptime(strategy_bars[i + 1]["execution_ts"], "%Y-%m-%d %H:%M:%S")
+                next_exec_ts = _parse_ts(strategy_bars[i + 1]["execution_ts"])
             else:
                 tf_minutes = TIMEFRAME_MAP.get(bar["config_timeframe"], 5)
                 next_exec_ts = exec_ts + timedelta(minutes=tf_minutes)

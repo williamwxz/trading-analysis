@@ -53,6 +53,11 @@ def _get_underlyings(source_table: str) -> list[str]:
     )
     return [str(r[0]) for r in rows]
 
+def _parse_ts(s: str) -> datetime:
+    """Parse a datetime string with or without fractional seconds."""
+    return datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S")
+
+
 def _prepare_rows_for_clickhouse(rows: list[list]) -> list[list]:
     """Ensure timestamp strings are converted back to datetime objects for clickhouse-connect.
 
@@ -62,14 +67,14 @@ def _prepare_rows_for_clickhouse(rows: list[list]) -> list[list]:
     for r in rows:
         # ts=7, updated_at=14 in both column layouts
         if isinstance(r[7], str):
-            r[7] = datetime.strptime(r[7], "%Y-%m-%d %H:%M:%S")
+            r[7] = _parse_ts(r[7])
         if isinstance(r[14], str):
-            r[14] = datetime.strptime(r[14], "%Y-%m-%d %H:%M:%S")
+            r[14] = _parse_ts(r[14])
         # closing_ts=15, execution_ts=16 in REAL_TRADE_INSERT_COLUMNS only
         if len(r) > 15 and isinstance(r[15], str):
-            r[15] = datetime.strptime(r[15], "%Y-%m-%d %H:%M:%S")
+            r[15] = _parse_ts(r[15])
         if len(r) > 16 and isinstance(r[16], str):
-            r[16] = datetime.strptime(r[16], "%Y-%m-%d %H:%M:%S")
+            r[16] = _parse_ts(r[16])
     return rows
 
 # ─────────────────────────────────────────────────────────────────────────────
