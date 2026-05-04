@@ -311,7 +311,7 @@ resource "aws_ecs_task_definition" "dagster" {
       name      = "dagster-code-server"
       image     = "${aws_ecr_repository.dagster.repository_url}:latest"
       essential = true
-      command   = ["dagster", "api", "grpc", "-h", "0.0.0.0", "-p", "4266", "-m", "trading_dagster"]
+      command   = ["dagster", "code-server", "start", "-h", "0.0.0.0", "-p", "4266", "-m", "trading_dagster"]
 
       environment = [
         { name = "DAGSTER_HOME", value = "/app" },
