@@ -308,10 +308,45 @@ resource "aws_ecs_task_definition" "dagster" {
 
   container_definitions = jsonencode([
     {
+      name      = "dagster-code-server"
+      image     = "${aws_ecr_repository.dagster.repository_url}:latest"
+      essential = true
+      command   = ["dagster", "api", "grpc", "-h", "0.0.0.0", "-p", "4266", "-m", "trading_dagster"]
+
+      environment = [
+        { name = "DAGSTER_HOME", value = "/app" },
+        { name = "CLICKHOUSE_USER", value = "dev_ro3" },
+        { name = "CLICKHOUSE_PORT", value = "8443" },
+        { name = "CLICKHOUSE_SECURE", value = "true" },
+        { name = "DAGSTER_PG_DB", value = "postgres" },
+      ]
+
+      secrets = [
+        { name = "CLICKHOUSE_HOST", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
+        { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
+        { name = "DAGSTER_PG_HOST", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:host::" },
+        { name = "DAGSTER_PG_PASSWORD", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:password::" },
+        { name = "DAGSTER_PG_USER", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:user::" },
+      ]
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.dagster.name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "code-server"
+        }
+      }
+    },
+    {
       name      = "dagster-webserver"
       image     = "${aws_ecr_repository.dagster.repository_url}:latest"
       essential = true
       command   = ["dagster-webserver", "-h", "0.0.0.0", "-p", "3000"]
+
+      dependsOn = [
+        { containerName = "dagster-code-server", condition = "START" }
+      ]
 
       portMappings = [
         {
@@ -350,6 +385,10 @@ resource "aws_ecs_task_definition" "dagster" {
       image     = "${aws_ecr_repository.dagster.repository_url}:latest"
       essential = true
       command   = ["dagster-daemon", "run"]
+
+      dependsOn = [
+        { containerName = "dagster-code-server", condition = "START" }
+      ]
 
       environment = [
         { name = "DAGSTER_HOME", value = "/app" },
@@ -1160,7 +1199,7 @@ resource "aws_ecs_service" "pnl_consumer" {
   name            = "${local.name_prefix}-pnl-consumer"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.pnl_consumer.arn
-  desired_count   = 1
+  desired_count   = 0 # temporarily disabled
 
   capacity_provider_strategy {
     capacity_provider = "FARGATE_SPOT"

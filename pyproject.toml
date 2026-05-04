@@ -8,9 +8,9 @@ version = "0.1.0"
 description = "Mini trading analytics pipeline — Binance API → ClickHouse Cloud → Dagster → Grafana"
 requires-python = ">=3.11"
 dependencies = [
-    "dagster>=1.11,<2.0",
-    "dagster-webserver>=1.11,<2.0",
-    "dagster-postgres>=0.25,<1.0",
+    "dagster==1.13.2",
+    "dagster-webserver==1.13.2",
+    "dagster-postgres==0.29.2",
     "dagster-aws>=0.25,<1.0",
     "boto3>=1.34",
     "clickhouse-connect>=0.8",

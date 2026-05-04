@@ -1,4 +1,5 @@
 load_from:
-  - python_module:
-      module_name: trading_dagster
+  - grpc_server:
+      host: localhost
+      port: 4266
       location_name: trading_dagster
