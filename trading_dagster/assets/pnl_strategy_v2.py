@@ -192,7 +192,7 @@ def pnl_prod_v2_daily_asset(context: AssetExecutionContext) -> MaterializeResult
     deps=["binance_futures_backfill"],
     partitions_def=bt_daily_partitions,
     compute_kind="clickhouse",
-    op_tags={"dagster/timeout": 300},
+    op_tags={"dagster/timeout": 300, "dagster/concurrency_limit": "pnl_bt_v2_daily"},
 )
 def pnl_bt_v2_daily_asset(context: AssetExecutionContext) -> MaterializeResult:
     """Daily partitioned backtest PnL backfill. Uses cumulative_pnl from strategy JSON directly."""

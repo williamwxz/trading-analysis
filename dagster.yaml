@@ -37,6 +37,9 @@ run_queue:
 
 concurrency:
   default_op_concurrency_limit: 25
+  pools:
+    pnl_bt_v2_daily:
+      slot_count: 5
 
 retention:
   schedule:
