@@ -219,7 +219,7 @@ ORDER BY strategy_table_name, ts
 def fetch_new_bars_real_trade(
     source_table: str, underlying: str, since: str, ts_end: str | None = None,
 ) -> List[dict]:
-    """Fetch real_trade revisions. Each revision that arrives before bar close is a separate bar.
+    """Fetch real_trade revisions. All revisions per bar are returned regardless of when they arrive.
 
     Live path: since=watermark, ts_end=None — filter on revision_ts >= since.
     Daily path: since=start_ts, ts_end=end_ts — filter on ts in [since, ts_end).
@@ -248,12 +248,6 @@ FROM analytics.{source_table}
 WHERE underlying = '{underlying}'
   AND strategy_table_name NOT LIKE 'manual_probe%'
   AND {ts_filter}
-  AND revision_ts < toDateTime(ts) + toIntervalMinute(multiIf(
-        config_timeframe = '5m', 5, config_timeframe = '10m', 10,
-        config_timeframe = '15m', 15, config_timeframe = '30m', 30,
-        config_timeframe = '1h', 60, config_timeframe = '4h', 240,
-        config_timeframe = '1d', 1440, 5
-    ))
 ORDER BY strategy_table_name, toDateTime(ts), revision_ts
 """
     rows = query_dicts(sql)
