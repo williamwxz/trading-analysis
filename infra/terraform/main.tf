@@ -441,6 +441,14 @@ resource "aws_ecs_service" "dagster" {
     assign_public_ip = false
   }
 
+  load_balancer {
+    target_group_arn = aws_lb_target_group.dagster.arn
+    container_name   = "dagster-webserver"
+    container_port   = 3000
+  }
+
+  health_check_grace_period_seconds = 60
+
   tags = local.common_tags
 }
 
@@ -1300,8 +1308,8 @@ output "ecr_repository_url" {
 }
 
 output "dagster_url" {
-  value       = "http://${aws_eip.nat.public_ip}"
-  description = "Dagster UI - static IP via NAT instance nginx proxy"
+  value       = "http://${aws_lb.dagster.dns_name}"
+  description = "Dagster UI - ALB DNS name"
 }
 
 output "nat_static_ip" {
