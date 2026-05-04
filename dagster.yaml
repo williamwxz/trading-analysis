@@ -20,7 +20,6 @@ run_launcher:
 run_monitoring:
   enabled: true
   max_resume_run_attempts: 0
-  max_runtime_seconds: 300
 
 compute_logs:
   module: dagster.core.storage.noop_compute_log_manager
@@ -37,8 +36,6 @@ concurrency:
     max_concurrent_runs: 25
   pools:
     default_limit: 25
-    pnl_bt_v2_daily:
-      slot_count: 5
 
 retention:
   schedule:
