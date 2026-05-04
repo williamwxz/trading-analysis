@@ -224,6 +224,128 @@
           "dimensions": {}
         }
       ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Redpanda ECS — CPU Utilization",
+      "description": "CPU utilization % for the trading-analysis-redpanda ECS Fargate service (1 vCPU task).",
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "spanNulls": false
+          }
+        }
+      },
+      "options": {
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "region": "ap-northeast-1",
+          "namespace": "AWS/ECS",
+          "metricName": "CPUUtilization",
+          "statistics": ["Average"],
+          "period": "60",
+          "matchExact": true,
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-redpanda"
+          }
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Redpanda ECS — Memory Utilization",
+      "description": "Memory utilization % for the trading-analysis-redpanda ECS Fargate service (2 GB task, 1500M allocated to Redpanda).",
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "spanNulls": false
+          }
+        }
+      },
+      "options": {
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "region": "ap-northeast-1",
+          "namespace": "AWS/ECS",
+          "metricName": "MemoryUtilization",
+          "statistics": ["Average"],
+          "period": "60",
+          "matchExact": true,
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-redpanda"
+          }
+        }
+      ]
     }
   ]
 }

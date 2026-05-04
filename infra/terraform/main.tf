@@ -1088,7 +1088,7 @@ resource "aws_ecs_task_definition" "redpanda" {
     essential = true
     entryPoint = ["/bin/bash", "-c"]
     command = [
-      "rpk redpanda start --smp 1 --memory 1500M --reserve-memory 0M --node-id 0 --kafka-addr PLAINTEXT://0.0.0.0:9092 --advertise-kafka-addr PLAINTEXT://redpanda.${local.name_prefix}.local:9092 & sleep 15 && rpk topic create binance.price.ticks --brokers localhost:9092 --partitions 1 --replicas 1; wait"
+      "rpk redpanda start --smp 1 --memory 1500M --reserve-memory 0M --node-id 0 --kafka-addr PLAINTEXT://0.0.0.0:9092 --advertise-kafka-addr PLAINTEXT://redpanda.${local.name_prefix}.local:9092 --set redpanda.log_segment_ms=604800000 & sleep 15 && rpk topic create binance.price.ticks --brokers localhost:9092 --partitions 1 --replicas 1 && rpk topic alter-config binance.price.ticks --brokers localhost:9092 --set retention.ms=604800000; wait"
     ]
     portMappings = [{ containerPort = 9092, protocol = "tcp" }]
     healthCheck = {
