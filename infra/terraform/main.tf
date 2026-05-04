@@ -454,12 +454,12 @@ resource "aws_security_group" "ecs_tasks" {
   name_prefix = "${local.name_prefix}-ecs-"
   vpc_id      = aws_vpc.main.id
 
-  # Allow port 3000 only from the NAT instance (nginx reverse proxy)
+  # Allow port 3000 only from the ALB
   ingress {
     from_port       = 3000
     to_port         = 3000
     protocol        = "tcp"
-    security_groups = [aws_security_group.nat.id]
+    security_groups = [aws_security_group.alb.id]
   }
 
   # All outbound
