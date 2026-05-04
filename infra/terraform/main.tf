@@ -477,6 +477,31 @@ resource "aws_security_group" "ecs_tasks" {
   }
 }
 
+resource "aws_security_group" "alb" {
+  name_prefix = "${local.name_prefix}-alb-"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = local.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # VPC Endpoints — ECR + S3 (bypass NAT for image pulls from private subnet)
