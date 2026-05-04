@@ -142,14 +142,6 @@ resource "aws_security_group" "nat" {
     cidr_blocks = [aws_subnet.private.cidr_block]
   }
 
-  # Public access to Dagster UI (iptables DNAT from :3000 to ECS task :3000)
-  ingress {
-    from_port   = 3000
-    to_port     = 3000
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
   egress {
     from_port   = 0
     to_port     = 0
@@ -1314,7 +1306,7 @@ output "dagster_url" {
 
 output "nat_static_ip" {
   value       = aws_eip.nat.public_ip
-  description = "Static IP (inbound Dagster UI + outbound ClickHouse allowlist)"
+  description = "Static IP (outbound ClickHouse allowlist)"
 }
 
 output "grafana_cloudwatch_secret_arn" {
