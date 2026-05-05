@@ -228,7 +228,7 @@ def fetch_new_bars_real_trade(
 
     Live path: since=watermark, ts_end=None — filter on revision_ts >= since.
     Daily path: since=start_ts, ts_end=end_ts — filter on ts in [since, ts_end).
-    Post-close revisions (revision_ts >= closing_ts) are discarded.
+    Revisions where revision_ts < ts + 2x timeframe are kept — allows for post-close execution lag.
     """
     if ts_end is not None:
         ts_filter = f"toDateTime(ts) >= toDateTime('{since}') AND toDateTime(ts) < toDateTime('{ts_end}')"
@@ -264,7 +264,17 @@ SELECT
     JSONExtractFloat(row_json, 'final_signal') AS final_signal,
     JSONExtractFloat(row_json, 'benchmark') AS bar_benchmark
 FROM raw
-WHERE revision_ts <= closing_ts
+WHERE revision_ts < ts + toIntervalMinute(2 * multiIf(
+    config_timeframe = '1m',  1,
+    config_timeframe = '3m',  3,
+    config_timeframe = '5m',  5,
+    config_timeframe = '15m', 15,
+    config_timeframe = '30m', 30,
+    config_timeframe = '1h',  60,
+    config_timeframe = '4h',  240,
+    config_timeframe = '1d',  1440,
+    5
+))
 ORDER BY strategy_table_name, ts, revision_ts
 """
     rows = query_dicts(sql)

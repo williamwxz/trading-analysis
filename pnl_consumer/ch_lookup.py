@@ -160,7 +160,7 @@ def fetch_real_trade_revisions_for_candle(
     """Return all revisions for the most recent real_trade bar per strategy at or before candle_ts.
 
     Falls back to the most recent bar within _LOOKBACK when the strategy service lags.
-    Only revisions where revision_ts <= closing_ts are included — post-close revisions are discarded.
+    Revisions where revision_ts < ts + 2x timeframe are kept — allows for post-close execution lag.
     Revisions are ordered by revision_ts ASC (one per position update within the bar).
     """
     underlying = instrument.removesuffix("USDT")
@@ -203,7 +203,17 @@ JOIN latest l
  AND h.config_timeframe = l.config_timeframe
  AND h.ts = l.latest_ts
 WHERE h.underlying = '{underlying}'
-  AND h.revision_ts <= closing_ts
+  AND h.revision_ts < h.ts + toIntervalMinute(2 * multiIf(
+        h.config_timeframe = '1m',  1,
+        h.config_timeframe = '3m',  3,
+        h.config_timeframe = '5m',  5,
+        h.config_timeframe = '15m', 15,
+        h.config_timeframe = '30m', 30,
+        h.config_timeframe = '1h',  60,
+        h.config_timeframe = '4h',  240,
+        h.config_timeframe = '1d',  1440,
+        5
+    ))
 ORDER BY h.strategy_table_name, h.revision_ts
 LIMIT 1 BY h.strategy_table_name, h.config_timeframe, h.revision_ts
 """
