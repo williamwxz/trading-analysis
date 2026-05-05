@@ -276,7 +276,13 @@ def _flush(
     pnl_prod_batch.clear()
     pnl_real_trade_batch.clear()
     pnl_bt_batch.clear()
-    consumer.commit(asynchronous=False)
+    try:
+        consumer.commit(asynchronous=False)
+    except KafkaException as e:
+        if e.args[0].code() == KafkaError._NO_OFFSET:
+            pass  # no messages consumed yet — nothing to commit
+        else:
+            raise
 
 
 def _flush_and_reseed(
