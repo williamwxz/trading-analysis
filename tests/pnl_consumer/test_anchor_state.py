@@ -22,13 +22,18 @@ def test_anchor_state_stores_and_retrieves():
 
 
 @pytest.mark.unit
-def test_anchor_state_carry_forward_on_missing_price():
+def test_anchor_state_raises_on_missing_strategy():
     state = AnchorState()
-    pnl = state.compute_pnl("new_strat", close_price=93000.0, position=1.0)
-    assert pnl == 0.0
-    rec = state.get("new_strat")
-    assert rec.anchor_price == 93000.0
-    assert rec.anchor_position == 1.0
+    with pytest.raises(RuntimeError, match="No anchor found for strategy"):
+        state.compute_pnl("new_strat", close_price=93000.0, position=1.0)
+
+
+@pytest.mark.unit
+def test_anchor_state_raises_on_zero_anchor_price():
+    state = AnchorState()
+    state.update("strat_C", AnchorRecord(anchor_pnl=0.0, anchor_price=0.0, anchor_position=0.0))
+    with pytest.raises(RuntimeError, match="Anchor price is zero"):
+        state.compute_pnl("strat_C", close_price=93000.0, position=1.0)
 
 
 @pytest.mark.unit

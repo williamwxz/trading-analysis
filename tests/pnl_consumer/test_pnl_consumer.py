@@ -95,13 +95,15 @@ def test_process_candle_no_strategies_returns_only_price_row():
 def test_process_candle_always_emits_price_row():
     candle = _make_candle()
     strategies = [_make_strategy()]
+    state_prod = AnchorState()
+    state_prod.update("strat_prod_1", AnchorRecord(anchor_pnl=0.0, anchor_price=93100.0, anchor_position=1.0))
 
     with (
         patch(f"{_MOD}.fetch_strategies_for_candle", return_value=strategies),
         patch(f"{_MOD}.fetch_real_trade_revisions_for_candle", return_value=[]),
         patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=[]),
     ):
-        rows = process_candle(candle, AnchorState(), AnchorState())
+        rows = process_candle(candle, state_prod, AnchorState())
 
     price_row = next((r for r in rows if r.get("_sink") == "price"), None)
     assert price_row is not None
@@ -206,6 +208,7 @@ def test_process_candle_multiple_revisions_chains_anchor():
     """Second revision uses the updated anchor from the first revision."""
     state_prod = AnchorState()
     state_real_trade = AnchorState()
+    state_real_trade.update("strat_rt_1", AnchorRecord(anchor_pnl=0.0, anchor_price=93100.0, anchor_position=1.0))
     candle = _make_candle(close=93200.0)
     rev1 = _make_revision(position=1.0, revision_ts=datetime(2026, 4, 26, 0, 1, 10))
     rev2 = _make_revision(position=-1.0, revision_ts=datetime(2026, 4, 26, 0, 1, 30))
