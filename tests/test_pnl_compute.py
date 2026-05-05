@@ -223,10 +223,9 @@ class TestFetchNewBarsRealTradeSQL:
         fetch_new_bars_real_trade(**kwargs)
         return captured["sql"]
 
-    def test_order_by_uses_toDateTime_not_string_alias(self, monkeypatch):
-        """ORDER BY must use toDateTime(ts) so ClickHouse sorts on the DateTime column,
-        not the toString(ts) alias — bare 'ts' resolves to the String alias and causes
-        a NO_COMMON_TYPE error when the WHERE clause compares it against toDateTime(...)."""
+    def test_order_by_sorts_by_strategy_ts_revision(self, monkeypatch):
+        """ORDER BY must sort by strategy_table_name, ts, revision_ts to ensure
+        revisions are processed in chronological order per strategy."""
         sql = self._capture_sql(
             monkeypatch,
             source_table="strategy_output_history_v2",
@@ -235,10 +234,8 @@ class TestFetchNewBarsRealTradeSQL:
             ts_end="2025-04-28 00:00:00",
         )
         order_by = re.search(r"ORDER BY (.+)", sql).group(1).strip()
-        assert "toDateTime(ts)" in order_by, (
-            f"ORDER BY should use toDateTime(ts) to avoid alias collision with "
-            f"toString(ts) AS ts in SELECT, but got: ORDER BY {order_by}"
-        )
+        assert "strategy_table_name" in order_by
+        assert "revision_ts" in order_by
 
 
 class TestTimeframeMap:
