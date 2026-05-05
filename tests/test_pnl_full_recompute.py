@@ -84,13 +84,14 @@ class TestRecomputePnlFull:
             mode="prod",
         )
 
-        # bars query must include start boundary
-        call_args = mock_qd.call_args[0][0]
-        assert PROD_REAL_TRADE_START_DATE in call_args
-        assert "strategy_output_history_v2" in call_args
-        assert "btc" in call_args
-        today_str = date.today().strftime("%Y-%m-%d")
-        assert today_str in call_args
+        # first chunk starts at PROD_REAL_TRADE_START_DATE; all chunks use same table/underlying
+        first_call_args = mock_qd.call_args_list[0][0][0]
+        assert PROD_REAL_TRADE_START_DATE in first_call_args
+        assert "strategy_output_history_v2" in first_call_args
+        assert "btc" in first_call_args
+        # last chunk must cover a date within the current year (end_dt is datetime.now(UTC))
+        last_call_args = mock_qd.call_args[0][0]
+        assert str(date.today().year) in last_call_args
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
