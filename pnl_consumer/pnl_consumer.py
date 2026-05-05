@@ -189,6 +189,11 @@ LIMIT 1 BY strategy_table_name
                     anchor_position=row["anchor_position"],
                 ),
             )
+    if len(state_prod) == 0 and len(state_real_trade) == 0:
+        raise RuntimeError(
+            "Bootstrap failed: no anchor rows found in ClickHouse within the last 2 hours. "
+            "Cannot start consumer without a valid PnL baseline."
+        )
     logger.info(
         "Bootstrapped %d prod anchor(s) and %d real_trade anchor(s) from ClickHouse",
         len(state_prod),

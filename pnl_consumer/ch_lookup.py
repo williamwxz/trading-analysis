@@ -5,7 +5,6 @@ from datetime import datetime
 from trading_dagster.utils.clickhouse_client import query_dicts
 
 _LOOKBACK = "1 DAY"
-_REAL_TRADE_REVISION_GRACE_MINUTES = 15
 
 
 @dataclass
@@ -161,7 +160,7 @@ def fetch_real_trade_revisions_for_candle(
     """Return all revisions for the most recent real_trade bar per strategy at or before candle_ts.
 
     Falls back to the most recent bar within _LOOKBACK when the strategy service lags.
-    Only revisions where revision_ts <= closing_ts + grace are included.
+    Only revisions where revision_ts <= closing_ts are included — post-close revisions are discarded.
     Revisions are ordered by revision_ts ASC (one per position update within the bar).
     """
     underlying = instrument.removesuffix("USDT")
@@ -186,7 +185,7 @@ SELECT
     h.config_timeframe,
     h.weighting,
     h.revision_ts,
-    toDateTime(toDateTime(h.ts) + toIntervalMinute(multiIf(
+    h.ts + toIntervalMinute(multiIf(
         h.config_timeframe = '1m',  1,
         h.config_timeframe = '3m',  3,
         h.config_timeframe = '5m',  5,
@@ -196,7 +195,7 @@ SELECT
         h.config_timeframe = '4h',  240,
         h.config_timeframe = '1d',  1440,
         5
-    ))) AS closing_ts,
+    )) AS closing_ts,
     h.row_json
 FROM analytics.strategy_output_history_v2 h
 JOIN latest l
@@ -204,7 +203,7 @@ JOIN latest l
  AND h.config_timeframe = l.config_timeframe
  AND h.ts = l.latest_ts
 WHERE h.underlying = '{underlying}'
-  AND h.revision_ts <= closing_ts + toIntervalMinute({_REAL_TRADE_REVISION_GRACE_MINUTES})
+  AND h.revision_ts <= closing_ts
 ORDER BY h.strategy_table_name, h.revision_ts
 LIMIT 1 BY h.strategy_table_name, h.config_timeframe, h.revision_ts
 """

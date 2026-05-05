@@ -31,13 +31,20 @@ class AnchorState:
     ) -> float:
         """Apply anchor-chain formula and update state. Returns new cumulative_pnl."""
         rec = self.get(strategy_table_name)
-        if rec.anchor_price == 0.0:
-            new_pnl = rec.anchor_pnl
-        else:
-            new_pnl = (
-                rec.anchor_pnl
-                + position * (close_price - rec.anchor_price) / rec.anchor_price
+        if strategy_table_name not in self._store:
+            raise RuntimeError(
+                f"No anchor found for strategy '{strategy_table_name}'. "
+                "Bootstrap from ClickHouse returned no data — cannot compute PnL from zero."
             )
+        if rec.anchor_price == 0.0:
+            raise RuntimeError(
+                f"Anchor price is zero for strategy '{strategy_table_name}'. "
+                "Stored anchor is corrupt — cannot compute PnL."
+            )
+        new_pnl = (
+            rec.anchor_pnl
+            + position * (close_price - rec.anchor_price) / rec.anchor_price
+        )
         self.update(
             strategy_table_name,
             AnchorRecord(

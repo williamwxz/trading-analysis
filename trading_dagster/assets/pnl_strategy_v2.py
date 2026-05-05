@@ -137,26 +137,37 @@ ORDER BY strategy_table_name, ts
 """
             else:  # real_trade
                 sql = f"""\
+WITH raw AS (
+    SELECT
+        strategy_table_name,
+        strategy_id, strategy_name, underlying, config_timeframe, weighting,
+        ts,
+        ts + toIntervalMinute(multiIf(
+            config_timeframe = '5m', 5, config_timeframe = '10m', 10,
+            config_timeframe = '15m', 15, config_timeframe = '30m', 30,
+            config_timeframe = '1h', 60, config_timeframe = '4h', 240,
+            config_timeframe = '1d', 1440, 5
+        )) AS closing_ts,
+        revision_ts,
+        row_json
+    FROM analytics.{source_table}
+    WHERE underlying = '{underlying}'
+      AND strategy_table_name NOT LIKE 'manual_probe%'
+      AND toDateTime(ts) >= toDateTime('{chunk_start_ts}') AND toDateTime(ts) < toDateTime('{chunk_end_ts}')
+)
 SELECT
     strategy_table_name,
     strategy_id, strategy_name, underlying, config_timeframe, weighting,
     toString(ts) AS ts,
-    toString(ts + toIntervalMinute(multiIf(
-        config_timeframe = '5m', 5, config_timeframe = '10m', 10,
-        config_timeframe = '15m', 15, config_timeframe = '30m', 30,
-        config_timeframe = '1h', 60, config_timeframe = '4h', 240,
-        config_timeframe = '1d', 1440, 5
-    ))) AS closing_ts,
+    toString(closing_ts) AS closing_ts,
     toString(toStartOfMinute(revision_ts + INTERVAL 59 SECOND)) AS execution_ts,
     JSONExtractFloat(row_json, 'position') AS position,
     JSONExtractFloat(row_json, 'price') AS bar_price,
     JSONExtractFloat(row_json, 'final_signal') AS final_signal,
     JSONExtractFloat(row_json, 'benchmark') AS bar_benchmark
-FROM analytics.{source_table}
-WHERE underlying = '{underlying}'
-  AND strategy_table_name NOT LIKE 'manual_probe%'
-  AND toDateTime(ts) >= toDateTime('{chunk_start_ts}') AND toDateTime(ts) < toDateTime('{chunk_end_ts}')
-ORDER BY strategy_table_name, toDateTime(ts), revision_ts
+FROM raw
+WHERE revision_ts <= closing_ts
+ORDER BY strategy_table_name, ts, revision_ts
 """
 
             rows_dict = query_dicts(sql, client)
