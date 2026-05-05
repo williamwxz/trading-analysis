@@ -153,6 +153,39 @@ LIMIT 1 BY strategy_table_name
     return result
 
 
+def fetch_anchor_for_strategy(strategy_table_name: str) -> AnchorRecord | None:
+    """One-shot anchor lookup for a single strategy, searching up to 48 hours back.
+
+    Returns None when no rows exist (brand-new or long-inactive strategy).
+    Used by process_candle to lazy-seed a missing anchor without crashing.
+    """
+    from pnl_consumer.anchor_state import AnchorRecord
+
+    for table in (
+        "analytics.strategy_pnl_1min_prod_v2",
+        "analytics.strategy_pnl_1min_real_trade_v2",
+    ):
+        sql = f"""\
+SELECT
+    cumulative_pnl  AS anchor_pnl,
+    price           AS anchor_price,
+    position        AS anchor_position
+FROM {table}
+WHERE strategy_table_name = '{strategy_table_name}'
+ORDER BY ts DESC, updated_at DESC
+LIMIT 1
+"""
+        rows = query_dicts(sql)
+        if rows:
+            r = rows[0]
+            return AnchorRecord(
+                anchor_pnl=r["anchor_pnl"],
+                anchor_price=r["anchor_price"],
+                anchor_position=r["anchor_position"],
+            )
+    return None
+
+
 def fetch_real_trade_revisions_for_candle(
     instrument: str,
     candle_ts: datetime,

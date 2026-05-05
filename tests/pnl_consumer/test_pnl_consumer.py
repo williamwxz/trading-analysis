@@ -271,6 +271,47 @@ def test_process_candle_bt_uses_cumulative_pnl_from_bar_not_anchor():
 
 
 @pytest.mark.unit
+def test_process_candle_lazy_seeds_anchor_when_missing():
+    """When anchor is absent, fetch_anchor_for_strategy is called and PnL row is emitted."""
+    candle = _make_candle(close=93200.0)
+    strategies = [_make_strategy(position=1.0)]
+    seeded_anchor = AnchorRecord(anchor_pnl=0.0, anchor_price=93100.0, anchor_position=1.0)
+
+    with (
+        patch(f"{_MOD}.fetch_strategies_for_candle", return_value=strategies),
+        patch(f"{_MOD}.fetch_real_trade_revisions_for_candle", return_value=[]),
+        patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=[]),
+        patch(f"{_MOD}.fetch_anchor_for_strategy", return_value=seeded_anchor) as mock_fetch,
+    ):
+        rows = process_candle(candle, AnchorState(), AnchorState())
+
+    mock_fetch.assert_called_once_with("strat_prod_1")
+    pnl_rows = [r for r in rows if r.get("_sink") == "pnl_prod"]
+    assert len(pnl_rows) == 1
+    assert pnl_rows[0]["cumulative_pnl"] == pytest.approx(100.0 / 93100.0)
+
+
+@pytest.mark.unit
+def test_process_candle_skips_pnl_when_lazy_seed_also_fails():
+    """When fetch_anchor_for_strategy returns None, the PnL row is skipped but price row still emits."""
+    candle = _make_candle(close=93200.0)
+    strategies = [_make_strategy(position=1.0)]
+
+    with (
+        patch(f"{_MOD}.fetch_strategies_for_candle", return_value=strategies),
+        patch(f"{_MOD}.fetch_real_trade_revisions_for_candle", return_value=[]),
+        patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=[]),
+        patch(f"{_MOD}.fetch_anchor_for_strategy", return_value=None),
+    ):
+        rows = process_candle(candle, AnchorState(), AnchorState())
+
+    pnl_rows = [r for r in rows if r.get("_sink") == "pnl_prod"]
+    assert pnl_rows == []
+    price_rows = [r for r in rows if r.get("_sink") == "price"]
+    assert len(price_rows) == 1
+
+
+@pytest.mark.unit
 def test_flush_writes_to_all_three_pnl_tables():
     consumer = MagicMock()
     price_batch = [

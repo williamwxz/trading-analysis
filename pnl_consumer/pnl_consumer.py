@@ -11,6 +11,7 @@ from confluent_kafka import Consumer, KafkaError, KafkaException
 
 from pnl_consumer.anchor_state import AnchorRecord, AnchorState
 from pnl_consumer.ch_lookup import (
+    fetch_anchor_for_strategy,
     fetch_bt_strategies_for_candle,
     fetch_real_trade_revisions_for_candle,
     fetch_strategies_for_candle,
@@ -72,14 +73,38 @@ def process_candle(
         }
     )
 
+    def _compute_pnl_with_lazy_seed(
+        state: AnchorState, strategy_table_name: str, close_price: float, position: float
+    ) -> float | None:
+        """Compute PnL; lazy-seed anchor from ClickHouse if missing. Returns None to skip."""
+        try:
+            return state.compute_pnl(strategy_table_name, close_price, position)
+        except RuntimeError:
+            anchor = fetch_anchor_for_strategy(strategy_table_name)
+            if anchor is None:
+                logger.warning(
+                    "No anchor found for strategy '%s' — skipping PnL row for ts=%s",
+                    strategy_table_name,
+                    candle.ts,
+                )
+                return None
+            logger.info(
+                "Lazy-seeded anchor for strategy '%s' from ClickHouse (pnl=%.4f, price=%.2f)",
+                strategy_table_name,
+                anchor.anchor_pnl,
+                anchor.anchor_price,
+            )
+            state.update(strategy_table_name, anchor)
+            return state.compute_pnl(strategy_table_name, close_price, position)
+
     # --- prod ---
     prod_strategies = fetch_strategies_for_candle(candle.instrument, candle.ts)
     for bar in prod_strategies:
-        pnl = state_prod.compute_pnl(
-            strategy_table_name=bar.strategy_table_name,
-            close_price=candle.close,
-            position=bar.position,
+        pnl = _compute_pnl_with_lazy_seed(
+            state_prod, bar.strategy_table_name, candle.close, bar.position
         )
+        if pnl is None:
+            continue
         rows.append(
             {
                 "_sink": "pnl_prod",
@@ -106,11 +131,11 @@ def process_candle(
         candle.instrument, candle.ts
     )
     for rev in real_trade_revisions:
-        pnl = state_real_trade.compute_pnl(
-            strategy_table_name=rev.strategy_table_name,
-            close_price=candle.close,
-            position=rev.position,
+        pnl = _compute_pnl_with_lazy_seed(
+            state_real_trade, rev.strategy_table_name, candle.close, rev.position
         )
+        if pnl is None:
+            continue
         execution_ts = (rev.revision_ts + timedelta(seconds=59)).replace(second=0)
         rows.append(
             {
@@ -176,7 +201,6 @@ SELECT
     price           AS anchor_price,
     position        AS anchor_position
 FROM {table}
-WHERE ts >= now() - INTERVAL 48 HOUR
 ORDER BY strategy_table_name, ts DESC, updated_at DESC
 LIMIT 1 BY strategy_table_name
 """
@@ -191,7 +215,7 @@ LIMIT 1 BY strategy_table_name
             )
     if len(state_prod) == 0 and len(state_real_trade) == 0:
         raise RuntimeError(
-            "Bootstrap failed: no anchor rows found in ClickHouse within the last 2 hours. "
+            "Bootstrap failed: no anchor rows found in ClickHouse. "
             "Cannot start consumer without a valid PnL baseline."
         )
     logger.info(
