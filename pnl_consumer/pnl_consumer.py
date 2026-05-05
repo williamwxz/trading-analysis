@@ -75,11 +75,18 @@ def process_candle(
     # --- prod ---
     prod_strategies = fetch_strategies_for_candle(candle.instrument, candle.ts)
     for bar in prod_strategies:
-        pnl = state_prod.compute_pnl(
-            strategy_table_name=bar.strategy_table_name,
-            close_price=candle.close,
-            position=bar.position,
-        )
+        try:
+            pnl = state_prod.compute_pnl(
+                strategy_table_name=bar.strategy_table_name,
+                close_price=candle.close,
+                position=bar.position,
+            )
+        except RuntimeError:
+            logger.warning(
+                "Skipping prod PnL for %s — no anchor (new strategy?); will pick up after next reseed",
+                bar.strategy_table_name,
+            )
+            continue
         rows.append(
             {
                 "_sink": "pnl_prod",
@@ -106,11 +113,18 @@ def process_candle(
         candle.instrument, candle.ts
     )
     for rev in real_trade_revisions:
-        pnl = state_real_trade.compute_pnl(
-            strategy_table_name=rev.strategy_table_name,
-            close_price=candle.close,
-            position=rev.position,
-        )
+        try:
+            pnl = state_real_trade.compute_pnl(
+                strategy_table_name=rev.strategy_table_name,
+                close_price=candle.close,
+                position=rev.position,
+            )
+        except RuntimeError:
+            logger.warning(
+                "Skipping real_trade PnL for %s — no anchor (new strategy?); will pick up after next reseed",
+                rev.strategy_table_name,
+            )
+            continue
         execution_ts = (rev.revision_ts + timedelta(seconds=59)).replace(second=0)
         rows.append(
             {
@@ -176,7 +190,6 @@ SELECT
     price           AS anchor_price,
     position        AS anchor_position
 FROM {table}
-WHERE ts >= now() - INTERVAL 2 HOUR
 ORDER BY strategy_table_name, ts DESC, updated_at DESC
 LIMIT 1 BY strategy_table_name
 """
