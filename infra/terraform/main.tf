@@ -293,8 +293,8 @@ resource "aws_ecs_task_definition" "dagster" {
   family                   = "${local.name_prefix}-dagster"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = 4096
-  memory                   = 8192
+  cpu                      = 2048
+  memory                   = 4096
   execution_role_arn       = aws_iam_role.ecs_execution.arn
   task_role_arn            = aws_iam_role.ecs_task.arn
 
@@ -421,11 +421,6 @@ resource "aws_ecs_service" "dagster" {
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.dagster.arn
   desired_count   = 1
-
-  # Stop old task before starting new one to avoid hitting Fargate vCPU quota.
-  # Dagster tolerates brief downtime during deploys.
-  deployment_minimum_healthy_percent = 0
-  deployment_maximum_percent         = 100
 
   capacity_provider_strategy {
     capacity_provider = "FARGATE"

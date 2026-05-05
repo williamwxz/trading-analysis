@@ -14,7 +14,7 @@ storage:
         sslmode: require
 
 run_queue:
-  max_concurrent_runs: 25
+  max_concurrent_runs: 3
   tag_concurrency_limits:
     - key: "dagster/asset_key"
       value: "pnl_bt_v2_daily"
@@ -40,9 +40,9 @@ local_artifact_storage:
 
 concurrency:
   runs:
-    max_concurrent_runs: 25
+    max_concurrent_runs: 3
   pools:
-    default_limit: 25
+    default_limit: 3
 
 retention:
   schedule:
