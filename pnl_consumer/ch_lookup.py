@@ -173,6 +173,7 @@ SELECT
     position        AS anchor_position
 FROM {table}
 WHERE strategy_table_name = '{strategy_table_name}'
+  AND ts >= now() - INTERVAL 48 HOUR
 ORDER BY ts DESC, updated_at DESC
 LIMIT 1
 """

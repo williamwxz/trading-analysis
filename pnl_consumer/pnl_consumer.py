@@ -208,6 +208,7 @@ SELECT
     price           AS anchor_price,
     position        AS anchor_position
 FROM {table}
+WHERE ts >= now() - INTERVAL 48 HOUR
 ORDER BY strategy_table_name, ts DESC, updated_at DESC
 LIMIT 1 BY strategy_table_name
 """
