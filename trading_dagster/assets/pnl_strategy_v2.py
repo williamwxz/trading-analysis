@@ -166,7 +166,12 @@ SELECT
     JSONExtractFloat(row_json, 'final_signal') AS final_signal,
     JSONExtractFloat(row_json, 'benchmark') AS bar_benchmark
 FROM raw
-WHERE revision_ts <= closing_ts
+WHERE revision_ts < ts + toIntervalMinute(2 * multiIf(
+    config_timeframe = '5m', 5, config_timeframe = '10m', 10,
+    config_timeframe = '15m', 15, config_timeframe = '30m', 30,
+    config_timeframe = '1h', 60, config_timeframe = '4h', 240,
+    config_timeframe = '1d', 1440, 5
+))
 ORDER BY strategy_table_name, ts, revision_ts
 """
 
