@@ -82,28 +82,44 @@ def _prepare_rows_for_clickhouse(rows: list[list]) -> list[list]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+_CHUNK_DAYS = 7  # process this many days at a time to cap memory per underlying
+
+
 def _recompute_pnl_full(context: AssetExecutionContext, target_table: str, source_table: str, label: str, insert_columns: list, mode: str):
     """Recompute PnL for all underlyings from PROD_REAL_TRADE_START_DATE to now.
 
     mode: "prod" uses iter_compute_prod_pnl; "real_trade" uses compute_real_trade_pnl.
     Rows are re-inserted with a fresh updated_at; ReplacingMergeTree deduplicates.
     No DELETE — safe to rerun alongside pnl_consumer.
+    Processes _CHUNK_DAYS at a time to bound memory usage.
     """
-    start_ts = f"{PROD_REAL_TRADE_START_DATE} 00:00:00"
+    start_dt = datetime.strptime(PROD_REAL_TRADE_START_DATE, "%Y-%m-%d").replace(tzinfo=UTC)
     end_dt = datetime.now(tz=UTC)
-    end_ts = end_dt.strftime("%Y-%m-%d %H:%M:%S")
 
     client = get_client()
     underlyings = _get_underlyings(source_table)
-    context.log.info(f"Full recompute {label}: {len(underlyings)} underlyings, {start_ts} → {end_ts}")
+    context.log.info(
+        f"Full recompute {label}: {len(underlyings)} underlyings, "
+        f"{PROD_REAL_TRADE_START_DATE} → {end_dt.strftime('%Y-%m-%d %H:%M:%S')}, "
+        f"chunk_days={_CHUNK_DAYS}"
+    )
 
     total_rows = 0
 
     for underlying in underlyings:
         context.log.info(f"Processing underlying: {underlying}")
 
-        if mode == "prod":
-            sql = f"""\
+        # anchors are refreshed from DB after each chunk so the chain carries forward
+        anchors = fetch_anchors(target_table, underlying)
+
+        chunk_start = start_dt
+        while chunk_start < end_dt:
+            chunk_end = min(chunk_start + timedelta(days=_CHUNK_DAYS), end_dt)
+            chunk_start_ts = chunk_start.strftime("%Y-%m-%d %H:%M:%S")
+            chunk_end_ts = chunk_end.strftime("%Y-%m-%d %H:%M:%S")
+
+            if mode == "prod":
+                sql = f"""\
 SELECT
     strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe,
     argMin(weighting, revision_ts) AS weighting,
@@ -115,12 +131,12 @@ SELECT
 FROM analytics.{source_table}
 WHERE underlying = '{underlying}'
   AND strategy_table_name NOT LIKE 'manual_probe%'
-  AND toDateTime(ts) >= toDateTime('{start_ts}') AND toDateTime(ts) < toDateTime('{end_ts}')
+  AND toDateTime(ts) >= toDateTime('{chunk_start_ts}') AND toDateTime(ts) < toDateTime('{chunk_end_ts}')
 GROUP BY strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, ts
 ORDER BY strategy_table_name, ts
 """
-        else:  # real_trade
-            sql = f"""\
+            else:  # real_trade
+                sql = f"""\
 SELECT
     strategy_table_name,
     strategy_id, strategy_name, underlying, config_timeframe, weighting,
@@ -139,52 +155,52 @@ SELECT
 FROM analytics.{source_table}
 WHERE underlying = '{underlying}'
   AND strategy_table_name NOT LIKE 'manual_probe%'
-  AND toDateTime(ts) >= toDateTime('{start_ts}') AND toDateTime(ts) < toDateTime('{end_ts}')
+  AND toDateTime(ts) >= toDateTime('{chunk_start_ts}') AND toDateTime(ts) < toDateTime('{chunk_end_ts}')
 ORDER BY strategy_table_name, toDateTime(ts), revision_ts
 """
 
-        rows_dict = query_dicts(sql, client)
-        if not rows_dict:
-            context.log.info(f"  No bars for {underlying}, skipping.")
-            continue
+            rows_dict = query_dicts(sql, client)
+            if not rows_dict:
+                chunk_start = chunk_end
+                continue
 
-        all_prices = fetch_prices_multi(underlyings=[underlying], ts_min=start_ts, ts_max=end_ts, client=client, extend_minutes=0)
-        prices = all_prices.get(underlying, {})
-
-        anchors = fetch_anchors(target_table, underlying)
-
-        if mode == "prod":
-            for _stn, strategy_rows in iter_compute_prod_pnl(rows_dict, anchors, prices, source_label=label):
-                _prepare_rows_for_clickhouse(strategy_rows)
-                n = insert_rows(f"analytics.{target_table}", insert_columns, strategy_rows, client)
-                total_rows += n
-                context.log.info(f"  [{underlying}] inserted {n} rows for strategy {_stn}")
-        elif mode == "real_trade":
-            # Group bars by strategy so we can process and free each one independently,
-            # avoiding accumulating all strategies' expanded rows into one flat list.
-            by_strategy: dict[str, list] = defaultdict(list)
-            for bar in rows_dict:
-                by_strategy[bar["strategy_table_name"]].append(bar)
-
-            for stn, strategy_bars in by_strategy.items():
-                strategy_rows = compute_real_trade_pnl(strategy_bars, anchors, prices)
-                _prepare_rows_for_clickhouse(strategy_rows)
-                n = insert_rows(
-                    f"analytics.{target_table}", insert_columns, strategy_rows, client
-                )
-                total_rows += n
-                context.log.info(
-                    f"  [{underlying}] inserted {n} real_trade rows for strategy {stn}"
-                )
-        else:
-            raise ValueError(
-                f"Unknown mode: {mode!r}. Expected 'prod' or 'real_trade'."
+            all_prices = fetch_prices_multi(
+                underlyings=[underlying],
+                ts_min=chunk_start_ts,
+                ts_max=chunk_end_ts,
+                client=client,
+                extend_minutes=0,
             )
+            prices = all_prices.pop(underlying, {})
 
-        del rows_dict, prices, all_prices
+            if mode == "prod":
+                for _stn, strategy_rows in iter_compute_prod_pnl(rows_dict, anchors, prices, source_label=label):
+                    _prepare_rows_for_clickhouse(strategy_rows)
+                    n = insert_rows(f"analytics.{target_table}", insert_columns, strategy_rows, client)
+                    total_rows += n
+                    context.log.info(f"  [{underlying}] chunk {chunk_start_ts[:10]} inserted {n} rows for {_stn}")
+            elif mode == "real_trade":
+                by_strategy: dict[str, list] = defaultdict(list)
+                for bar in rows_dict:
+                    by_strategy[bar["strategy_table_name"]].append(bar)
+
+                for stn, strategy_bars in by_strategy.items():
+                    strategy_rows = compute_real_trade_pnl(strategy_bars, anchors, prices)
+                    _prepare_rows_for_clickhouse(strategy_rows)
+                    n = insert_rows(f"analytics.{target_table}", insert_columns, strategy_rows, client)
+                    total_rows += n
+                    context.log.info(f"  [{underlying}] chunk {chunk_start_ts[:10]} inserted {n} real_trade rows for {stn}")
+            else:
+                raise ValueError(f"Unknown mode: {mode!r}. Expected 'prod' or 'real_trade'.")
+
+            del rows_dict, prices
+
+            # Reload anchors from DB so next chunk starts from the committed tail.
+            anchors = fetch_anchors(target_table, underlying)
+            chunk_start = chunk_end
 
     context.log.info(f"Full recompute {label} complete: {total_rows} total rows inserted")
-    return MaterializeResult(metadata={"rows_inserted": total_rows, "start_ts": start_ts, "end_ts": end_ts})
+    return MaterializeResult(metadata={"rows_inserted": total_rows, "start_ts": f"{PROD_REAL_TRADE_START_DATE} 00:00:00", "end_ts": end_dt.strftime("%Y-%m-%d %H:%M:%S")})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
