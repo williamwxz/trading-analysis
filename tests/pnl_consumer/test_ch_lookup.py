@@ -124,7 +124,9 @@ def test_fetch_real_trade_revisions_filters_by_exact_candle_ts():
             candle_ts=datetime(2026, 4, 26, 0, 1, 0),
         )
     assert "2026-04-26 00:01:00" in captured_sql[0]
-    assert "revision_ts <= closing_ts" in captured_sql[0]
+    # post-close revisions must be filtered out
+    assert "revision_ts" in captured_sql[0]
+    assert "toIntervalMinute" in captured_sql[0]
 
 
 @pytest.mark.unit
