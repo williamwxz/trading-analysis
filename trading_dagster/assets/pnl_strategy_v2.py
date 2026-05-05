@@ -294,7 +294,57 @@ def pnl_real_trade_v2_daily_asset(context: AssetExecutionContext) -> Materialize
     return _refresh_pnl_real_trade(context)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. Backtest PnL (Full Recompute — unpartitioned, sequential anchor chain)
+# 4. Prod PnL (Full Recompute — unpartitioned, sequential anchor chain)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@asset(
+    name="pnl_prod_v2_full",
+    group_name="strategy_pnl",
+    deps=["binance_futures_backfill"],
+    compute_kind="clickhouse",
+    op_tags={"dagster/timeout": 86400, "dagster/concurrency_limit": "pnl_prod_v2_full"},
+)
+def pnl_prod_v2_full_asset(context: AssetExecutionContext) -> MaterializeResult:
+    """Full prod recompute from PROD_REAL_TRADE_START_DATE to now, 7-day chunks, anchors in-memory.
+
+    No DELETE — safe to rerun; ReplacingMergeTree deduplicates on updated_at.
+    """
+    return _recompute_pnl_full(
+        context,
+        target_table="strategy_pnl_1min_prod_v2",
+        source_table="strategy_output_history_v2",
+        label="production",
+        insert_columns=PROD_INSERT_COLUMNS,
+        mode="prod",
+    )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. Real Trade PnL (Full Recompute — unpartitioned, sequential anchor chain)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@asset(
+    name="pnl_real_trade_v2_full",
+    group_name="strategy_pnl",
+    deps=["binance_futures_backfill"],
+    compute_kind="clickhouse",
+    op_tags={"dagster/timeout": 86400, "dagster/concurrency_limit": "pnl_real_trade_v2_full"},
+)
+def pnl_real_trade_v2_full_asset(context: AssetExecutionContext) -> MaterializeResult:
+    """Full real_trade recompute from PROD_REAL_TRADE_START_DATE to now, 7-day chunks, anchors in-memory.
+
+    No DELETE — safe to rerun; ReplacingMergeTree deduplicates on updated_at.
+    """
+    return _recompute_pnl_full(
+        context,
+        target_table="strategy_pnl_1min_real_trade_v2",
+        source_table="strategy_output_history_v2",
+        label="real_trade",
+        insert_columns=REAL_TRADE_INSERT_COLUMNS,
+        mode="real_trade",
+    )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. Backtest PnL (Full Recompute — unpartitioned, sequential anchor chain)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @asset(

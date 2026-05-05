@@ -19,7 +19,9 @@ from ..assets.pnl_strategy_v2 import (
     pnl_bt_v2_daily_asset,
     pnl_bt_v2_full_asset,
     pnl_prod_v2_daily_asset,
+    pnl_prod_v2_full_asset,
     pnl_real_trade_v2_daily_asset,
+    pnl_real_trade_v2_full_asset,
 )
 from ..assets.postgres_cleanup import postgres_cleanup_asset
 from ..sensors.automation_sensors import build_automation_sensors
@@ -31,7 +33,9 @@ all_assets = [
     pnl_prod_v2_daily_asset,
     pnl_bt_v2_daily_asset,
     pnl_real_trade_v2_daily_asset,
-    # BT full recompute (unpartitioned — use when backtester rewrites multi-year history)
+    # Full recomputes (unpartitioned — use when rewriting history from scratch)
+    pnl_prod_v2_full_asset,
+    pnl_real_trade_v2_full_asset,
     pnl_bt_v2_full_asset,
     # Rollups & Scans
     pnl_1hour_prod_rollup_asset,
