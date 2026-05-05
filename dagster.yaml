@@ -18,7 +18,7 @@ run_queue:
   tag_concurrency_limits:
     - key: "dagster/asset_key"
       value: "pnl_bt_v2_daily"
-      limit: 3
+      limit: 1
 
 run_launcher:
   module: dagster.core.launcher.default_run_launcher
