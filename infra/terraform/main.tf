@@ -788,24 +788,6 @@ resource "aws_cloudwatch_dashboard" "streaming_throughput" {
         width  = 24
         height = 6
         properties = {
-          title  = "Candle Processing Timestamp (Unix epoch)"
-          region = "ap-northeast-1"
-          metrics = [
-            ["trading-analysis", "CandleProcessingTs"]
-          ]
-          stat   = "Maximum"
-          period = 60
-          view   = "timeSeries"
-          yAxis  = { left = { min = 0 } }
-        }
-      },
-      {
-        type   = "metric"
-        x      = 0
-        y      = 24
-        width  = 24
-        height = 6
-        properties = {
           title  = "ClickHouse Throughput — rows flushed / flush"
           region = "ap-northeast-1"
           metrics = [
