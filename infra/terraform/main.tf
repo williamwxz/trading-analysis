@@ -1271,7 +1271,7 @@ resource "aws_ecs_service" "pnl_consumer" {
   name            = "${local.name_prefix}-pnl-consumer"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.pnl_consumer.arn
-  desired_count   = 0 # temporarily disabled
+  desired_count   = 1
 
   capacity_provider_strategy {
     capacity_provider = "FARGATE_SPOT"

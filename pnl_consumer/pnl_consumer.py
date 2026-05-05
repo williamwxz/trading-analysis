@@ -225,6 +225,25 @@ def _flush(
     consumer.commit(asynchronous=False)
 
 
+def _flush_and_reseed(
+    consumer: Consumer,
+    price_batch: list[list],
+    pnl_prod_batch: list[list],
+    pnl_real_trade_batch: list[list],
+    pnl_bt_batch: list[list],
+    state_prod: AnchorState,
+    state_real_trade: AnchorState,
+) -> None:
+    """Flush batches then re-seed anchor state from ClickHouse.
+
+    Re-seeding after every flush means a manual backfill that overwrites
+    ClickHouse rows is picked up within one flush cycle (~10 candles) rather
+    than requiring a consumer restart.
+    """
+    _flush(consumer, price_batch, pnl_prod_batch, pnl_real_trade_batch, pnl_bt_batch)
+    _bootstrap_anchors(state_prod, state_real_trade)
+
+
 def run() -> None:
     logging.basicConfig(level=logging.INFO)
 
@@ -262,6 +281,7 @@ def run() -> None:
             logger.exception("Error during shutdown flush")
         consumer.close()
         sys.exit(0)
+
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
@@ -335,12 +355,14 @@ def run() -> None:
                 n_prod = len(pnl_prod_batch)
                 n_rt = len(pnl_real_trade_batch)
                 n_bt = len(pnl_bt_batch)
-                _flush(
+                _flush_and_reseed(
                     consumer,
                     price_batch,
                     pnl_prod_batch,
                     pnl_real_trade_batch,
                     pnl_bt_batch,
+                    state_prod,
+                    state_real_trade,
                 )
                 logger.info(
                     "Flushed %d price + %d prod + %d real_trade + %d bt rows",

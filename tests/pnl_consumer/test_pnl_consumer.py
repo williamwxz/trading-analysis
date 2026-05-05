@@ -8,6 +8,7 @@ from pnl_consumer.ch_lookup import BtStrategyBar, StrategyBar, StrategyRevision
 from pnl_consumer.pnl_consumer import (
     _bootstrap_anchors,
     _flush,
+    _flush_and_reseed,
     process_candle,
 )
 from streaming.models import CandleEvent
@@ -361,3 +362,71 @@ def test_bootstrap_anchors_seeds_prod_and_real_trade():
     assert state_real_trade.get("strat_rt_1").anchor_price == 92000.0
     assert len(state_prod) == 1
     assert len(state_real_trade) == 1
+
+
+@pytest.mark.unit
+def test_flush_and_reseed_reseeds_anchors_from_clickhouse_after_flush():
+    """After a backfill overwrites ClickHouse data, the next flush must re-read
+    anchor state from ClickHouse so stale in-memory anchors don't corrupt PnL."""
+    consumer = MagicMock()
+    state_prod = AnchorState()
+    state_real_trade = AnchorState()
+    state_prod.update(
+        "strat_prod_1",
+        AnchorRecord(anchor_pnl=0.0, anchor_price=50000.0, anchor_position=1.0),
+    )
+
+    fresh_rows = [
+        {
+            "strategy_table_name": "strat_prod_1",
+            "anchor_pnl": 0.5,
+            "anchor_price": 95000.0,
+            "anchor_position": 1.0,
+        }
+    ]
+
+    def mock_query(sql):
+        if "strategy_pnl_1min_prod_v2" in sql:
+            return fresh_rows
+        return []
+
+    with (
+        patch("pnl_consumer.pnl_consumer.insert_rows"),
+        patch("pnl_consumer.pnl_consumer.query_dicts", side_effect=mock_query),
+    ):
+        _flush_and_reseed(
+            consumer, [["row"]], [], [], [], state_prod, state_real_trade
+        )
+
+    assert state_prod.get("strat_prod_1").anchor_price == 95000.0
+    assert state_prod.get("strat_prod_1").anchor_pnl == 0.5
+
+
+@pytest.mark.unit
+def test_flush_and_reseed_reseeds_even_when_batches_empty():
+    """Reseed happens on every flush, not just when there were rows to write."""
+    consumer = MagicMock()
+    state_prod = AnchorState()
+    state_real_trade = AnchorState()
+
+    fresh_rows = [
+        {
+            "strategy_table_name": "strat_prod_1",
+            "anchor_pnl": 0.9,
+            "anchor_price": 96000.0,
+            "anchor_position": -1.0,
+        }
+    ]
+
+    def mock_query(sql):
+        if "strategy_pnl_1min_prod_v2" in sql:
+            return fresh_rows
+        return []
+
+    with (
+        patch("pnl_consumer.pnl_consumer.insert_rows"),
+        patch("pnl_consumer.pnl_consumer.query_dicts", side_effect=mock_query),
+    ):
+        _flush_and_reseed(consumer, [], [], [], [], state_prod, state_real_trade)
+
+    assert state_prod.get("strat_prod_1").anchor_price == 96000.0
