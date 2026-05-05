@@ -153,7 +153,7 @@ LIMIT 1 BY strategy_table_name
     return result
 
 
-def fetch_anchor_for_strategy(strategy_table_name: str) -> AnchorRecord | None:
+def fetch_anchor_for_strategy(strategy_table_name: str) -> "AnchorRecord | None":
     """One-shot anchor lookup for a single strategy, searching up to 48 hours back.
 
     Returns None when no rows exist (brand-new or long-inactive strategy).
