@@ -9,6 +9,7 @@ from pnl_consumer.pnl_consumer import (
     _bootstrap_anchors,
     _flush,
     _flush_and_reseed,
+    emit_candle_lag,
     process_candle,
 )
 from streaming.models import CandleEvent
@@ -430,3 +431,38 @@ def test_flush_and_reseed_reseeds_even_when_batches_empty():
         _flush_and_reseed(consumer, [], [], [], [], state_prod, state_real_trade)
 
     assert state_prod.get("strat_prod_1").anchor_price == 96000.0
+
+
+@pytest.mark.unit
+def test_emit_candle_lag_calls_put_metric_data_with_lag_in_seconds():
+    """emit_candle_lag puts CandleLagSeconds = (now - candle_ts).total_seconds()."""
+    candle_ts = datetime(2026, 5, 4, 10, 0, 0)
+    fake_now = datetime(2026, 5, 4, 10, 1, 30)  # 90 seconds later
+
+    mock_cw = MagicMock()
+
+    with patch("pnl_consumer.pnl_consumer.datetime") as mock_dt:
+        mock_dt.now.return_value = fake_now
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        emit_candle_lag(candle_ts, mock_cw)
+
+    mock_cw.put_metric_data.assert_called_once()
+    call_kwargs = mock_cw.put_metric_data.call_args.kwargs
+    assert call_kwargs["Namespace"] == "trading-analysis"
+    metric = call_kwargs["MetricData"][0]
+    assert metric["MetricName"] == "CandleLagSeconds"
+    assert metric["Value"] == 90.0
+    assert metric["Unit"] == "Seconds"
+
+
+@pytest.mark.unit
+def test_emit_candle_lag_swallows_exceptions_without_raising():
+    """A CloudWatch failure must not crash the consumer loop."""
+    candle_ts = datetime(2026, 5, 4, 10, 0, 0)
+    mock_cw = MagicMock()
+    mock_cw.put_metric_data.side_effect = Exception("network error")
+
+    with patch("pnl_consumer.pnl_consumer.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 5, 4, 10, 1, 0)
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        emit_candle_lag(candle_ts, mock_cw)  # must not raise

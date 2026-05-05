@@ -4,7 +4,9 @@ import os
 import signal
 import sys
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
+import boto3
 from confluent_kafka import Consumer, KafkaError, KafkaException
 
 from pnl_consumer.anchor_state import AnchorRecord, AnchorState
@@ -194,6 +196,22 @@ LIMIT 1 BY strategy_table_name
     )
 
 
+def emit_candle_lag(candle_ts: datetime, cw_client: Any) -> None:
+    """Emit CandleLagSeconds to CloudWatch. Swallows errors to never crash the loop."""
+    try:
+        lag = (datetime.now(UTC).replace(tzinfo=None) - candle_ts).total_seconds()
+        cw_client.put_metric_data(
+            Namespace="trading-analysis",
+            MetricData=[{
+                "MetricName": "CandleLagSeconds",
+                "Value": lag,
+                "Unit": "Seconds",
+            }],
+        )
+    except Exception:
+        logger.warning("Failed to emit CandleLagSeconds metric", exc_info=True)
+
+
 def _flush(
     consumer: Consumer,
     price_batch: list[list],
@@ -250,6 +268,8 @@ def run() -> None:
     state_prod = AnchorState()
     state_real_trade = AnchorState()
     _bootstrap_anchors(state_prod, state_real_trade)
+
+    cw_client = boto3.client("cloudwatch", region_name=os.environ.get("AWS_REGION", "ap-northeast-1"))
 
     consumer = Consumer(
         {
@@ -364,6 +384,7 @@ def run() -> None:
                     state_prod,
                     state_real_trade,
                 )
+                emit_candle_lag(candle.ts, cw_client)
                 logger.info(
                     "Flushed %d price + %d prod + %d real_trade + %d bt rows",
                     n_price,

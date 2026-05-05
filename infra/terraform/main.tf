@@ -762,6 +762,44 @@ resource "aws_cloudwatch_dashboard" "streaming_throughput" {
           view   = "timeSeries"
           yAxis  = { left = { min = 0 } }
         }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 12
+        width  = 24
+        height = 6
+        properties = {
+          title  = "Candle Lag (seconds) — pnl-consumer"
+          region = "ap-northeast-1"
+          metrics = [
+            ["trading-analysis", "CandleLagSeconds"]
+          ]
+          stat   = "Maximum"
+          period = 60
+          view   = "timeSeries"
+          yAxis  = { left = { min = 0 } }
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 18
+        width  = 24
+        height = 6
+        properties = {
+          title  = "ClickHouse Throughput — rows flushed / flush"
+          region = "ap-northeast-1"
+          metrics = [
+            ["trading-analysis", "ClickHouseSinkProd", { label = "prod" }],
+            ["trading-analysis", "ClickHouseSinkRealTrade", { label = "real_trade" }],
+            ["trading-analysis", "ClickHouseSinkBt", { label = "bt" }]
+          ]
+          stat   = "Sum"
+          period = 60
+          view   = "timeSeries"
+          yAxis  = { left = { min = 0 } }
+        }
       }
     ]
   })
@@ -1041,6 +1079,20 @@ resource "aws_iam_role" "pnl_consumer_task" {
     }]
   })
   tags = local.common_tags
+}
+
+resource "aws_iam_role_policy" "pnl_consumer_cloudwatch" {
+  name = "cloudwatch-put-metrics"
+  role = aws_iam_role.pnl_consumer_task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["cloudwatch:PutMetricData"]
+      Resource = "*"
+    }]
+  })
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -685,23 +685,8 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "dfjc5vjyfcc8wf"
           },
-          "rawSql": "WITH dedup AS (SELECT ts, row_json, row_number() OVER (PARTITION BY ts ORDER BY revision_ts ASC) AS rn FROM analytics.strategy_output_history_v2 WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) SELECT d.ts AS time, JSONExtractFloat(d.row_json, 'price') AS `Price` FROM dedup d WHERE d.rn = 1 ORDER BY d.ts ASC",
+          "rawSql": "SELECT $__timeInterval(ts) AS time, argMax(price, ts) AS `Price` FROM (SELECT strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, source, version, ts, cumulative_pnl, benchmark, position, price, final_signal, weighting, updated_at FROM analytics.strategy_pnl_1min_real_trade_v2) WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
           "refId": "A",
-          "format": 1,
-          "queryType": "sql",
-          "meta": {
-            "builderOptions": {
-              "mode": 0
-            }
-          }
-        },
-        {
-          "datasource": {
-            "type": "grafana-clickhouse-datasource",
-            "uid": "dfjc5vjyfcc8wf"
-          },
-          "rawSql": "SELECT $__timeInterval(ts) AS time, argMax(price, ts) AS `Real Trade Price` FROM (SELECT strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, source, version, ts, cumulative_pnl, benchmark, position, price, final_signal, weighting, updated_at FROM analytics.strategy_pnl_1min_real_trade_v2) WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
-          "refId": "C",
           "format": 1,
           "queryType": "sql",
           "meta": {
