@@ -45,6 +45,7 @@ def process_candle(
     candle: CandleEvent,
     state_prod: AnchorState,
     state_real_trade: AnchorState,
+    state_bt: AnchorState,
 ) -> list[dict]:
     """Pure business logic: lookup strategies, compute PnL, return rows.
 
@@ -164,6 +165,11 @@ def process_candle(
     # --- bt ---
     bt_bars = fetch_bt_strategies_for_candle(candle.instrument, candle.ts)
     for bt_bar in bt_bars:
+        pnl = _compute_pnl_with_lazy_seed(
+            state_bt, bt_bar.strategy_table_name, candle.close, bt_bar.position
+        )
+        if pnl is None:
+            continue
         rows.append(
             {
                 "_sink": "pnl_bt",
@@ -175,7 +181,7 @@ def process_candle(
                 "source": "backtest",
                 "version": "v2",
                 "ts": candle.ts,
-                "cumulative_pnl": bt_bar.cumulative_pnl,
+                "cumulative_pnl": pnl,
                 "benchmark": bt_bar.benchmark,
                 "position": bt_bar.position,
                 "price": candle.close,
@@ -188,11 +194,12 @@ def process_candle(
     return rows
 
 
-def _bootstrap_anchors(state_prod: AnchorState, state_real_trade: AnchorState) -> None:
-    """On cold start, seed prod and real_trade anchor states from ClickHouse."""
+def _bootstrap_anchors(state_prod: AnchorState, state_real_trade: AnchorState, state_bt: AnchorState) -> None:
+    """On cold start, seed prod, real_trade, and bt anchor states from ClickHouse."""
     for table, state in [
         ("analytics.strategy_pnl_1min_prod_v2", state_prod),
         ("analytics.strategy_pnl_1min_real_trade_v2", state_real_trade),
+        ("analytics.strategy_pnl_1min_bt_v2", state_bt),
     ]:
         sql = f"""\
 SELECT
@@ -213,15 +220,16 @@ LIMIT 1 BY strategy_table_name
                     anchor_position=row["anchor_position"],
                 ),
             )
-    if len(state_prod) == 0 and len(state_real_trade) == 0:
+    if len(state_prod) == 0 and len(state_real_trade) == 0 and len(state_bt) == 0:
         raise RuntimeError(
             "Bootstrap failed: no anchor rows found in ClickHouse. "
             "Cannot start consumer without a valid PnL baseline."
         )
     logger.info(
-        "Bootstrapped %d prod anchor(s) and %d real_trade anchor(s) from ClickHouse",
+        "Bootstrapped %d prod, %d real_trade, %d bt anchor(s) from ClickHouse",
         len(state_prod),
         len(state_real_trade),
+        len(state_bt),
     )
 
 
@@ -293,6 +301,7 @@ def _flush_and_reseed(
     pnl_bt_batch: list[list],
     state_prod: AnchorState,
     state_real_trade: AnchorState,
+    state_bt: AnchorState,
 ) -> None:
     """Flush batches then re-seed anchor state from ClickHouse.
 
@@ -301,7 +310,7 @@ def _flush_and_reseed(
     than requiring a consumer restart.
     """
     _flush(consumer, price_batch, pnl_prod_batch, pnl_real_trade_batch, pnl_bt_batch)
-    _bootstrap_anchors(state_prod, state_real_trade)
+    _bootstrap_anchors(state_prod, state_real_trade, state_bt)
 
 
 def run() -> None:
@@ -309,7 +318,8 @@ def run() -> None:
 
     state_prod = AnchorState()
     state_real_trade = AnchorState()
-    _bootstrap_anchors(state_prod, state_real_trade)
+    state_bt = AnchorState()
+    _bootstrap_anchors(state_prod, state_real_trade, state_bt)
 
     cw_client = boto3.client("cloudwatch", region_name=os.environ.get("AWS_REGION", "ap-northeast-1"))
 
@@ -383,7 +393,7 @@ def run() -> None:
                 FLUSH_EVERY,
             )
 
-            for row in process_candle(candle, state_prod, state_real_trade):
+            for row in process_candle(candle, state_prod, state_real_trade, state_bt):
                 if row["_sink"] == "price":
                     price_batch.append(
                         [
@@ -425,6 +435,7 @@ def run() -> None:
                     pnl_bt_batch,
                     state_prod,
                     state_real_trade,
+                    state_bt,
                 )
                 emit_candle_lag(candle.ts, cw_client)
                 logger.info(

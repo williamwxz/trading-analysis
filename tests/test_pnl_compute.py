@@ -6,6 +6,7 @@ Tests the anchor-chained PnL computation without ClickHouse dependency.
 
 import re
 import pytest
+from unittest.mock import patch
 
 from trading_dagster.utils.pnl_compute import (
     assert_anchors_present,
@@ -24,8 +25,8 @@ from trading_dagster.utils.pnl_compute import (
 class TestComputeProdPnl:
     """Test compute_prod_pnl anchor chaining logic."""
 
-    def test_single_bar_no_anchor_prod_start_date(self):
-        """First bar on PROD_REAL_TRADE_START_DATE with no anchor is allowed (cold start)."""
+    def test_single_bar_no_anchor_on_strategy_first_date_allowed(self):
+        """First bar on strategy's first date with no anchor is allowed (cold start)."""
         bars = [
             {
                 "strategy_table_name": "test_strategy",
@@ -43,16 +44,20 @@ class TestComputeProdPnl:
         ]
         anchors = {}
         prices = {}
+        with patch("trading_dagster.utils.pnl_compute.fetch_strategy_start_dates") as mock_sd:
+            mock_sd.return_value = {"test_strategy": PROD_REAL_TRADE_START_DATE}
+            assert_anchors_present(anchors, bars, source_table="strategy_output_history_v2")  # must not raise
 
-        assert_anchors_present(anchors, bars, start_date=PROD_REAL_TRADE_START_DATE)  # must not raise
+        # Price must come from our source — provide prices for all 5 expansion minutes.
+        closing_ts_base = f"{PROD_REAL_TRADE_START_DATE} 00:05:00"
+        prices = {f"{PROD_REAL_TRADE_START_DATE} 00:0{5+i}:00": 100.0 for i in range(5)}
         rows = compute_prod_pnl(bars, anchors, prices, source_label="production")
-
         assert len(rows) == 5
         for row in rows:
             assert row[11] == 100.0  # price column
 
-    def test_single_bar_no_anchor_bt_start_date(self):
-        """First bar on BT_START_DATE with no anchor is allowed (cold start)."""
+    def test_single_bar_no_anchor_bt_first_date_allowed(self):
+        """First bar on strategy's first BT date with no anchor is allowed (cold start)."""
         bars = [
             {
                 "strategy_table_name": "test_bt_strategy",
@@ -68,10 +73,12 @@ class TestComputeProdPnl:
                 "bar_benchmark": 50.0,
             }
         ]
-        assert_anchors_present({}, bars, start_date=BT_START_DATE)  # must not raise
+        with patch("trading_dagster.utils.pnl_compute.fetch_strategy_start_dates") as mock_sd:
+            mock_sd.return_value = {"test_bt_strategy": BT_START_DATE}
+            assert_anchors_present({}, bars, source_table="strategy_output_history_bt_v2")  # must not raise
 
-    def test_no_anchor_after_prod_start_date_raises(self):
-        """Missing anchor for a prod bar after PROD_REAL_TRADE_START_DATE must raise."""
+    def test_no_anchor_after_first_date_raises(self):
+        """Missing anchor for a bar after the strategy's first date must raise."""
         bars = [
             {
                 "strategy_table_name": "test_strategy",
@@ -87,11 +94,13 @@ class TestComputeProdPnl:
                 "bar_benchmark": 100.0,
             }
         ]
-        with pytest.raises(RuntimeError, match="Missing PnL anchor"):
-            assert_anchors_present({}, bars, start_date=PROD_REAL_TRADE_START_DATE)
+        with patch("trading_dagster.utils.pnl_compute.fetch_strategy_start_dates") as mock_sd:
+            mock_sd.return_value = {"test_strategy": PROD_REAL_TRADE_START_DATE}
+            with pytest.raises(RuntimeError, match="Missing PnL anchor"):
+                assert_anchors_present({}, bars, source_table="strategy_output_history_v2")
 
-    def test_no_anchor_after_bt_start_date_raises(self):
-        """Missing anchor for a bt bar after BT_START_DATE must raise."""
+    def test_no_anchor_after_bt_first_date_raises(self):
+        """Missing anchor for a bt bar after its first date must raise."""
         bars = [
             {
                 "strategy_table_name": "test_bt_strategy",
@@ -107,8 +116,10 @@ class TestComputeProdPnl:
                 "bar_benchmark": 50.0,
             }
         ]
-        with pytest.raises(RuntimeError, match="Missing PnL anchor"):
-            assert_anchors_present({}, bars, start_date=BT_START_DATE)
+        with patch("trading_dagster.utils.pnl_compute.fetch_strategy_start_dates") as mock_sd:
+            mock_sd.return_value = {"test_bt_strategy": BT_START_DATE}
+            with pytest.raises(RuntimeError, match="Missing PnL anchor"):
+                assert_anchors_present({}, bars, source_table="strategy_output_history_bt_v2")
 
     def test_anchor_chaining_two_bars(self):
         """Two consecutive bars should chain PnL correctly."""
@@ -141,7 +152,8 @@ class TestComputeProdPnl:
             },
         ]
         anchors = {}
-        prices = {}
+        # Prices from our source covering both bars' expansion windows (closing_ts + 5 min each)
+        prices = {f"2024-01-01 00:{str(m).zfill(2)}:00": 100.0 for m in range(5, 15)}
 
         rows = compute_prod_pnl(bars, anchors, prices, source_label="production")
 
@@ -166,12 +178,13 @@ class TestComputeProdPnl:
             }
         ]
         anchors = {"test_strategy": (0.05, 105.0, 1.0)}  # 5% PnL at price 105, pos 1.0
-        prices = {}
+        # Flat prices from our source — PnL stays at 0.05 (no movement)
+        prices = {f"2024-01-01 00:{str(m).zfill(2)}:00": 105.0 for m in range(15, 20)}
 
         rows = compute_prod_pnl(bars, anchors, prices, source_label="production")
 
         assert len(rows) == 5
-        # First row uses anchor_price 105.0 as fallback, so PnL stays 0.05
+        # Flat price at anchor_price=105 → cpnl stays 0.05
         assert abs(rows[0][8] - 0.05) < 1e-10
 
 
@@ -197,7 +210,7 @@ class TestComputeRealTradePnl:
             }
         ]
         anchors = {}
-        prices = {}
+        prices = {f"2024-01-01 00:0{5+i}:00": 100.0 for i in range(5)}
 
         rows = compute_real_trade_pnl(bars, anchors, prices)
 
@@ -365,21 +378,38 @@ class TestComputeBtPnl:
         assert rows[0][5] == "backtest"
 
     def test_two_consecutive_bars_chain_pnl(self):
-        """Second bar starts from first bar's anchor cumulative_pnl."""
+        """Second bar's PnL chains from the computed end of the first bar, not from its cumulative_pnl field."""
         bars = [
             self._make_bar("2024-01-01 00:00:00", "2024-01-01 00:05:00", 1.0, 100.0, 0.0),
-            self._make_bar("2024-01-01 00:05:00", "2024-01-01 00:10:00", -1.0, 105.0, 0.05),
+            # cumulative_pnl=99.0 is a bogus value — must be ignored in favour of chaining
+            self._make_bar("2024-01-01 00:05:00", "2024-01-01 00:10:00", -1.0, 105.0, 99.0),
         ]
-        prices = {f"2024-01-01 00:0{i}:00": 100.0 + i for i in range(15)}
+        # Flat prices so first bar ends at cpnl=0.0; second bar should continue from there
+        prices = {f"2024-01-01 00:0{i}:00": 100.0 for i in range(10)}
 
         rows = compute_bt_pnl(bars, prices)
 
-        # 2 bars × 5 min = 10 rows
         assert len(rows) == 10
+        # The 6th row (first minute of bar 2) must NOT jump to 99.0; must be ~0.0
+        assert abs(rows[5][8]) < 1e-6, f"Expected ~0.0 but got {rows[5][8]} — bar 2 is not chaining correctly"
+
+    def test_cross_day_anchor_used_instead_of_source_cumulative_pnl(self):
+        """When an anchor is provided from the previous day, it takes priority over bar cumulative_pnl."""
+        bar = self._make_bar("2024-01-02 00:00:00", "2024-01-02 00:05:00", 1.0, 100.0, 99.0)
+        prices = {"2024-01-02 00:05:00": 100.0}
+        # Previous day ended at pnl=0.05, price=100.0
+        anchors = {"test_bt": (0.05, 100.0, 1.0)}
+
+        rows = compute_bt_pnl([bar], prices, anchors=anchors)
+
+        assert len(rows) == 5
+        # First row should start from anchor_pnl=0.05 (flat price → stays 0.05), not from 99.0
+        assert abs(rows[0][8] - 0.05) < 1e-6, f"Expected 0.05 but got {rows[0][8]}"
 
     def test_output_row_has_correct_column_count(self):
         """Output row must have exactly 15 columns matching PROD_INSERT_COLUMNS."""
         bar = self._make_bar("2024-01-01 00:00:00", "2024-01-01 00:05:00", 1.0, 100.0, 0.0)
-        rows = compute_bt_pnl([bar], {})
+        prices = {f"2024-01-01 00:0{5+i}:00": 100.0 for i in range(5)}
+        rows = compute_bt_pnl([bar], prices)
         assert len(rows) == 5
         assert len(rows[0]) == 15

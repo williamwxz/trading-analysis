@@ -85,22 +85,25 @@ def _prepare_rows_for_clickhouse(rows: list[list]) -> list[list]:
 _CHUNK_DAYS = 7  # process this many days at a time to cap memory per underlying
 
 
-def _recompute_pnl_full(context: AssetExecutionContext, target_table: str, source_table: str, label: str, insert_columns: list, mode: str):
-    """Recompute PnL for all underlyings from PROD_REAL_TRADE_START_DATE to now.
+def _recompute_pnl_full(context: AssetExecutionContext, target_table: str, source_table: str, label: str, insert_columns: list, mode: str, start_date: str | None = None):
+    """Recompute PnL for all underlyings from start_date to now.
 
-    mode: "prod" uses iter_compute_prod_pnl; "real_trade" uses compute_real_trade_pnl.
+    mode: "prod" uses iter_compute_prod_pnl; "real_trade" uses compute_real_trade_pnl;
+          "bt" uses compute_bt_pnl with close prices.
     Rows are re-inserted with a fresh updated_at; ReplacingMergeTree deduplicates.
     No DELETE — safe to rerun alongside pnl_consumer.
     Processes _CHUNK_DAYS at a time to bound memory usage.
     """
-    start_dt = datetime.strptime(PROD_REAL_TRADE_START_DATE, "%Y-%m-%d").replace(tzinfo=UTC)
+    if start_date is None:
+        start_date = PROD_REAL_TRADE_START_DATE
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=UTC)
     end_dt = datetime.now(tz=UTC)
 
     client = get_client()
     underlyings = _get_underlyings(source_table)
     context.log.info(
         f"Full recompute {label}: {len(underlyings)} underlyings, "
-        f"{PROD_REAL_TRADE_START_DATE} → {end_dt.strftime('%Y-%m-%d %H:%M:%S')}, "
+        f"{start_date} → {end_dt.strftime('%Y-%m-%d %H:%M:%S')}, "
         f"chunk_days={_CHUNK_DAYS}"
     )
 
@@ -109,8 +112,9 @@ def _recompute_pnl_full(context: AssetExecutionContext, target_table: str, sourc
     for underlying in underlyings:
         context.log.info(f"Processing underlying: {underlying}")
 
-        # anchors are refreshed from DB after each chunk so the chain carries forward
-        anchors = fetch_anchors(target_table, underlying)
+        # Full recompute always starts from zero — no prior anchor exists.
+        # In-memory anchors are built up as each chunk is computed.
+        anchors: dict = {}
 
         chunk_start = start_dt
         while chunk_start < end_dt:
@@ -118,7 +122,7 @@ def _recompute_pnl_full(context: AssetExecutionContext, target_table: str, sourc
             chunk_start_ts = chunk_start.strftime("%Y-%m-%d %H:%M:%S")
             chunk_end_ts = chunk_end.strftime("%Y-%m-%d %H:%M:%S")
 
-            if mode == "prod":
+            if mode in ("prod", "bt"):
                 sql = f"""\
 SELECT
     strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe,
@@ -180,12 +184,14 @@ ORDER BY strategy_table_name, ts, revision_ts
                 chunk_start = chunk_end
                 continue
 
+            price_col = "close" if mode == "bt" else "open"
             all_prices = fetch_prices_multi(
                 underlyings=[underlying],
                 ts_min=chunk_start_ts,
                 ts_max=chunk_end_ts,
                 client=client,
                 extend_minutes=0,
+                price_column=price_col,
             )
             prices = all_prices.pop(underlying, {})
 
@@ -195,6 +201,21 @@ ORDER BY strategy_table_name, ts, revision_ts
                     n = insert_rows(f"analytics.{target_table}", insert_columns, strategy_rows, client)
                     total_rows += n
                     context.log.info(f"  [{underlying}] chunk {chunk_start_ts[:10]} inserted {n} rows for {_stn}")
+                    # Update in-memory anchor from the last row of this strategy's output.
+                    # Avoids re-reading from DB (which may return stale or concurrent writes).
+                    if strategy_rows:
+                        last = strategy_rows[-1]
+                        # PROD_INSERT_COLUMNS: ts=7, cpnl=8, position=10, price=11
+                        anchors[_stn] = (float(last[8]), float(last[11]), float(last[10]))
+            elif mode == "bt":
+                for _stn, strategy_rows in iter_compute_prod_pnl(rows_dict, anchors, prices, source_label=label):
+                    _prepare_rows_for_clickhouse(strategy_rows)
+                    n = insert_rows(f"analytics.{target_table}", insert_columns, strategy_rows, client)
+                    total_rows += n
+                    context.log.info(f"  [{underlying}] chunk {chunk_start_ts[:10]} inserted {n} rows for {_stn}")
+                    if strategy_rows:
+                        last = strategy_rows[-1]
+                        anchors[_stn] = (float(last[8]), float(last[11]), float(last[10]))
             elif mode == "real_trade":
                 by_strategy: dict[str, list] = defaultdict(list)
                 for bar in rows_dict:
@@ -206,17 +227,19 @@ ORDER BY strategy_table_name, ts, revision_ts
                     n = insert_rows(f"analytics.{target_table}", insert_columns, strategy_rows, client)
                     total_rows += n
                     context.log.info(f"  [{underlying}] chunk {chunk_start_ts[:10]} inserted {n} real_trade rows for {stn}")
+                    # Update in-memory anchor from the last row of this strategy's output.
+                    if strategy_rows:
+                        last = strategy_rows[-1]
+                        anchors[stn] = (float(last[8]), float(last[11]), float(last[10]))
             else:
-                raise ValueError(f"Unknown mode: {mode!r}. Expected 'prod' or 'real_trade'.")
+                raise ValueError(f"Unknown mode: {mode!r}. Expected 'prod', 'bt', or 'real_trade'.")
 
             del rows_dict, prices
 
-            # Reload anchors from DB so next chunk starts from the committed tail.
-            anchors = fetch_anchors(target_table, underlying)
             chunk_start = chunk_end
 
     context.log.info(f"Full recompute {label} complete: {total_rows} total rows inserted")
-    return MaterializeResult(metadata={"rows_inserted": total_rows, "start_ts": f"{PROD_REAL_TRADE_START_DATE} 00:00:00", "end_ts": end_dt.strftime("%Y-%m-%d %H:%M:%S")})
+    return MaterializeResult(metadata={"rows_inserted": total_rows, "start_ts": f"{start_date} 00:00:00", "end_ts": end_dt.strftime("%Y-%m-%d %H:%M:%S")})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -229,10 +252,12 @@ ORDER BY strategy_table_name, ts, revision_ts
     deps=["binance_futures_backfill"],
     partitions_def=daily_partitions,
     compute_kind="clickhouse",
-    op_tags={"dagster/timeout": 300},
+    op_tags={"dagster/timeout": 300, "dagster/concurrency_limit": "pnl_prod_v2_daily"},
 )
 def pnl_prod_v2_daily_asset(context: AssetExecutionContext) -> MaterializeResult:
-    """Daily partitioned production PnL backfill."""
+    """Daily partitioned production PnL backfill. Run partitions sequentially — each day reads
+    the previous day's anchor from the target table, so concurrent partition runs will corrupt
+    the chain. Use max_partitions_per_run=1 when triggering a full backfill."""
     return _refresh_pnl_partitioned(context, "strategy_pnl_1min_prod_v2", "strategy_output_history_v2", "production")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -248,7 +273,8 @@ def pnl_prod_v2_daily_asset(context: AssetExecutionContext) -> MaterializeResult
     op_tags={"dagster/timeout": 300, "dagster/concurrency_limit": "pnl_bt_v2_daily"},
 )
 def pnl_bt_v2_daily_asset(context: AssetExecutionContext) -> MaterializeResult:
-    """Daily partitioned backtest PnL backfill. Uses cumulative_pnl from strategy JSON directly."""
+    """Daily partitioned backtest PnL backfill. Anchors chain across day boundaries via
+    fetch_anchors — run partitions sequentially (max_partitions_per_run=1)."""
     return _refresh_pnl_bt(context)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -261,63 +287,38 @@ def pnl_bt_v2_daily_asset(context: AssetExecutionContext) -> MaterializeResult:
     deps=["binance_futures_backfill"],
     partitions_def=daily_partitions,
     compute_kind="clickhouse",
-    op_tags={"dagster/timeout": 300},
+    op_tags={"dagster/timeout": 300, "dagster/concurrency_limit": "pnl_real_trade_v2_daily"},
 )
 def pnl_real_trade_v2_daily_asset(context: AssetExecutionContext) -> MaterializeResult:
     """Daily partitioned real trade PnL backfill."""
     return _refresh_pnl_real_trade(context)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. Production PnL (Full Recompute — unpartitioned, no timeout)
+# 4. Backtest PnL (Full Recompute — unpartitioned, sequential anchor chain)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @asset(
-    name="pnl_prod_v2_full",
+    name="pnl_bt_v2_full",
     group_name="strategy_pnl",
     deps=["binance_futures_backfill"],
     compute_kind="clickhouse",
+    op_tags={"dagster/timeout": 86400, "dagster/concurrency_limit": "pnl_bt_v2_full"},
 )
-def pnl_prod_v2_full_asset(context: AssetExecutionContext) -> MaterializeResult:
-    """Full sequential recompute of production PnL from start date to now.
+def pnl_bt_v2_full_asset(context: AssetExecutionContext) -> MaterializeResult:
+    """Full BT recompute from BT_START_DATE to now, 7-day chunks, anchors in-memory.
 
-    Processes all underlyings chronologically in a single long-running job.
-    Anchor chain is maintained in memory — no parallel partition race conditions.
-    Trigger manually from the Dagster UI when a full recompute is needed.
+    Use this instead of pnl_bt_v2_daily when the backtester rewrites multi-year history.
+    No DELETE — safe to rerun; ReplacingMergeTree deduplicates on updated_at.
+    Expect 6+ hours for a full 6-year recompute.
     """
     return _recompute_pnl_full(
         context,
-        target_table="strategy_pnl_1min_prod_v2",
-        source_table="strategy_output_history_v2",
-        label="production",
+        target_table="strategy_pnl_1min_bt_v2",
+        source_table="strategy_output_history_bt_v2",
+        label="backtest",
         insert_columns=PROD_INSERT_COLUMNS,
-        mode="prod",
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 5. Real Trade PnL (Full Recompute — unpartitioned, no timeout)
-# ─────────────────────────────────────────────────────────────────────────────
-
-@asset(
-    name="pnl_real_trade_v2_full",
-    group_name="strategy_pnl",
-    deps=["binance_futures_backfill"],
-    compute_kind="clickhouse",
-)
-def pnl_real_trade_v2_full_asset(context: AssetExecutionContext) -> MaterializeResult:
-    """Full sequential recompute of real_trade PnL from start date to now.
-
-    Processes all underlyings chronologically in a single long-running job.
-    Anchor chain is maintained in memory — no parallel partition race conditions.
-    Trigger manually from the Dagster UI when a full recompute is needed.
-    """
-    return _recompute_pnl_full(
-        context,
-        target_table="strategy_pnl_1min_real_trade_v2",
-        source_table="strategy_output_history_v2",
-        label="real_trade",
-        insert_columns=REAL_TRADE_INSERT_COLUMNS,
-        mode="real_trade",
+        mode="bt",
+        start_date=BT_START_DATE,
     )
 
 
@@ -378,7 +379,7 @@ def _refresh_pnl_partitioned(context, target_table: str, source_table: str, labe
 
         # We still need anchors from the end of the previous day
         anchors = fetch_anchors(target_table, underlying)
-        assert_anchors_present(anchors, rows_dict, start_date=PROD_REAL_TRADE_START_DATE)
+        assert_anchors_present(anchors, rows_dict, source_table=source_table)
         # Pop (not get) so this underlying's price dict is freed immediately after
         # use rather than being held in all_prices for the rest of the loop.
         prices = all_prices.pop(underlying, {})
@@ -429,8 +430,10 @@ def _refresh_pnl_bt(context) -> MaterializeResult:
             all_prices.pop(underlying, None)
             continue
 
+        anchors = fetch_anchors(target_table, underlying)
+        assert_anchors_present(anchors, bars, source_table=source_table, bar_ts_key="execution_ts")
         prices = all_prices.pop(underlying, {})
-        rows = compute_bt_pnl(bars, prices)
+        rows = compute_bt_pnl(bars, prices, anchors=anchors)
         _prepare_rows_for_clickhouse(rows)
         total_rows += insert_rows(f"analytics.{target_table}", PROD_INSERT_COLUMNS, rows, client)
         del bars, prices
@@ -466,7 +469,7 @@ def _refresh_pnl_real_trade(context) -> MaterializeResult:
         ts_max = max(b["ts"] for b in bars)
         prices = fetch_prices(underlying, ts_min, ts_max, client)
         anchors = fetch_anchors(target_table, underlying)
-        assert_anchors_present(anchors, bars, start_date=PROD_REAL_TRADE_START_DATE, bar_ts_key="execution_ts")
+        assert_anchors_present(anchors, bars, source_table=source_table, bar_ts_key="execution_ts")
         rows = compute_real_trade_pnl(bars, anchors, prices)
         _prepare_rows_for_clickhouse(rows)
         total_rows += insert_rows(f"analytics.{target_table}", REAL_TRADE_INSERT_COLUMNS, rows, client)

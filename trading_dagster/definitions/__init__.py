@@ -17,10 +17,9 @@ from ..assets.pnl_rollup import (
 )
 from ..assets.pnl_strategy_v2 import (
     pnl_bt_v2_daily_asset,
+    pnl_bt_v2_full_asset,
     pnl_prod_v2_daily_asset,
-    pnl_prod_v2_full_asset,
     pnl_real_trade_v2_daily_asset,
-    pnl_real_trade_v2_full_asset,
 )
 from ..assets.postgres_cleanup import postgres_cleanup_asset
 from ..sensors.automation_sensors import build_automation_sensors
@@ -28,13 +27,12 @@ from ..sensors.automation_sensors import build_automation_sensors
 all_assets = [
     # Market data (backfill only — real-time via pnl_consumer)
     binance_futures_backfill_asset,
-    # Strategy PnL v2 (Daily Backfills)
+    # Strategy PnL v2 (Daily Backfills — run sequentially, max_partitions_per_run=1)
     pnl_prod_v2_daily_asset,
     pnl_bt_v2_daily_asset,
     pnl_real_trade_v2_daily_asset,
-    # Strategy PnL v2 (Full Recompute — manual trigger)
-    pnl_prod_v2_full_asset,
-    pnl_real_trade_v2_full_asset,
+    # BT full recompute (unpartitioned — use when backtester rewrites multi-year history)
+    pnl_bt_v2_full_asset,
     # Rollups & Scans
     pnl_1hour_prod_rollup_asset,
     pnl_1hour_real_trade_rollup_asset,

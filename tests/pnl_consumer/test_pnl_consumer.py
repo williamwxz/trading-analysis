@@ -63,7 +63,7 @@ def test_process_candle_produces_pnl_rows():
         patch(f"{_MOD}.fetch_real_trade_revisions_for_candle", return_value=[]),
         patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=[]),
     ):
-        rows = process_candle(candle, state_prod, AnchorState())
+        rows = process_candle(candle, state_prod, AnchorState(), AnchorState())
 
     pnl_rows = [r for r in rows if r.get("_sink") == "pnl_prod"]
     assert len(pnl_rows) == 1
@@ -83,7 +83,7 @@ def test_process_candle_no_strategies_returns_only_price_row():
         patch(f"{_MOD}.fetch_real_trade_revisions_for_candle", return_value=[]),
         patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=[]),
     ):
-        rows = process_candle(candle, AnchorState(), AnchorState())
+        rows = process_candle(candle, AnchorState(), AnchorState(), AnchorState())
 
     pnl_rows = [r for r in rows if r.get("_sink") == "pnl_prod"]
     assert pnl_rows == []
@@ -103,7 +103,7 @@ def test_process_candle_always_emits_price_row():
         patch(f"{_MOD}.fetch_real_trade_revisions_for_candle", return_value=[]),
         patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=[]),
     ):
-        rows = process_candle(candle, state_prod, AnchorState())
+        rows = process_candle(candle, state_prod, AnchorState(), AnchorState())
 
     price_row = next((r for r in rows if r.get("_sink") == "price"), None)
     assert price_row is not None
@@ -188,7 +188,7 @@ def test_process_candle_produces_pnl_real_trade_rows():
         ),
         patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=[]),
     ):
-        rows = process_candle(candle, state_prod, state_real_trade)
+        rows = process_candle(candle, state_prod, state_real_trade, AnchorState())
 
     rt_rows = [r for r in rows if r.get("_sink") == "pnl_real_trade"]
     assert len(rt_rows) == 1
@@ -221,7 +221,7 @@ def test_process_candle_multiple_revisions_chains_anchor():
         ),
         patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=[]),
     ):
-        rows = process_candle(candle, state_prod, state_real_trade)
+        rows = process_candle(candle, state_prod, state_real_trade, AnchorState())
 
     rt_rows = [r for r in rows if r.get("_sink") == "pnl_real_trade"]
     assert len(rt_rows) == 2
@@ -231,8 +231,34 @@ def test_process_candle_multiple_revisions_chains_anchor():
 
 @pytest.mark.unit
 def test_process_candle_produces_pnl_bt_rows():
+    """BT rows are anchor-chained via state_bt, not raw cumulative_pnl from bar."""
     state_prod = AnchorState()
     state_real_trade = AnchorState()
+    state_bt = AnchorState()
+    state_bt.update("strat_bt_1", AnchorRecord(anchor_pnl=0.05, anchor_price=93100.0, anchor_position=1.0))
+    candle = _make_candle(close=93200.0)
+    bt_bar = _make_bt_bar(cumulative_pnl=99.0)  # raw value must be ignored
+
+    with (
+        patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[]),
+        patch(f"{_MOD}.fetch_real_trade_revisions_for_candle", return_value=[]),
+        patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=[bt_bar]),
+    ):
+        rows = process_candle(candle, state_prod, state_real_trade, state_bt)
+
+    bt_rows = [r for r in rows if r.get("_sink") == "pnl_bt"]
+    assert len(bt_rows) == 1
+    row = bt_rows[0]
+    assert row["strategy_table_name"] == "strat_bt_1"
+    assert row["source"] == "backtest"
+    # Anchor-chained: 0.05 + 1.0 * (93200 - 93100) / 93100 ≈ 0.0511
+    assert abs(row["cumulative_pnl"] - (0.05 + 100.0 / 93100.0)) < 1e-6
+
+
+@pytest.mark.unit
+def test_process_candle_bt_lazy_seeds_anchor_when_missing():
+    """bt row is skipped when no anchor exists and lazy-seed also fails."""
+    state_bt = AnchorState()
     candle = _make_candle(close=93200.0)
     bt_bar = _make_bt_bar(cumulative_pnl=0.05)
 
@@ -240,34 +266,12 @@ def test_process_candle_produces_pnl_bt_rows():
         patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[]),
         patch(f"{_MOD}.fetch_real_trade_revisions_for_candle", return_value=[]),
         patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=[bt_bar]),
+        patch(f"{_MOD}.fetch_anchor_for_strategy", return_value=None),
     ):
-        rows = process_candle(candle, state_prod, state_real_trade)
+        rows = process_candle(candle, AnchorState(), AnchorState(), state_bt)
 
     bt_rows = [r for r in rows if r.get("_sink") == "pnl_bt"]
-    assert len(bt_rows) == 1
-    row = bt_rows[0]
-    assert row["strategy_table_name"] == "strat_bt_1"
-    assert row["source"] == "backtest"
-    assert row["cumulative_pnl"] == 0.05
-
-
-@pytest.mark.unit
-def test_process_candle_bt_uses_cumulative_pnl_from_bar_not_anchor():
-    """bt rows must use row_json cumulative_pnl directly, not compute from anchor."""
-    state_prod = AnchorState()
-    state_real_trade = AnchorState()
-    candle = _make_candle(close=93200.0)
-    bt_bar = _make_bt_bar(cumulative_pnl=0.99)
-
-    with (
-        patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[]),
-        patch(f"{_MOD}.fetch_real_trade_revisions_for_candle", return_value=[]),
-        patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=[bt_bar]),
-    ):
-        rows = process_candle(candle, state_prod, state_real_trade)
-
-    bt_rows = [r for r in rows if r.get("_sink") == "pnl_bt"]
-    assert bt_rows[0]["cumulative_pnl"] == 0.99
+    assert bt_rows == []  # skipped — no anchor, lazy-seed returned None
 
 
 @pytest.mark.unit
@@ -283,7 +287,7 @@ def test_process_candle_lazy_seeds_anchor_when_missing():
         patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=[]),
         patch(f"{_MOD}.fetch_anchor_for_strategy", return_value=seeded_anchor) as mock_fetch,
     ):
-        rows = process_candle(candle, AnchorState(), AnchorState())
+        rows = process_candle(candle, AnchorState(), AnchorState(), AnchorState())
 
     mock_fetch.assert_called_once_with("strat_prod_1")
     pnl_rows = [r for r in rows if r.get("_sink") == "pnl_prod"]
@@ -303,7 +307,7 @@ def test_process_candle_skips_pnl_when_lazy_seed_also_fails():
         patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=[]),
         patch(f"{_MOD}.fetch_anchor_for_strategy", return_value=None),
     ):
-        rows = process_candle(candle, AnchorState(), AnchorState())
+        rows = process_candle(candle, AnchorState(), AnchorState(), AnchorState())
 
     pnl_rows = [r for r in rows if r.get("_sink") == "pnl_prod"]
     assert pnl_rows == []
@@ -392,6 +396,7 @@ def test_bootstrap_anchors_seeds_prod_and_real_trade():
     ]
     state_prod = AnchorState()
     state_real_trade = AnchorState()
+    state_bt = AnchorState()
 
     def mock_query(sql):
         if "strategy_pnl_1min_prod_v2" in sql:
@@ -401,7 +406,7 @@ def test_bootstrap_anchors_seeds_prod_and_real_trade():
         return []
 
     with patch("pnl_consumer.pnl_consumer.query_dicts", side_effect=mock_query):
-        _bootstrap_anchors(state_prod, state_real_trade)
+        _bootstrap_anchors(state_prod, state_real_trade, state_bt)
 
     assert state_prod.get("strat_prod_1").anchor_price == 93000.0
     assert state_real_trade.get("strat_rt_1").anchor_price == 92000.0
@@ -440,7 +445,7 @@ def test_flush_and_reseed_reseeds_anchors_from_clickhouse_after_flush():
         patch("pnl_consumer.pnl_consumer.query_dicts", side_effect=mock_query),
     ):
         _flush_and_reseed(
-            consumer, [["row"]], [], [], [], state_prod, state_real_trade
+            consumer, [["row"]], [], [], [], state_prod, state_real_trade, AnchorState()
         )
 
     assert state_prod.get("strat_prod_1").anchor_price == 95000.0
@@ -472,7 +477,7 @@ def test_flush_and_reseed_reseeds_even_when_batches_empty():
         patch("pnl_consumer.pnl_consumer.insert_rows"),
         patch("pnl_consumer.pnl_consumer.query_dicts", side_effect=mock_query),
     ):
-        _flush_and_reseed(consumer, [], [], [], [], state_prod, state_real_trade)
+        _flush_and_reseed(consumer, [], [], [], [], state_prod, state_real_trade, AnchorState())
 
     assert state_prod.get("strat_prod_1").anchor_price == 96000.0
 

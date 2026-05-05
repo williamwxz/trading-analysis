@@ -60,17 +60,15 @@ class TestRecomputePnlFull:
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
     def test_prod_fetches_bars_for_full_range(
-        self, mock_client, mock_get_und, mock_qd, mock_anchors, mock_prices, mock_insert
+        self, mock_client, mock_get_und, mock_qd, mock_prices, mock_insert
     ):
         """Bars query covers PROD_REAL_TRADE_START_DATE to now for all underlyings."""
         mock_get_und.return_value = ["btc"]
         mock_qd.return_value = [_make_bar()]
-        mock_anchors.return_value = {}
         mock_prices.return_value = {"btc": {"2026-02-27 00:00:00": 100.0}}
         mock_insert.return_value = 5
 
@@ -84,28 +82,24 @@ class TestRecomputePnlFull:
             mode="prod",
         )
 
-        # first chunk starts at PROD_REAL_TRADE_START_DATE; all chunks use same table/underlying
         first_call_args = mock_qd.call_args_list[0][0][0]
         assert PROD_REAL_TRADE_START_DATE in first_call_args
         assert "strategy_output_history_v2" in first_call_args
         assert "btc" in first_call_args
-        # last chunk must cover a date within the current year (end_dt is datetime.now(UTC))
         last_call_args = mock_qd.call_args[0][0]
         assert str(date.today().year) in last_call_args
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
     def test_prod_inserts_to_correct_table(
-        self, mock_client, mock_get_und, mock_qd, mock_anchors, mock_prices, mock_insert
+        self, mock_client, mock_get_und, mock_qd, mock_prices, mock_insert
     ):
         """Rows must be inserted into the target table with PROD_INSERT_COLUMNS."""
         mock_get_und.return_value = ["btc"]
         mock_qd.return_value = [_make_bar()]
-        mock_anchors.return_value = {}
         mock_prices.return_value = {"btc": {"2026-02-27 00:00:00": 100.0}}
         mock_insert.return_value = 5
 
@@ -127,17 +121,15 @@ class TestRecomputePnlFull:
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
     def test_empty_underlying_skipped_gracefully(
-        self, mock_client, mock_get_und, mock_qd, mock_anchors, mock_prices, mock_insert
+        self, mock_client, mock_get_und, mock_qd, mock_prices, mock_insert
     ):
         """If source table has no bars for an underlying, insert is not called."""
         mock_get_und.return_value = ["btc"]
         mock_qd.return_value = []  # no bars
-        mock_anchors.return_value = {}
         mock_prices.return_value = {"btc": {}}
         mock_insert.return_value = 0
 
@@ -156,17 +148,15 @@ class TestRecomputePnlFull:
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
     def test_real_trade_uses_real_trade_columns(
-        self, mock_client, mock_get_und, mock_qd, mock_anchors, mock_prices, mock_insert
+        self, mock_client, mock_get_und, mock_qd, mock_prices, mock_insert
     ):
         """real_trade mode must insert with REAL_TRADE_INSERT_COLUMNS."""
         mock_get_und.return_value = ["btc"]
         mock_qd.return_value = [_make_rt_bar()]
-        mock_anchors.return_value = {}
         mock_prices.return_value = {"btc": {"2026-02-27 00:00:00": 100.0}}
         mock_insert.return_value = 5
 
@@ -187,17 +177,15 @@ class TestRecomputePnlFull:
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
     def test_progress_logged_per_underlying(
-        self, mock_client, mock_get_und, mock_qd, mock_anchors, mock_prices, mock_insert
+        self, mock_client, mock_get_und, mock_qd, mock_prices, mock_insert
     ):
         """context.log.info must be called at least once per underlying processed."""
         mock_get_und.return_value = ["btc", "eth"]
         mock_qd.return_value = [_make_bar()]
-        mock_anchors.return_value = {}
         mock_prices.return_value = {
             "btc": {"2026-02-27 00:00:00": 100.0},
             "eth": {"2026-02-27 00:00:00": 50.0},

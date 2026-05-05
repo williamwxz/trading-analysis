@@ -164,6 +164,7 @@ def fetch_anchor_for_strategy(strategy_table_name: str) -> "AnchorRecord | None"
     for table in (
         "analytics.strategy_pnl_1min_prod_v2",
         "analytics.strategy_pnl_1min_real_trade_v2",
+        "analytics.strategy_pnl_1min_bt_v2",
     ):
         sql = f"""\
 SELECT
