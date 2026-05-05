@@ -422,6 +422,11 @@ resource "aws_ecs_service" "dagster" {
   task_definition = aws_ecs_task_definition.dagster.arn
   desired_count   = 1
 
+  # Stop old task before starting new one to avoid hitting Fargate vCPU quota.
+  # Dagster tolerates brief downtime during deploys.
+  deployment_minimum_healthy_percent = 0
+  deployment_maximum_percent         = 100
+
   capacity_provider_strategy {
     capacity_provider = "FARGATE"
     weight            = 1
