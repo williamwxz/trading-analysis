@@ -456,6 +456,28 @@ def test_emit_candle_lag_calls_put_metric_data_with_lag_in_seconds():
 
 
 @pytest.mark.unit
+def test_emit_candle_lag_also_emits_processing_ts_as_unix_epoch():
+    """emit_candle_lag emits CandleProcessingTs = candle_ts as Unix epoch."""
+    candle_ts = datetime(2026, 5, 4, 10, 0, 0)
+    fake_now = datetime(2026, 5, 4, 10, 1, 30)
+    mock_cw = MagicMock()
+
+    with patch("pnl_consumer.pnl_consumer.datetime") as mock_dt:
+        mock_dt.now.return_value = fake_now
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        emit_candle_lag(candle_ts, mock_cw)
+
+    call_kwargs = mock_cw.put_metric_data.call_args.kwargs
+    metric_names = [m["MetricName"] for m in call_kwargs["MetricData"]]
+    assert "CandleProcessingTs" in metric_names
+
+    pts_metric = next(m for m in call_kwargs["MetricData"] if m["MetricName"] == "CandleProcessingTs")
+    expected_epoch = candle_ts.timestamp()
+    assert pts_metric["Value"] == expected_epoch
+    assert pts_metric["Unit"] == "None"
+
+
+@pytest.mark.unit
 def test_emit_candle_lag_swallows_exceptions_without_raising():
     """A CloudWatch failure must not crash the consumer loop."""
     candle_ts = datetime(2026, 5, 4, 10, 0, 0)

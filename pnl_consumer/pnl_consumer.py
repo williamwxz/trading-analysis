@@ -197,19 +197,26 @@ LIMIT 1 BY strategy_table_name
 
 
 def emit_candle_lag(candle_ts: datetime, cw_client: Any) -> None:
-    """Emit CandleLagSeconds to CloudWatch. Swallows errors to never crash the loop."""
+    """Emit CandleLagSeconds and CandleProcessingTs to CloudWatch. Swallows errors."""
     try:
         lag = (datetime.now(UTC).replace(tzinfo=None) - candle_ts).total_seconds()
         cw_client.put_metric_data(
             Namespace="trading-analysis",
-            MetricData=[{
-                "MetricName": "CandleLagSeconds",
-                "Value": lag,
-                "Unit": "Seconds",
-            }],
+            MetricData=[
+                {
+                    "MetricName": "CandleLagSeconds",
+                    "Value": lag,
+                    "Unit": "Seconds",
+                },
+                {
+                    "MetricName": "CandleProcessingTs",
+                    "Value": candle_ts.timestamp(),
+                    "Unit": "None",
+                },
+            ],
         )
     except Exception:
-        logger.warning("Failed to emit CandleLagSeconds metric", exc_info=True)
+        logger.warning("Failed to emit candle metrics", exc_info=True)
 
 
 def _flush(
