@@ -102,18 +102,21 @@ def _process_underlying(
     mode: str,
     start_dt: datetime,
     end_dt: datetime,
+    log_fn=None,
 ) -> int:
     """Process all time chunks for one underlying. Returns total rows inserted.
 
     Designed to run in a thread — owns its own ClickHouse client and anchors dict.
+    log_fn: callable(str) routed to context.log.info so progress appears in Dagster UI.
     """
+    _emit = log_fn or _log.info
     client = get_client()
     anchors: dict = {}
     total_rows = 0
     chunk_count = math.ceil((end_dt - start_dt).total_seconds() / 86400 / _CHUNK_DAYS)
     chunks_done = 0
 
-    _log.info(
+    _emit(
         f"[{underlying}] starting: {start_dt.strftime('%Y-%m-%d')} → "
         f"{end_dt.strftime('%Y-%m-%d')}, {chunk_count} chunks"
     )
@@ -203,8 +206,8 @@ ORDER BY strategy_table_name, ts, revision_ts
         chunks_done += 1
         if not rows_dict:
             chunk_start = chunk_end
-            if chunks_done % 10 == 0:
-                _log.info(
+            if chunks_done % 100 == 0:
+                _emit(
                     f"[{underlying}] progress: {chunks_done}/{chunk_count} chunks done "
                     f"({total_rows:,} rows so far)"
                 )
@@ -261,15 +264,15 @@ ORDER BY strategy_table_name, ts, revision_ts
 
         del rows_dict, prices
 
-        if chunks_done % 10 == 0:
-            _log.info(
+        if chunks_done % 100 == 0:
+            _emit(
                 f"[{underlying}] progress: {chunks_done}/{chunk_count} chunks done "
                 f"({total_rows:,} rows so far)"
             )
 
         chunk_start = chunk_end
 
-    _log.info(f"[{underlying}] complete: {total_rows:,} rows inserted")
+    _emit(f"[{underlying}] complete: {total_rows:,} rows inserted")
     return total_rows
 
 
@@ -308,6 +311,7 @@ def _recompute_pnl_full(context: AssetExecutionContext, target_table: str, sourc
                 mode,
                 start_dt,
                 end_dt,
+                context.log.info,
             ): underlying
             for underlying in underlyings
         }
