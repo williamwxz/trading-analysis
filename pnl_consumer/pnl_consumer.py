@@ -250,13 +250,25 @@ def process_candle(
     return rows
 
 
-def _bootstrap_anchors(state_prod: AnchorState, state_real_trade: AnchorState, state_bt: AnchorState) -> None:
-    """On cold start, seed prod, real_trade, and bt anchor states from ClickHouse."""
-    for table, state in [
-        ("analytics.strategy_pnl_1min_prod_v2", state_prod),
-        ("analytics.strategy_pnl_1min_real_trade_v2", state_real_trade),
-        ("analytics.strategy_pnl_1min_bt_v2", state_bt),
-    ]:
+def _bootstrap_anchors(
+    state_prod: AnchorState,
+    state_real_trade: AnchorState,
+    state_bt: AnchorState,
+    cfg: SinkConfig | None = None,
+) -> None:
+    """On cold start, seed anchor states from ClickHouse for enabled PnL sinks."""
+    if cfg is not None and not any([cfg.prod, cfg.real_trade, cfg.bt]):
+        logger.info("No PnL sinks enabled — skipping anchor bootstrap")
+        return
+
+    candidates = [
+        ("analytics.strategy_pnl_1min_prod_v2", state_prod, cfg.prod if cfg else True),
+        ("analytics.strategy_pnl_1min_real_trade_v2", state_real_trade, cfg.real_trade if cfg else True),
+        ("analytics.strategy_pnl_1min_bt_v2", state_bt, cfg.bt if cfg else True),
+    ]
+    for table, state, enabled in candidates:
+        if not enabled:
+            continue
         sql = f"""\
 SELECT
     strategy_table_name,
@@ -277,7 +289,10 @@ LIMIT 1 BY strategy_table_name
                     anchor_position=row["anchor_position"],
                 ),
             )
-    if len(state_prod) == 0 and len(state_real_trade) == 0 and len(state_bt) == 0:
+    enabled_states = [
+        (state, enabled) for _, state, enabled in candidates if enabled
+    ]
+    if all(len(state) == 0 for state, _ in enabled_states):
         raise RuntimeError(
             "Bootstrap failed: no anchor rows found in ClickHouse. "
             "Cannot start consumer without a valid PnL baseline."
@@ -359,6 +374,7 @@ def _flush_and_reseed(
     state_prod: AnchorState,
     state_real_trade: AnchorState,
     state_bt: AnchorState,
+    cfg: SinkConfig | None = None,
 ) -> None:
     """Flush batches then re-seed anchor state from ClickHouse.
 
@@ -367,7 +383,7 @@ def _flush_and_reseed(
     than requiring a consumer restart.
     """
     _flush(consumer, price_batch, pnl_prod_batch, pnl_real_trade_batch, pnl_bt_batch)
-    _bootstrap_anchors(state_prod, state_real_trade, state_bt)
+    _bootstrap_anchors(state_prod, state_real_trade, state_bt, cfg)
 
 
 def run() -> None:
@@ -382,7 +398,7 @@ def run() -> None:
     state_prod = AnchorState()
     state_real_trade = AnchorState()
     state_bt = AnchorState()
-    _bootstrap_anchors(state_prod, state_real_trade, state_bt)
+    _bootstrap_anchors(state_prod, state_real_trade, state_bt, sink_cfg)
 
     cw_client = boto3.client("cloudwatch", region_name=os.environ.get("AWS_REGION", "ap-northeast-1"))
 
@@ -500,6 +516,7 @@ def run() -> None:
                     state_prod,
                     state_real_trade,
                     state_bt,
+                    sink_cfg,
                 )
                 emit_candle_lag(candle.ts, cw_client)
                 logger.info(

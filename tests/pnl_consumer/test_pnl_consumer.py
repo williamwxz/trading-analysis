@@ -769,6 +769,43 @@ def test_process_candle_no_sink_config_defaults_to_all_enabled():
 
 
 @pytest.mark.unit
+def test_bootstrap_anchors_skipped_when_no_pnl_sinks_enabled():
+    """Price-only sink must not query ClickHouse for anchor state."""
+    cfg = SinkConfig(price=True, prod=False, real_trade=False, bt=False)
+    state_prod = AnchorState()
+    state_real_trade = AnchorState()
+    state_bt = AnchorState()
+
+    with patch("pnl_consumer.pnl_consumer.query_dicts") as mock_query:
+        _bootstrap_anchors(state_prod, state_real_trade, state_bt, cfg)
+
+    mock_query.assert_not_called()
+
+
+@pytest.mark.unit
+def test_bootstrap_anchors_runs_when_any_pnl_sink_enabled():
+    """Bootstrap must run when at least one PnL sink is enabled."""
+    cfg = SinkConfig(price=True, prod=True, real_trade=False, bt=False)
+    prod_rows = [{
+        "strategy_table_name": "s1",
+        "anchor_pnl": 0.1,
+        "anchor_price": 93000.0,
+        "anchor_position": 1.0,
+    }]
+
+    def mock_query(sql):
+        if "strategy_pnl_1min_prod_v2" in sql:
+            return prod_rows
+        return []
+
+    state_prod = AnchorState()
+    with patch("pnl_consumer.pnl_consumer.query_dicts", side_effect=mock_query):
+        _bootstrap_anchors(state_prod, AnchorState(), AnchorState(), cfg)
+
+    assert state_prod.get("s1").anchor_price == 93000.0
+
+
+@pytest.mark.unit
 def test_resolve_group_id_returns_env_var_when_set():
     assert resolve_group_id({"KAFKA_GROUP_ID": "my-custom-group"}) == "my-custom-group"
 
