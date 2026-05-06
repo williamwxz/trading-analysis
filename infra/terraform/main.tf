@@ -1251,7 +1251,7 @@ locals {
       enable_real_trade = "true"
       enable_bt         = "false"
       group_id          = "pnl-consumer-real-trade"
-      desired_count     = 0
+      desired_count     = 1
     }
     bt = {
       enable_price      = "false"
