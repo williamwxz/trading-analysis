@@ -191,7 +191,16 @@ class TestComputeProdPnl:
 class TestComputeRealTradePnl:
     """Test compute_real_trade_pnl with execution timing."""
 
-    def _make_revision(self, ts, closing_ts, execution_ts, position):
+    def _make_revision(
+        self, ts, closing_ts, execution_ts, position,
+        revision_ts=None, next_bar_closing_ts=None,
+    ):
+        # Default: revision arrives exactly at execution_ts (on-time),
+        # no next bar (next_bar_closing_ts sentinel = closing_ts).
+        if revision_ts is None:
+            revision_ts = execution_ts
+        if next_bar_closing_ts is None:
+            next_bar_closing_ts = closing_ts  # sentinel: no next bar → always accept
         return {
             "strategy_table_name": "test_strategy",
             "strategy_id": 1,
@@ -202,6 +211,8 @@ class TestComputeRealTradePnl:
             "ts": ts,
             "closing_ts": closing_ts,
             "execution_ts": execution_ts,
+            "revision_ts": revision_ts,
+            "next_bar_closing_ts": next_bar_closing_ts,
             "position": position,
             "bar_price": 100.0,
             "final_signal": 1.0,
@@ -257,11 +268,19 @@ class TestComputeRealTradePnl:
         assert positions[3] == 1.0  # 00:08
         assert positions[4] == 1.0  # 00:09
 
-    def test_two_consecutive_bars_hold_until_next_close(self):
-        """Position from bar 1 must hold until bar 2's closing_ts, matching prod behaviour."""
+    def test_two_consecutive_bars_hold_until_next_execution(self):
+        """Position from bar 1 holds until bar 2's execution_ts fires."""
         bars = [
-            self._make_revision("2024-01-01 00:00:00", "2024-01-01 00:05:00", "2024-01-01 00:05:00", 1.0),
-            self._make_revision("2024-01-01 00:05:00", "2024-01-01 00:10:00", "2024-01-01 00:10:00", -1.0),
+            self._make_revision(
+                "2024-01-01 00:00:00", "2024-01-01 00:05:00", "2024-01-01 00:05:00", 1.0,
+                revision_ts="2024-01-01 00:05:00",
+                next_bar_closing_ts="2024-01-01 00:10:00",
+            ),
+            self._make_revision(
+                "2024-01-01 00:05:00", "2024-01-01 00:10:00", "2024-01-01 00:10:00", -1.0,
+                revision_ts="2024-01-01 00:10:00",
+                next_bar_closing_ts="2024-01-01 00:10:00",  # no next bar sentinel
+            ),
         ]
         anchors = {}
         prices = {f"2024-01-01 00:{str(5+i).zfill(2)}:00": 100.0 for i in range(10)}
@@ -272,6 +291,78 @@ class TestComputeRealTradePnl:
         assert len(rows) == 10
         ts_values = [r[7] for r in rows]
         assert ts_values == sorted(set(ts_values))
+
+    def test_late_revision_accepted_before_next_bar_closes(self):
+        """1h bar revision arriving after bar close but before next bar's close is accepted.
+
+        Real data pattern: bar 00:00 (closes 01:00), revision arrives 01:32 → exec 01:33.
+        next_bar_closing_ts = bar_B.closing = 02:00. Since 01:32 < 02:00 → ACCEPT.
+        Position holds 01:33..02:13 continuously (until bar B's revision fires at 02:14).
+        """
+        bars = [
+            self._make_revision(
+                "2024-01-01 00:00:00", "2024-01-01 01:00:00", "2024-01-01 01:33:00", 1.0,
+                revision_ts="2024-01-01 01:32:00",
+                next_bar_closing_ts="2024-01-01 02:00:00",
+            ),
+            self._make_revision(
+                "2024-01-01 01:00:00", "2024-01-01 02:00:00", "2024-01-01 02:14:00", -1.0,
+                revision_ts="2024-01-01 02:13:00",
+                next_bar_closing_ts="2024-01-01 02:00:00",  # no next bar sentinel
+            ),
+        ]
+        for bar in bars:
+            bar["config_timeframe"] = "1h"
+        anchors = {}
+        prices = {f"2024-01-01 0{h}:{str(m).zfill(2)}:00": 100.0
+                  for h in range(1, 3) for m in range(60)}
+        prices.update({f"2024-01-01 02:{str(m).zfill(2)}:00": 100.0 for m in range(20)})
+
+        rows = compute_real_trade_pnl(bars, anchors, prices)
+
+        ts_values = [r[7] for r in rows]
+        assert ts_values == sorted(set(ts_values)), "Duplicate timestamps detected"
+        assert ts_values[0] == "2024-01-01 01:33:00"
+        assert "2024-01-01 01:59:00" in ts_values  # crosses bar A closing_ts
+        assert "2024-01-01 02:00:00" in ts_values  # no gap
+        assert "2024-01-01 02:13:00" in ts_values  # last minute before bar B fires
+        assert "2024-01-01 02:14:00" in ts_values  # bar B starts
+
+    def test_late_revision_discarded_after_next_bar_closes(self):
+        """Revision arriving after next bar's closing_ts is discarded; previous position holds.
+
+        Bar A (00:00, closing 01:00) revision arrives at 02:12 — after bar B closes at 02:00.
+        Bar B (01:00, closing 02:00) revision arrives at 02:14 → exec 02:14, accepted.
+        During 02:14 onward bar B's position (-1.0) is active.
+        Before 02:14, the anchor position (0.0 = cold start) holds since bar A is discarded.
+        """
+        bars = [
+            self._make_revision(
+                "2024-01-01 00:00:00", "2024-01-01 01:00:00", "2024-01-01 02:13:00", 1.0,
+                revision_ts="2024-01-01 02:12:00",
+                next_bar_closing_ts="2024-01-01 02:00:00",  # 02:12 >= 02:00 → DISCARD
+            ),
+            self._make_revision(
+                "2024-01-01 01:00:00", "2024-01-01 02:00:00", "2024-01-01 02:14:00", -1.0,
+                revision_ts="2024-01-01 02:13:00",
+                next_bar_closing_ts="2024-01-01 02:00:00",  # no next bar sentinel
+            ),
+        ]
+        for bar in bars:
+            bar["config_timeframe"] = "1h"
+        anchors = {}
+        prices = {f"2024-01-01 02:{str(m).zfill(2)}:00": 100.0 for m in range(20)}
+
+        rows = compute_real_trade_pnl(bars, anchors, prices)
+
+        ts_values = [r[7] for r in rows]
+        positions = {r[7]: r[10] for r in rows}
+
+        # Bar A discarded: no rows before 02:14
+        assert "2024-01-01 02:13:00" not in ts_values
+        # Bar B accepted: rows from 02:14 onward with position=-1.0
+        assert "2024-01-01 02:14:00" in ts_values
+        assert positions["2024-01-01 02:14:00"] == -1.0
 
 
 class TestFetchNewBarsRealTradeSQL:
@@ -291,7 +382,7 @@ class TestFetchNewBarsRealTradeSQL:
         return captured["sql"]
 
     def test_order_by_sorts_by_strategy_ts_revision(self, monkeypatch):
-        """ORDER BY must sort by strategy_table_name, ts, revision_ts to ensure
+        """Final ORDER BY must sort by strategy_table_name, ts, revision_ts to ensure
         revisions are processed in chronological order per strategy."""
         sql = self._capture_sql(
             monkeypatch,
@@ -300,7 +391,8 @@ class TestFetchNewBarsRealTradeSQL:
             since="2025-04-27 00:00:00",
             ts_end="2025-04-28 00:00:00",
         )
-        order_by = re.search(r"ORDER BY (.+)", sql).group(1).strip()
+        # Use the last ORDER BY (outer query), not the one inside the WINDOW definition.
+        order_by = re.findall(r"ORDER BY (.+)", sql)[-1].strip()
         assert "strategy_table_name" in order_by
         assert "revision_ts" in order_by
 

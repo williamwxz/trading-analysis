@@ -169,8 +169,74 @@ def pnl_1hour_bt_rollup_asset(context: AssetExecutionContext) -> MaterializeResu
     )
 
 
+@asset(
+    name="pnl_1hour_bt_rollup_live",
+    group_name="strategy_pnl",
+    deps=["pnl_bt_v2_full"],
+    compute_kind="clickhouse",
+    automation_condition=AutomationCondition.on_cron("0 * * * *"),
+    description=(
+        "Hourly unpartitioned rollup of strategy_pnl_1min_bt_v2 → strategy_pnl_1hour_bt_v2 "
+        "for the current UTC day. Keeps the 1hour table fresh after pnl_bt_v2_full runs."
+    ),
+    op_tags={"dagster/timeout": 300},
+)
+def pnl_1hour_bt_rollup_live_asset(context: AssetExecutionContext) -> MaterializeResult:
+    now = datetime.now(tz=timezone.utc)
+    start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_dt = start_dt + timedelta(days=1)
+    start_ts = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+    end_ts = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    client = get_client()
+    execute(
+        f"DELETE FROM analytics.strategy_pnl_1hour_bt_v2 "
+        f"WHERE toDateTime(ts) >= toDateTime('{start_ts}') "
+        f"AND toDateTime(ts) < toDateTime('{end_ts}')",
+        client=client,
+    )
+    col_list = (
+        "strategy_table_name, strategy_id, strategy_name, underlying, "
+        "config_timeframe, source, version, ts, cumulative_pnl, benchmark, "
+        "position, price, final_signal, weighting, updated_at"
+    )
+    sql = f"""\
+INSERT INTO analytics.strategy_pnl_1hour_bt_v2 ({col_list})
+SELECT
+    strategy_table_name, strategy_id, strategy_name, underlying,
+    config_timeframe, source, version,
+    toStartOfHour(ts)            AS ts,
+    argMax(cumulative_pnl, ts)   AS cumulative_pnl,
+    argMax(benchmark, ts)        AS benchmark,
+    argMax(position, ts)         AS position,
+    argMax(price, ts)            AS price,
+    argMax(final_signal, ts)     AS final_signal,
+    argMax(weighting, ts)        AS weighting,
+    now()                        AS updated_at
+FROM analytics.strategy_pnl_1min_bt_v2
+WHERE toDateTime(ts) >= toDateTime('{start_ts}')
+  AND toDateTime(ts) < toDateTime('{end_ts}')
+GROUP BY
+    strategy_table_name, strategy_id, strategy_name, underlying,
+    config_timeframe, source, version, toStartOfHour(ts)
+"""
+    execute(sql, client=client)
+
+    rows_inserted = int(
+        query_scalar(
+            f"SELECT count() FROM analytics.strategy_pnl_1hour_bt_v2 FINAL "
+            f"WHERE toDateTime(ts) >= toDateTime('{start_ts}') AND toDateTime(ts) < toDateTime('{end_ts}')",
+            client=client,
+        )
+        or 0
+    )
+    context.log.info(f"BT 1hour live rollup: {rows_inserted} rows for {start_ts[:10]}")
+    return MaterializeResult(metadata={"date": start_ts[:10], "rows_inserted": rows_inserted})
+
+
 __all__ = [
     "pnl_1hour_prod_rollup_asset",
     "pnl_1hour_real_trade_rollup_asset",
     "pnl_1hour_bt_rollup_asset",
+    "pnl_1hour_bt_rollup_live_asset",
 ]

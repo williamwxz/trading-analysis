@@ -5,7 +5,10 @@ Partitioned daily assets for historical PnL backfills (prod, bt, real_trade).
 Real-time PnL is handled by the pnl_consumer (Kafka → ClickHouse).
 """
 
+import logging
+import math
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 
 from dagster import (
@@ -27,6 +30,7 @@ from ..utils.pnl_compute import (
     PROD_INSERT_COLUMNS,
     PROD_REAL_TRADE_START_DATE,
     REAL_TRADE_INSERT_COLUMNS,
+    TIMEFRAME_MAP,
     assert_anchors_present,
     compute_bt_pnl,
     compute_real_trade_pnl,
@@ -84,46 +88,44 @@ def _prepare_rows_for_clickhouse(rows: list[list]) -> list[list]:
 
 _CHUNK_DAYS = 7  # process this many days at a time to cap memory per underlying
 
+_MAX_WORKERS = 3  # cap parallelism to stay within 8 GB ECS memory limit
 
-def _recompute_pnl_full(context: AssetExecutionContext, target_table: str, source_table: str, label: str, insert_columns: list, mode: str, start_date: str | None = None):
-    """Recompute PnL for all underlyings from start_date to now.
+_log = logging.getLogger(__name__)
 
-    mode: "prod" uses iter_compute_prod_pnl; "real_trade" uses compute_real_trade_pnl;
-          "bt" uses compute_bt_pnl with close prices.
-    Rows are re-inserted with a fresh updated_at; ReplacingMergeTree deduplicates.
-    No DELETE — safe to rerun alongside pnl_consumer.
-    Processes _CHUNK_DAYS at a time to bound memory usage.
+
+def _process_underlying(
+    underlying: str,
+    target_table: str,
+    source_table: str,
+    label: str,
+    insert_columns: list,
+    mode: str,
+    start_dt: datetime,
+    end_dt: datetime,
+) -> int:
+    """Process all time chunks for one underlying. Returns total rows inserted.
+
+    Designed to run in a thread — owns its own ClickHouse client and anchors dict.
     """
-    if start_date is None:
-        start_date = PROD_REAL_TRADE_START_DATE
-    start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=UTC)
-    end_dt = datetime.now(tz=UTC)
-
     client = get_client()
-    underlyings = _get_underlyings(source_table)
-    context.log.info(
-        f"Full recompute {label}: {len(underlyings)} underlyings, "
-        f"{start_date} → {end_dt.strftime('%Y-%m-%d %H:%M:%S')}, "
-        f"chunk_days={_CHUNK_DAYS}"
+    anchors: dict = {}
+    total_rows = 0
+    chunk_count = math.ceil((end_dt - start_dt).total_seconds() / 86400 / _CHUNK_DAYS)
+    chunks_done = 0
+
+    _log.info(
+        f"[{underlying}] starting: {start_dt.strftime('%Y-%m-%d')} → "
+        f"{end_dt.strftime('%Y-%m-%d')}, {chunk_count} chunks"
     )
 
-    total_rows = 0
+    chunk_start = start_dt
+    while chunk_start < end_dt:
+        chunk_end = min(chunk_start + timedelta(days=_CHUNK_DAYS), end_dt)
+        chunk_start_ts = chunk_start.strftime("%Y-%m-%d %H:%M:%S")
+        chunk_end_ts = chunk_end.strftime("%Y-%m-%d %H:%M:%S")
 
-    for underlying in underlyings:
-        context.log.info(f"Processing underlying: {underlying}")
-
-        # Full recompute always starts from zero — no prior anchor exists.
-        # In-memory anchors are built up as each chunk is computed.
-        anchors: dict = {}
-
-        chunk_start = start_dt
-        while chunk_start < end_dt:
-            chunk_end = min(chunk_start + timedelta(days=_CHUNK_DAYS), end_dt)
-            chunk_start_ts = chunk_start.strftime("%Y-%m-%d %H:%M:%S")
-            chunk_end_ts = chunk_end.strftime("%Y-%m-%d %H:%M:%S")
-
-            if mode in ("prod", "bt"):
-                sql = f"""\
+        if mode == "prod":
+            sql = f"""\
 SELECT
     strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe,
     argMin(weighting, revision_ts) AS weighting,
@@ -139,8 +141,26 @@ WHERE underlying = '{underlying}'
 GROUP BY strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, ts
 ORDER BY strategy_table_name, ts
 """
-            else:  # real_trade
-                sql = f"""\
+        elif mode == "bt":
+            sql = f"""\
+SELECT
+    strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe,
+    argMin(weighting, revision_ts) AS weighting,
+    toString(ts) AS ts,
+    JSONExtractFloat(argMin(row_json, revision_ts), 'position') AS position,
+    JSONExtractFloat(argMin(row_json, revision_ts), 'price') AS bar_price,
+    JSONExtractFloat(argMin(row_json, revision_ts), 'final_signal') AS final_signal,
+    JSONExtractFloat(argMin(row_json, revision_ts), 'benchmark') AS bar_benchmark,
+    JSONExtractFloat(argMin(row_json, revision_ts), 'cumulative_pnl') AS cumulative_pnl
+FROM analytics.{source_table}
+WHERE underlying = '{underlying}'
+  AND strategy_table_name NOT LIKE 'manual_probe%'
+  AND toDateTime(ts) >= toDateTime('{chunk_start_ts}') AND toDateTime(ts) < toDateTime('{chunk_end_ts}')
+GROUP BY strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, ts
+ORDER BY strategy_table_name, ts
+"""
+        else:  # real_trade
+            sql = f"""\
 WITH raw AS (
     SELECT
         strategy_table_name,
@@ -179,66 +199,125 @@ WHERE revision_ts < ts + toIntervalMinute(2 * multiIf(
 ORDER BY strategy_table_name, ts, revision_ts
 """
 
-            rows_dict = query_dicts(sql, client)
-            if not rows_dict:
-                chunk_start = chunk_end
-                continue
-
-            price_col = "close" if mode == "bt" else "open"
-            all_prices = fetch_prices_multi(
-                underlyings=[underlying],
-                ts_min=chunk_start_ts,
-                ts_max=chunk_end_ts,
-                client=client,
-                extend_minutes=0,
-                price_column=price_col,
-            )
-            prices = all_prices.pop(underlying, {})
-
-            if mode == "prod":
-                for _stn, strategy_rows in iter_compute_prod_pnl(rows_dict, anchors, prices, source_label=label):
-                    _prepare_rows_for_clickhouse(strategy_rows)
-                    n = insert_rows(f"analytics.{target_table}", insert_columns, strategy_rows, client)
-                    total_rows += n
-                    context.log.info(f"  [{underlying}] chunk {chunk_start_ts[:10]} inserted {n} rows for {_stn}")
-                    # Update in-memory anchor from the last row of this strategy's output.
-                    # Avoids re-reading from DB (which may return stale or concurrent writes).
-                    if strategy_rows:
-                        last = strategy_rows[-1]
-                        # PROD_INSERT_COLUMNS: ts=7, cpnl=8, position=10, price=11
-                        anchors[_stn] = (float(last[8]), float(last[11]), float(last[10]))
-            elif mode == "bt":
-                for _stn, strategy_rows in iter_compute_prod_pnl(rows_dict, anchors, prices, source_label=label):
-                    _prepare_rows_for_clickhouse(strategy_rows)
-                    n = insert_rows(f"analytics.{target_table}", insert_columns, strategy_rows, client)
-                    total_rows += n
-                    context.log.info(f"  [{underlying}] chunk {chunk_start_ts[:10]} inserted {n} rows for {_stn}")
-                    if strategy_rows:
-                        last = strategy_rows[-1]
-                        anchors[_stn] = (float(last[8]), float(last[11]), float(last[10]))
-            elif mode == "real_trade":
-                by_strategy: dict[str, list] = defaultdict(list)
-                for bar in rows_dict:
-                    by_strategy[bar["strategy_table_name"]].append(bar)
-
-                for stn, strategy_bars in by_strategy.items():
-                    strategy_rows = compute_real_trade_pnl(strategy_bars, anchors, prices)
-                    _prepare_rows_for_clickhouse(strategy_rows)
-                    n = insert_rows(f"analytics.{target_table}", insert_columns, strategy_rows, client)
-                    total_rows += n
-                    context.log.info(f"  [{underlying}] chunk {chunk_start_ts[:10]} inserted {n} real_trade rows for {stn}")
-                    # Update in-memory anchor from the last row of this strategy's output.
-                    if strategy_rows:
-                        last = strategy_rows[-1]
-                        anchors[stn] = (float(last[8]), float(last[11]), float(last[10]))
-            else:
-                raise ValueError(f"Unknown mode: {mode!r}. Expected 'prod', 'bt', or 'real_trade'.")
-
-            del rows_dict, prices
-
+        rows_dict = query_dicts(sql, client)
+        chunks_done += 1
+        if not rows_dict:
             chunk_start = chunk_end
+            if chunks_done % 10 == 0:
+                _log.info(
+                    f"[{underlying}] progress: {chunks_done}/{chunk_count} chunks done "
+                    f"({total_rows:,} rows so far)"
+                )
+            continue
 
-    context.log.info(f"Full recompute {label} complete: {total_rows} total rows inserted")
+        all_prices = fetch_prices_multi(
+            underlyings=[underlying],
+            ts_min=chunk_start_ts,
+            ts_max=chunk_end_ts,
+            client=client,
+            extend_minutes=0,
+        )
+        prices = all_prices.pop(underlying, {})
+
+        if mode == "prod":
+            for _stn, strategy_rows in iter_compute_prod_pnl(rows_dict, anchors, prices, source_label=label):
+                _prepare_rows_for_clickhouse(strategy_rows)
+                n = insert_rows(f"analytics.{target_table}", insert_columns, strategy_rows, client)
+                total_rows += n
+                if strategy_rows:
+                    last = strategy_rows[-1]
+                    anchors[_stn] = (float(last[8]), float(last[11]), float(last[10]))
+        elif mode == "bt":
+            for bar in rows_dict:
+                tf_minutes = TIMEFRAME_MAP.get(bar["config_timeframe"], 5)
+                bar["execution_ts"] = (
+                    _parse_ts(bar["ts"]) + timedelta(minutes=tf_minutes)
+                ).strftime("%Y-%m-%d %H:%M:%S")
+            by_stn: dict[str, list] = defaultdict(list)
+            for bar in rows_dict:
+                by_stn[bar["strategy_table_name"]].append(bar)
+            for _stn, stn_bars in by_stn.items():
+                strategy_rows = compute_bt_pnl(stn_bars, prices, anchors=anchors)
+                _prepare_rows_for_clickhouse(strategy_rows)
+                n = insert_rows(f"analytics.{target_table}", insert_columns, strategy_rows, client)
+                total_rows += n
+                if strategy_rows:
+                    last = strategy_rows[-1]
+                    anchors[_stn] = (float(last[8]), float(last[11]), float(last[10]))
+        elif mode == "real_trade":
+            by_strategy: dict[str, list] = defaultdict(list)
+            for bar in rows_dict:
+                by_strategy[bar["strategy_table_name"]].append(bar)
+            for stn, strategy_bars in by_strategy.items():
+                strategy_rows = compute_real_trade_pnl(strategy_bars, anchors, prices)
+                _prepare_rows_for_clickhouse(strategy_rows)
+                n = insert_rows(f"analytics.{target_table}", insert_columns, strategy_rows, client)
+                total_rows += n
+                if strategy_rows:
+                    last = strategy_rows[-1]
+                    anchors[stn] = (float(last[8]), float(last[11]), float(last[10]))
+        else:
+            raise ValueError(f"Unknown mode: {mode!r}. Expected 'prod', 'bt', or 'real_trade'.")
+
+        del rows_dict, prices
+
+        if chunks_done % 10 == 0:
+            _log.info(
+                f"[{underlying}] progress: {chunks_done}/{chunk_count} chunks done "
+                f"({total_rows:,} rows so far)"
+            )
+
+        chunk_start = chunk_end
+
+    _log.info(f"[{underlying}] complete: {total_rows:,} rows inserted")
+    return total_rows
+
+
+def _recompute_pnl_full(context: AssetExecutionContext, target_table: str, source_table: str, label: str, insert_columns: list, mode: str, start_date: str | None = None):
+    """Recompute PnL for all underlyings from start_date to now.
+
+    mode: "prod" uses iter_compute_prod_pnl; "real_trade" uses compute_real_trade_pnl;
+          "bt" uses compute_bt_pnl with open prices.
+    Rows are re-inserted with a fresh updated_at; ReplacingMergeTree deduplicates.
+    No DELETE — safe to rerun alongside pnl_consumer.
+    Processes _CHUNK_DAYS at a time to bound memory usage.
+    """
+    if start_date is None:
+        start_date = PROD_REAL_TRADE_START_DATE
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=UTC)
+    end_dt = datetime.now(tz=UTC)
+
+    underlyings = _get_underlyings(source_table)
+    context.log.info(
+        f"Full recompute {label}: {len(underlyings)} underlyings, "
+        f"{start_date} → {end_dt.strftime('%Y-%m-%d %H:%M:%S')}, "
+        f"chunk_days={_CHUNK_DAYS}, max_workers={_MAX_WORKERS}"
+    )
+
+    total_rows = 0
+
+    with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+        futures = {
+            pool.submit(
+                _process_underlying,
+                underlying,
+                target_table,
+                source_table,
+                label,
+                insert_columns,
+                mode,
+                start_dt,
+                end_dt,
+            ): underlying
+            for underlying in underlyings
+        }
+        for future in as_completed(futures):
+            underlying = futures[future]
+            rows = future.result()  # re-raises any exception from the worker thread
+            total_rows += rows
+            context.log.info(f"[{underlying}] complete: {rows:,} rows inserted")
+
+    context.log.info(f"Full recompute {label} complete: {total_rows:,} total rows inserted")
     return MaterializeResult(metadata={"rows_inserted": total_rows, "start_ts": f"{start_date} 00:00:00", "end_ts": end_dt.strftime("%Y-%m-%d %H:%M:%S")})
 
 
@@ -467,10 +546,8 @@ def _refresh_pnl_bt(context) -> MaterializeResult:
 
     underlyings = _get_underlyings(source_table)
 
-    # Fetch close prices for all underlyings in one query (bt uses close, not open).
-    # extend_minutes=0: end_ts is already the exclusive partition boundary.
     all_prices = fetch_prices_multi(
-        underlyings, start_ts, end_ts, client, extend_minutes=0, price_column="close"
+        underlyings, start_ts, end_ts, client, extend_minutes=0
     )
 
     total_rows = 0
@@ -515,8 +592,8 @@ def _refresh_pnl_real_trade(context) -> MaterializeResult:
         bars = fetch_new_bars_real_trade(source_table, underlying, start_ts, ts_end=end_ts)
         if not bars:
             continue
-        ts_min = min(b["ts"] for b in bars)
-        ts_max = max(b["ts"] for b in bars)
+        ts_min = min(b["execution_ts"] for b in bars)
+        ts_max = max(b["execution_ts"] for b in bars)
         prices = fetch_prices(underlying, ts_min, ts_max, client)
         anchors = fetch_anchors(target_table, underlying)
         assert_anchors_present(anchors, bars, source_table=source_table, bar_ts_key="execution_ts")

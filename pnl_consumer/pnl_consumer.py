@@ -11,6 +11,7 @@ from confluent_kafka import Consumer, KafkaError, KafkaException
 
 from pnl_consumer.anchor_state import AnchorRecord, AnchorState
 from pnl_consumer.ch_lookup import (
+    StrategyRevision,
     fetch_anchor_for_strategy,
     fetch_bt_strategies_for_candle,
     fetch_real_trade_revisions_for_candle,
@@ -102,7 +103,7 @@ def process_candle(
     prod_strategies = fetch_strategies_for_candle(candle.instrument, candle.ts)
     for bar in prod_strategies:
         pnl = _compute_pnl_with_lazy_seed(
-            state_prod, bar.strategy_table_name, candle.close, bar.position
+            state_prod, bar.strategy_table_name, candle.open, bar.position
         )
         if pnl is None:
             continue
@@ -120,7 +121,7 @@ def process_candle(
                 "cumulative_pnl": pnl,
                 "benchmark": bar.benchmark,
                 "position": bar.position,
-                "price": candle.close,
+                "price": candle.open,
                 "final_signal": bar.final_signal,
                 "weighting": bar.weighting,
                 "updated_at": now,
@@ -128,20 +129,34 @@ def process_candle(
         )
 
     # --- real_trade ---
+    # Revisions are ordered by revision_ts ASC. We find the latest revision whose
+    # execution_ts <= candle.ts — that is the currently-active position for this minute.
+    # Revisions arriving in the future (execution_ts > candle.ts) are not yet active.
     real_trade_revisions = fetch_real_trade_revisions_for_candle(
         candle.instrument, candle.ts
     )
+    # Group by strategy, pick the latest revision that is already active.
+    active_revisions: dict[str, StrategyRevision] = {}
     for rev in real_trade_revisions:
+        execution_ts = (rev.revision_ts + timedelta(seconds=59)).replace(
+            second=0, microsecond=0
+        )
+        if execution_ts <= candle.ts:
+            active_revisions[rev.strategy_table_name] = rev  # last one wins (ASC order)
+
+    for stn, rev in active_revisions.items():
         pnl = _compute_pnl_with_lazy_seed(
-            state_real_trade, rev.strategy_table_name, candle.close, rev.position
+            state_real_trade, stn, candle.open, rev.position
         )
         if pnl is None:
             continue
-        execution_ts = (rev.revision_ts + timedelta(seconds=59)).replace(second=0)
+        execution_ts = (rev.revision_ts + timedelta(seconds=59)).replace(
+            second=0, microsecond=0
+        )
         rows.append(
             {
                 "_sink": "pnl_real_trade",
-                "strategy_table_name": rev.strategy_table_name,
+                "strategy_table_name": stn,
                 "strategy_id": rev.strategy_id,
                 "strategy_name": rev.strategy_name,
                 "underlying": rev.underlying,
@@ -152,7 +167,7 @@ def process_candle(
                 "cumulative_pnl": pnl,
                 "benchmark": rev.benchmark,
                 "position": rev.position,
-                "price": candle.close,
+                "price": candle.open,
                 "final_signal": rev.final_signal,
                 "weighting": rev.weighting,
                 "updated_at": now,
@@ -166,7 +181,7 @@ def process_candle(
     bt_bars = fetch_bt_strategies_for_candle(candle.instrument, candle.ts)
     for bt_bar in bt_bars:
         pnl = _compute_pnl_with_lazy_seed(
-            state_bt, bt_bar.strategy_table_name, candle.close, bt_bar.position
+            state_bt, bt_bar.strategy_table_name, candle.open, bt_bar.position
         )
         if pnl is None:
             continue
@@ -184,7 +199,7 @@ def process_candle(
                 "cumulative_pnl": pnl,
                 "benchmark": bt_bar.benchmark,
                 "position": bt_bar.position,
-                "price": candle.close,
+                "price": candle.open,
                 "final_signal": bt_bar.final_signal,
                 "weighting": bt_bar.weighting,
                 "updated_at": now,

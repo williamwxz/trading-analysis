@@ -169,7 +169,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "dfjc5vjyfcc8wf"
           },
-          "rawSql": "WITH raw AS (SELECT toStartOfFiveMinutes(ts) AS time, strategy_table_name, argMax(cumulative_pnl, ts) AS pnl FROM (SELECT strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, source, version, ts, cumulative_pnl, benchmark, position, price, final_signal, weighting, updated_at FROM analytics.strategy_pnl_1min_bt_v2 FINAL) WHERE (empty('${strategy_id_derived}') OR strategy_id = ${strategy_id_derived}) AND (empty('${underlying_derived}') OR `underlying` = '${underlying_derived}') AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time, strategy_table_name) SELECT time, strategy_table_name, pnl - first_value(pnl) OVER (PARTITION BY strategy_table_name ORDER BY time) AS cumulative_pnl FROM raw ORDER BY time",
+          "rawSql": "WITH raw AS (SELECT ts AS time, strategy_table_name, argMax(cumulative_pnl, ts) AS pnl FROM analytics.strategy_pnl_1hour_bt_v2 WHERE (empty('${strategy_id_derived}') OR strategy_id = ${strategy_id_derived}) AND (empty('${underlying_derived}') OR `underlying` = '${underlying_derived}') AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time, strategy_table_name) SELECT time, strategy_table_name, pnl - first_value(pnl) OVER (PARTITION BY strategy_table_name ORDER BY time) AS cumulative_pnl FROM raw ORDER BY time",
           "refId": "A",
           "format": 0,
           "queryType": "sql",
@@ -536,7 +536,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "dfjc5vjyfcc8wf"
           },
-          "rawSql": "SELECT $__timeInterval(ts) AS time, argMax(position, ts) AS `Backtest Position` FROM (SELECT strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, source, version, ts, cumulative_pnl, benchmark, position, price, final_signal, weighting, updated_at FROM analytics.strategy_pnl_1min_bt_v2 FINAL) WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
+          "rawSql": "SELECT $__timeInterval(ts) AS time, argMax(position, ts) AS `Backtest Position` FROM analytics.strategy_pnl_1hour_bt_v2 WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
           "refId": "B",
           "format": 1,
           "queryType": "sql",

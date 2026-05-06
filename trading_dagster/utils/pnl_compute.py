@@ -246,58 +246,64 @@ ORDER BY strategy_table_name, ts
 def fetch_new_bars_real_trade(
     source_table: str, underlying: str, since: str, ts_end: str | None = None,
 ) -> List[dict]:
-    """Fetch real_trade revisions that arrived before bar close.
+    """Fetch real_trade revisions for bars in the given window.
 
     Live path: since=watermark, ts_end=None — filter on revision_ts >= since.
-    Daily path: since=start_ts, ts_end=end_ts — filter on ts in [since, ts_end).
-    Revisions where revision_ts < ts + 2x timeframe are kept — allows for post-close execution lag.
+    Daily path: since=start_ts, ts_end=end_ts — filter on bar ts in [since, ts_end).
+
+    Each revision includes next_bar_closing_ts (the closing time of the *following*
+    bar for that strategy). compute_real_trade_pnl uses this to decide whether to
+    accept or discard the revision: accepted if revision_ts < next_bar_closing_ts,
+    discarded otherwise (position from the previous accepted revision holds instead).
+    When there is no next bar, next_bar_closing_ts equals closing_ts (sentinel).
     """
+    tf_expr = """multiIf(
+        config_timeframe = '5m', 5, config_timeframe = '10m', 10,
+        config_timeframe = '15m', 15, config_timeframe = '30m', 30,
+        config_timeframe = '1h', 60, config_timeframe = '4h', 240,
+        config_timeframe = '1d', 1440, 5
+    )"""
     if ts_end is not None:
         ts_filter = f"toDateTime(ts) >= toDateTime('{since}') AND toDateTime(ts) < toDateTime('{ts_end}')"
+        nb_ts_filter = ts_filter  # same window for the distinct-bar subquery
     else:
         ts_filter = f"revision_ts >= toDateTime('{since}')"
+        nb_ts_filter = f"toDateTime(ts) >= toDateTime('{since}') - INTERVAL 1 DAY"
     sql = f"""\
-WITH raw AS (
+SELECT
+    r.strategy_table_name,
+    r.strategy_id, r.strategy_name, r.underlying, r.config_timeframe, r.weighting,
+    toString(r.ts) AS ts,
+    toString(r.ts + toIntervalMinute({tf_expr})) AS closing_ts,
+    toString(toStartOfMinute(r.revision_ts + INTERVAL 59 SECOND)) AS execution_ts,
+    toString(r.revision_ts) AS revision_ts,
+    toString(nb.next_bar_ts + toIntervalMinute({tf_expr})) AS next_bar_closing_ts,
+    JSONExtractFloat(r.row_json, 'position') AS position,
+    JSONExtractFloat(r.row_json, 'price') AS bar_price,
+    JSONExtractFloat(r.row_json, 'final_signal') AS final_signal,
+    JSONExtractFloat(r.row_json, 'benchmark') AS bar_benchmark
+FROM analytics.{source_table} r
+LEFT JOIN (
     SELECT
         strategy_table_name,
-        strategy_id, strategy_name, underlying, config_timeframe, weighting,
         ts,
-        ts + toIntervalMinute(multiIf(
-            config_timeframe = '5m', 5, config_timeframe = '10m', 10,
-            config_timeframe = '15m', 15, config_timeframe = '30m', 30,
-            config_timeframe = '1h', 60, config_timeframe = '4h', 240,
-            config_timeframe = '1d', 1440, 5
-        )) AS closing_ts,
-        revision_ts,
-        row_json
-    FROM analytics.{source_table}
-    WHERE underlying = '{underlying}'
-      AND strategy_table_name NOT LIKE 'manual_probe%'
-      AND {ts_filter}
-)
-SELECT
-    strategy_table_name,
-    strategy_id, strategy_name, underlying, config_timeframe, weighting,
-    toString(ts) AS ts,
-    toString(closing_ts) AS closing_ts,
-    toString(toStartOfMinute(revision_ts + INTERVAL 59 SECOND)) AS execution_ts,
-    JSONExtractFloat(row_json, 'position') AS position,
-    JSONExtractFloat(row_json, 'price') AS bar_price,
-    JSONExtractFloat(row_json, 'final_signal') AS final_signal,
-    JSONExtractFloat(row_json, 'benchmark') AS bar_benchmark
-FROM raw
-WHERE revision_ts < ts + toIntervalMinute(2 * multiIf(
-    config_timeframe = '1m',  1,
-    config_timeframe = '3m',  3,
-    config_timeframe = '5m',  5,
-    config_timeframe = '15m', 15,
-    config_timeframe = '30m', 30,
-    config_timeframe = '1h',  60,
-    config_timeframe = '4h',  240,
-    config_timeframe = '1d',  1440,
-    5
-))
-ORDER BY strategy_table_name, ts, revision_ts
+        leadInFrame(ts, 1, ts) OVER (
+            PARTITION BY strategy_table_name ORDER BY ts
+            ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
+        ) AS next_bar_ts
+    FROM (
+        SELECT strategy_table_name, ts
+        FROM analytics.{source_table}
+        WHERE underlying = '{underlying}'
+          AND strategy_table_name NOT LIKE 'manual_probe%'
+          AND {nb_ts_filter}
+        GROUP BY strategy_table_name, ts
+    )
+) nb ON r.strategy_table_name = nb.strategy_table_name AND r.ts = nb.ts
+WHERE r.underlying = '{underlying}'
+  AND r.strategy_table_name NOT LIKE 'manual_probe%'
+  AND {ts_filter}
+ORDER BY r.strategy_table_name, r.ts, r.revision_ts
 """
     rows = query_dicts(sql)
     return [
@@ -311,6 +317,8 @@ ORDER BY strategy_table_name, ts, revision_ts
             "ts": str(r["ts"]),
             "closing_ts": str(r["closing_ts"]),
             "execution_ts": str(r["execution_ts"]),
+            "revision_ts": str(r["revision_ts"]),
+            "next_bar_closing_ts": str(r["next_bar_closing_ts"]),
             "position": float(r["position"]),
             "bar_price": float(r["bar_price"]),
             "final_signal": float(r["final_signal"]),
@@ -370,7 +378,7 @@ def fetch_prices_multi(
     extend_minutes: extra minutes past ts_max to fetch (default 1440 = 1 day,
     for the live path where ts_max is the last bar open time). Pass 0 for
     the daily partition path where ts_max is already the exclusive end boundary.
-    price_column: "open" (default, prod/real_trade) or "close" (bt path).
+    price_column: "open" (default, used by all paths).
     """
     if not underlyings:
         return {}
@@ -519,18 +527,27 @@ def compute_real_trade_pnl(
 ) -> List[list]:
     """Compute anchor-chained PnL for real_trade bars. Expand to 1-min intervals.
 
-    Each revision is a (execution_ts, position) event. The position from each
-    revision holds until the next event's execution_ts. The terminal boundary
-    for a bar's last revision is the next bar's closing_ts (not +tf_minutes).
+    Acceptance rule: a revision is accepted only if
+        revision_ts < next_bar.closing_ts
+    A discarded revision is skipped — the previous accepted position continues
+    holding until the next accepted revision fires.
 
-    Example — 5m bar A (ts=10:00, closing_ts=10:05), bar B (ts=10:05, closing_ts=10:10):
-      Rev1 execution_ts=10:01 pos=X  → rows 10:01, 10:02 (holds until Rev2)
-      Rev2 execution_ts=10:03 pos=Y  → rows 10:03, 10:04 (holds until bar B closing_ts=10:05)
-      Bar B closing_ts=10:05 supersedes all of bar A's revisions.
+    The last accepted revision holds for one extra tf_minutes past its closing_ts
+    to cover the window until the next partition's first revision.
+
+    Example — 1h bars arriving ~70min after bar open:
+      Bar A ts=00:00, closing=01:00, rev_ts=01:32 → execution_ts=01:33, ACCEPT
+        (01:32 < next_bar_closing = bar_B.closing = 02:00)
+      Bar B ts=01:00, closing=02:00, rev_ts=02:13 → execution_ts=02:14, ACCEPT
+        (02:13 < next_bar_closing = bar_C.closing = 03:00)
+      Rev(01:33) holds rows 01:33..02:13; Rev(02:14) holds from 02:14 onward.
+
+      If bar A's rev_ts were 02:12 (>= bar_B.closing 02:00) → DISCARD,
+      previous position continues until bar B's revision fires.
 
     Args:
-        bars: List of revision dicts (one per revision), sorted by strategy, ts, revision_ts.
-              Each dict has: strategy_table_name, ts, closing_ts, execution_ts, position, ...
+        bars: revision dicts with keys: strategy_table_name, ts, closing_ts,
+              execution_ts, revision_ts, next_bar_closing_ts, position, ...
         anchors: {strategy_table_name: (anchor_pnl, anchor_price, anchor_position)}
         prices: {ts_string: open_price}
 
@@ -544,26 +561,26 @@ def compute_real_trade_pnl(
     output_rows = []
 
     for stn, strategy_bars in by_strategy.items():
-        # Flat list of all revisions sorted by execution_ts.
-        strategy_bars.sort(key=lambda b: b["execution_ts"])
+        strategy_bars.sort(key=lambda b: (b["ts"], b["revision_ts"]))
 
         anchor_pnl, anchor_open_price, active_position = anchors.get(stn, (0.0, 0.0, 0.0))
+        # active_rev tracks the currently accepted revision (for metadata on output rows).
+        active_rev = None
 
-        for i, rev in enumerate(strategy_bars):
+        # Build the accepted list first, then expand to 1-min rows.
+        # A revision is accepted if revision_ts < next_bar_closing_ts.
+        # next_bar_closing_ts == closing_ts means no next bar (sentinel from SQL LEAD).
+        accepted: List[dict] = []
+        for rev in strategy_bars:
+            no_next_bar = rev["next_bar_closing_ts"] == rev["closing_ts"]
+            if no_next_bar or rev["revision_ts"] < rev["next_bar_closing_ts"]:
+                accepted.append(rev)
+
+        for i, rev in enumerate(accepted):
             exec_ts = _parse_ts(rev["execution_ts"])
 
-            # This revision's position holds until the next event boundary:
-            # - next revision's execution_ts if it belongs to the same bar
-            # - next bar's closing_ts if it's the last revision of this bar
-            # - closing_ts + tf_minutes if this is the very last revision overall
-            if i + 1 < len(strategy_bars):
-                next_rev = strategy_bars[i + 1]
-                if next_rev["ts"] == rev["ts"]:
-                    # Same bar — hold until next revision fires.
-                    end_ts = _parse_ts(next_rev["execution_ts"])
-                else:
-                    # Next bar starts — hold until next bar's closing_ts.
-                    end_ts = _parse_ts(next_rev["closing_ts"])
+            if i + 1 < len(accepted):
+                end_ts = _parse_ts(accepted[i + 1]["execution_ts"])
             else:
                 tf_minutes = TIMEFRAME_MAP.get(rev["config_timeframe"], 5)
                 end_ts = _parse_ts(rev["closing_ts"]) + timedelta(minutes=tf_minutes)
@@ -591,7 +608,7 @@ def compute_real_trade_pnl(
                     "real_trade", "v2", ts_str, cpnl,
                     rev["bar_benchmark"], rev["position"], live_open_price,
                     rev["final_signal"], rev["weighting"], now_str,
-                    rev["closing_ts"], rev["execution_ts"], "false",
+                    rev["closing_ts"], rev["execution_ts"], False,
                 ])
 
                 anchor_pnl = cpnl

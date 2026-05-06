@@ -12,6 +12,7 @@ from ..assets.binance_futures_ohlcv import (
 from ..assets.clickhouse_connectivity_check import clickhouse_connectivity_check_asset
 from ..assets.pnl_rollup import (
     pnl_1hour_bt_rollup_asset,
+    pnl_1hour_bt_rollup_live_asset,
     pnl_1hour_prod_rollup_asset,
     pnl_1hour_real_trade_rollup_asset,
 )
@@ -41,6 +42,7 @@ all_assets = [
     pnl_1hour_prod_rollup_asset,
     pnl_1hour_real_trade_rollup_asset,
     pnl_1hour_bt_rollup_asset,
+    pnl_1hour_bt_rollup_live_asset,
     # Infra checks
     clickhouse_connectivity_check_asset,
     postgres_cleanup_asset,

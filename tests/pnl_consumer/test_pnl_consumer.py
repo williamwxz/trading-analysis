@@ -21,15 +21,15 @@ from trading_dagster.utils.pnl_compute import (
 _MOD = "pnl_consumer.pnl_consumer"
 
 
-def _make_candle(instrument="BTCUSDT", close=93200.0) -> CandleEvent:
+def _make_candle(instrument="BTCUSDT", open=93200.0, ts=None) -> CandleEvent:
     return CandleEvent(
         exchange="binance",
         instrument=instrument,
-        ts=datetime(2026, 4, 26, 0, 1, 0),
-        open=93100.0,
+        ts=ts or datetime(2026, 4, 26, 2, 6, 0),
+        open=open,
         high=93250.0,
         low=93050.0,
-        close=close,
+        close=93100.0,
         volume=12.34,
     )
 
@@ -55,7 +55,7 @@ def test_process_candle_produces_pnl_rows():
         "strat_prod_1",
         AnchorRecord(anchor_pnl=0.0, anchor_price=93100.0, anchor_position=1.0),
     )
-    candle = _make_candle(close=93200.0)
+    candle = _make_candle(open=93200.0)
     strategies = [_make_strategy(position=1.0)]
 
     with (
@@ -70,7 +70,7 @@ def test_process_candle_produces_pnl_rows():
     row = pnl_rows[0]
     assert row["strategy_table_name"] == "strat_prod_1"
     assert row["underlying"] == "BTCUSDT"
-    assert row["price"] == 93200.0
+    assert row["price"] == 93200.0  # open price
     assert abs(row["cumulative_pnl"] - (100.0 / 93100.0)) < 1e-6
 
 
@@ -136,8 +136,8 @@ def _make_row(strategy: str, ts: datetime, cumulative_pnl: float) -> list:
 
 def _make_revision(
     position=1.0,
-    revision_ts=datetime(2026, 4, 26, 0, 1, 10),
-    closing_ts=datetime(2026, 4, 26, 0, 5, 59),
+    revision_ts=datetime(2026, 4, 26, 2, 5, 30),  # arrives after bar 01:00 closes at 02:00
+    closing_ts=datetime(2026, 4, 26, 2, 0, 0),    # 1h bar at 01:00 closes at 02:00
 ) -> StrategyRevision:
     return StrategyRevision(
         strategy_table_name="strat_rt_1",
@@ -171,24 +171,30 @@ def _make_bt_bar(cumulative_pnl=0.05) -> BtStrategyBar:
 
 @pytest.mark.unit
 def test_process_candle_produces_pnl_real_trade_rows():
-    state_prod = AnchorState()
+    """Revision that has fired (execution_ts <= candle.ts) produces one PnL row.
+
+    Real timing: bar 01:00 closes at 02:00, revision arrives at 02:05:30,
+    execution_ts = 02:06. Candle tick at 02:06 — revision is active.
+    """
     state_real_trade = AnchorState()
     state_real_trade.update(
         "strat_rt_1",
         AnchorRecord(anchor_pnl=0.0, anchor_price=93100.0, anchor_position=1.0),
     )
-    candle = _make_candle(close=93200.0)
-    revision = _make_revision(position=1.0)
+    # candle.ts=02:06, revision_ts=02:05:30 → execution_ts=02:06 <= 02:06 ✓
+    candle = _make_candle(open=93200.0, ts=datetime(2026, 4, 26, 2, 6, 0))
+    revision = _make_revision(
+        position=1.0,
+        revision_ts=datetime(2026, 4, 26, 2, 5, 30),
+        closing_ts=datetime(2026, 4, 26, 2, 0, 0),
+    )
 
     with (
         patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[]),
-        patch(
-            f"{_MOD}.fetch_real_trade_revisions_for_candle",
-            return_value=[revision],
-        ),
+        patch(f"{_MOD}.fetch_real_trade_revisions_for_candle", return_value=[revision]),
         patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=[]),
     ):
-        rows = process_candle(candle, state_prod, state_real_trade, AnchorState())
+        rows = process_candle(candle, AnchorState(), state_real_trade, AnchorState())
 
     rt_rows = [r for r in rows if r.get("_sink") == "pnl_real_trade"]
     assert len(rt_rows) == 1
@@ -196,37 +202,118 @@ def test_process_candle_produces_pnl_real_trade_rows():
     assert row["strategy_table_name"] == "strat_rt_1"
     assert row["source"] == "real_trade"
     assert row["closing_ts"] == revision.closing_ts
-    # execution_ts = toStartOfMinute(revision_ts + 59s)
-    expected_exec_ts = (revision.revision_ts + timedelta(seconds=59)).replace(second=0)
+    expected_exec_ts = datetime(2026, 4, 26, 2, 6, 0)
     assert row["execution_ts"] == expected_exec_ts
     assert row["traded"] is False
     assert abs(row["cumulative_pnl"] - (100.0 / 93100.0)) < 1e-6
 
 
 @pytest.mark.unit
-def test_process_candle_multiple_revisions_chains_anchor():
-    """Second revision uses the updated anchor from the first revision."""
-    state_prod = AnchorState()
+def test_process_candle_revision_not_yet_fired_is_skipped():
+    """Revision whose execution_ts > candle.ts is not yet active — no PnL row emitted.
+
+    The position from the previous bar's anchor is held implicitly (no new row written).
+    Bar 01:00 closes at 02:00. Revision arrives at 02:05:30 → execution_ts=02:06.
+    At candle tick 02:05, the revision hasn't fired yet.
+    """
     state_real_trade = AnchorState()
-    state_real_trade.update("strat_rt_1", AnchorRecord(anchor_pnl=0.0, anchor_price=93100.0, anchor_position=1.0))
-    candle = _make_candle(close=93200.0)
-    rev1 = _make_revision(position=1.0, revision_ts=datetime(2026, 4, 26, 0, 1, 10))
-    rev2 = _make_revision(position=-1.0, revision_ts=datetime(2026, 4, 26, 0, 1, 30))
+    state_real_trade.update(
+        "strat_rt_1",
+        AnchorRecord(anchor_pnl=0.0, anchor_price=93100.0, anchor_position=1.0),
+    )
+    # candle.ts=02:05, execution_ts=02:06 → 02:06 > 02:05, skip
+    candle = _make_candle(open=93200.0, ts=datetime(2026, 4, 26, 2, 5, 0))
+    revision = _make_revision(
+        position=1.0,
+        revision_ts=datetime(2026, 4, 26, 2, 5, 30),
+        closing_ts=datetime(2026, 4, 26, 2, 0, 0),
+    )
 
     with (
         patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[]),
-        patch(
-            f"{_MOD}.fetch_real_trade_revisions_for_candle",
-            return_value=[rev1, rev2],
-        ),
+        patch(f"{_MOD}.fetch_real_trade_revisions_for_candle", return_value=[revision]),
         patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=[]),
     ):
-        rows = process_candle(candle, state_prod, state_real_trade, AnchorState())
+        rows = process_candle(candle, AnchorState(), state_real_trade, AnchorState())
 
     rt_rows = [r for r in rows if r.get("_sink") == "pnl_real_trade"]
-    assert len(rt_rows) == 2
+    assert rt_rows == []
+
+
+@pytest.mark.unit
+def test_process_candle_two_revisions_only_first_active():
+    """When two revisions exist but only the first has fired, emit one row with first position.
+
+    Rev1: revision_ts=02:05:30 → execution_ts=02:06, position=1.0
+    Rev2: revision_ts=02:32:25 → execution_ts=02:33, position=0.0
+    At candle.ts=02:10, only rev1 is active.
+    """
+    state_real_trade = AnchorState()
+    state_real_trade.update(
+        "strat_rt_1",
+        AnchorRecord(anchor_pnl=0.0, anchor_price=93100.0, anchor_position=0.0),
+    )
+    candle = _make_candle(open=93200.0, ts=datetime(2026, 4, 26, 2, 10, 0))
+    rev1 = _make_revision(
+        position=1.0,
+        revision_ts=datetime(2026, 4, 26, 2, 5, 30),   # execution_ts=02:06 <= 02:10 ✓
+        closing_ts=datetime(2026, 4, 26, 2, 0, 0),
+    )
+    rev2 = _make_revision(
+        position=0.0,
+        revision_ts=datetime(2026, 4, 26, 2, 32, 25),  # execution_ts=02:33 > 02:10 ✗
+        closing_ts=datetime(2026, 4, 26, 2, 0, 0),
+    )
+
+    with (
+        patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[]),
+        patch(f"{_MOD}.fetch_real_trade_revisions_for_candle", return_value=[rev1, rev2]),
+        patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=[]),
+    ):
+        rows = process_candle(candle, AnchorState(), state_real_trade, AnchorState())
+
+    rt_rows = [r for r in rows if r.get("_sink") == "pnl_real_trade"]
+    assert len(rt_rows) == 1
     assert rt_rows[0]["position"] == 1.0
-    assert rt_rows[1]["position"] == -1.0
+    assert rt_rows[0]["execution_ts"] == datetime(2026, 4, 26, 2, 6, 0)
+
+
+@pytest.mark.unit
+def test_process_candle_two_revisions_both_active_last_wins():
+    """When both revisions have fired, the last one (latest execution_ts) is active.
+
+    Rev1: execution_ts=02:06, position=1.0
+    Rev2: execution_ts=02:33, position=0.0
+    At candle.ts=02:33, rev2 supersedes rev1 — emit position=0.0.
+    """
+    state_real_trade = AnchorState()
+    state_real_trade.update(
+        "strat_rt_1",
+        AnchorRecord(anchor_pnl=0.0, anchor_price=93100.0, anchor_position=1.0),
+    )
+    candle = _make_candle(open=93200.0, ts=datetime(2026, 4, 26, 2, 33, 0))
+    rev1 = _make_revision(
+        position=1.0,
+        revision_ts=datetime(2026, 4, 26, 2, 5, 30),   # execution_ts=02:06 <= 02:33 ✓
+        closing_ts=datetime(2026, 4, 26, 2, 0, 0),
+    )
+    rev2 = _make_revision(
+        position=0.0,
+        revision_ts=datetime(2026, 4, 26, 2, 32, 25),  # execution_ts=02:33 <= 02:33 ✓
+        closing_ts=datetime(2026, 4, 26, 2, 0, 0),
+    )
+
+    with (
+        patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[]),
+        patch(f"{_MOD}.fetch_real_trade_revisions_for_candle", return_value=[rev1, rev2]),
+        patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=[]),
+    ):
+        rows = process_candle(candle, AnchorState(), state_real_trade, AnchorState())
+
+    rt_rows = [r for r in rows if r.get("_sink") == "pnl_real_trade"]
+    assert len(rt_rows) == 1
+    assert rt_rows[0]["position"] == 0.0
+    assert rt_rows[0]["execution_ts"] == datetime(2026, 4, 26, 2, 33, 0)
 
 
 @pytest.mark.unit
@@ -236,7 +323,7 @@ def test_process_candle_produces_pnl_bt_rows():
     state_real_trade = AnchorState()
     state_bt = AnchorState()
     state_bt.update("strat_bt_1", AnchorRecord(anchor_pnl=0.05, anchor_price=93100.0, anchor_position=1.0))
-    candle = _make_candle(close=93200.0)
+    candle = _make_candle(open=93200.0)
     bt_bar = _make_bt_bar(cumulative_pnl=99.0)  # raw value must be ignored
 
     with (
@@ -259,7 +346,7 @@ def test_process_candle_produces_pnl_bt_rows():
 def test_process_candle_bt_lazy_seeds_anchor_when_missing():
     """bt row is skipped when no anchor exists and lazy-seed also fails."""
     state_bt = AnchorState()
-    candle = _make_candle(close=93200.0)
+    candle = _make_candle(open=93200.0)
     bt_bar = _make_bt_bar(cumulative_pnl=0.05)
 
     with (
@@ -277,7 +364,7 @@ def test_process_candle_bt_lazy_seeds_anchor_when_missing():
 @pytest.mark.unit
 def test_process_candle_lazy_seeds_anchor_when_missing():
     """When anchor is absent, fetch_anchor_for_strategy is called and PnL row is emitted."""
-    candle = _make_candle(close=93200.0)
+    candle = _make_candle(open=93200.0)
     strategies = [_make_strategy(position=1.0)]
     seeded_anchor = AnchorRecord(anchor_pnl=0.0, anchor_price=93100.0, anchor_position=1.0)
 
@@ -298,7 +385,7 @@ def test_process_candle_lazy_seeds_anchor_when_missing():
 @pytest.mark.unit
 def test_process_candle_skips_pnl_when_lazy_seed_also_fails():
     """When fetch_anchor_for_strategy returns None, the PnL row is skipped but price row still emits."""
-    candle = _make_candle(close=93200.0)
+    candle = _make_candle(open=93200.0)
     strategies = [_make_strategy(position=1.0)]
 
     with (
