@@ -582,7 +582,7 @@ def test_emit_candle_lag_calls_put_metric_data_with_lag_in_seconds():
     with patch("pnl_consumer.pnl_consumer.datetime") as mock_dt:
         mock_dt.now.return_value = fake_now
         mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-        emit_candle_lag(candle_ts, mock_cw)
+        emit_candle_lag(candle_ts, mock_cw, "price")
 
     mock_cw.put_metric_data.assert_called_once()
     call_kwargs = mock_cw.put_metric_data.call_args.kwargs
@@ -591,6 +591,7 @@ def test_emit_candle_lag_calls_put_metric_data_with_lag_in_seconds():
     assert metric["MetricName"] == "CandleLagSeconds"
     assert metric["Value"] == 90.0
     assert metric["Unit"] == "Seconds"
+    assert metric["Dimensions"] == [{"Name": "Sink", "Value": "price"}]
 
 
 @pytest.mark.unit
@@ -603,7 +604,7 @@ def test_emit_candle_lag_also_emits_processing_ts_as_unix_epoch():
     with patch("pnl_consumer.pnl_consumer.datetime") as mock_dt:
         mock_dt.now.return_value = fake_now
         mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-        emit_candle_lag(candle_ts, mock_cw)
+        emit_candle_lag(candle_ts, mock_cw, "prod")
 
     call_kwargs = mock_cw.put_metric_data.call_args.kwargs
     metric_names = [m["MetricName"] for m in call_kwargs["MetricData"]]
@@ -613,6 +614,7 @@ def test_emit_candle_lag_also_emits_processing_ts_as_unix_epoch():
     expected_epoch = candle_ts.timestamp()
     assert pts_metric["Value"] == expected_epoch
     assert pts_metric["Unit"] == "None"
+    assert pts_metric["Dimensions"] == [{"Name": "Sink", "Value": "prod"}]
 
 
 @pytest.mark.unit
@@ -625,7 +627,7 @@ def test_emit_candle_lag_swallows_exceptions_without_raising():
     with patch("pnl_consumer.pnl_consumer.datetime") as mock_dt:
         mock_dt.now.return_value = datetime(2026, 5, 4, 10, 1, 0)
         mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-        emit_candle_lag(candle_ts, mock_cw)  # must not raise
+        emit_candle_lag(candle_ts, mock_cw, "bt")  # must not raise
 
 
 # --- SinkConfig tests ---

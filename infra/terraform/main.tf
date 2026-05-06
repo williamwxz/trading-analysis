@@ -770,10 +770,13 @@ resource "aws_cloudwatch_dashboard" "streaming_throughput" {
         width  = 24
         height = 6
         properties = {
-          title  = "Candle Lag (seconds) — pnl-consumer"
+          title  = "Candle Lag (seconds) — pnl-consumer by sink"
           region = "ap-northeast-1"
           metrics = [
-            ["trading-analysis", "CandleLagSeconds"]
+            ["trading-analysis", "CandleLagSeconds", "Sink", "price",      { label = "price" }],
+            ["trading-analysis", "CandleLagSeconds", "Sink", "prod",       { label = "prod" }],
+            ["trading-analysis", "CandleLagSeconds", "Sink", "real-trade", { label = "real_trade" }],
+            ["trading-analysis", "CandleLagSeconds", "Sink", "bt",         { label = "bt" }]
           ]
           stat   = "Maximum"
           period = 60
@@ -785,6 +788,27 @@ resource "aws_cloudwatch_dashboard" "streaming_throughput" {
         type   = "metric"
         x      = 0
         y      = 18
+        width  = 24
+        height = 6
+        properties = {
+          title  = "Candle Processing Timestamp — current ts per sink (Unix epoch)"
+          region = "ap-northeast-1"
+          metrics = [
+            ["trading-analysis", "CandleProcessingTs", "Sink", "price",      { label = "price" }],
+            ["trading-analysis", "CandleProcessingTs", "Sink", "prod",       { label = "prod" }],
+            ["trading-analysis", "CandleProcessingTs", "Sink", "real-trade", { label = "real_trade" }],
+            ["trading-analysis", "CandleProcessingTs", "Sink", "bt",         { label = "bt" }]
+          ]
+          stat   = "Maximum"
+          period = 60
+          view   = "timeSeries"
+          yAxis  = { left = { min = 0 } }
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 24
         width  = 24
         height = 6
         properties = {

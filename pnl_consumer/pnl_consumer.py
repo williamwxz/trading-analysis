@@ -305,10 +305,11 @@ LIMIT 1 BY strategy_table_name
     )
 
 
-def emit_candle_lag(candle_ts: datetime, cw_client: Any) -> None:
+def emit_candle_lag(candle_ts: datetime, cw_client: Any, sink: str) -> None:
     """Emit CandleLagSeconds and CandleProcessingTs to CloudWatch. Swallows errors."""
     try:
         lag = (datetime.now(UTC).replace(tzinfo=None) - candle_ts).total_seconds()
+        dimensions = [{"Name": "Sink", "Value": sink}]
         cw_client.put_metric_data(
             Namespace="trading-analysis",
             MetricData=[
@@ -316,11 +317,13 @@ def emit_candle_lag(candle_ts: datetime, cw_client: Any) -> None:
                     "MetricName": "CandleLagSeconds",
                     "Value": lag,
                     "Unit": "Seconds",
+                    "Dimensions": dimensions,
                 },
                 {
                     "MetricName": "CandleProcessingTs",
                     "Value": candle_ts.timestamp(),
                     "Unit": "None",
+                    "Dimensions": dimensions,
                 },
             ],
         )
@@ -403,6 +406,7 @@ def run() -> None:
     cw_client = boto3.client("cloudwatch", region_name=os.environ.get("AWS_REGION", "ap-northeast-1"))
 
     group_id = resolve_group_id()
+    sink_label = group_id.removeprefix("pnl-consumer-") or group_id
     consumer = Consumer(
         {
             "bootstrap.servers": os.environ["REDPANDA_BROKERS"],
@@ -518,7 +522,7 @@ def run() -> None:
                     state_bt,
                     sink_cfg,
                 )
-                emit_candle_lag(candle.ts, cw_client)
+                emit_candle_lag(candle.ts, cw_client, sink_label)
                 logger.info(
                     "Flushed %d price + %d prod + %d real_trade + %d bt rows",
                     n_price,
