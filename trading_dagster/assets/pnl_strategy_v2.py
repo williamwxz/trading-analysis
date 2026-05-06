@@ -202,8 +202,33 @@ WHERE r.underlying = '{underlying}'
 ORDER BY r.strategy_table_name, r.ts, r.revision_ts
 """
 
-        rows_dict = query_dicts(sql, client)
+        raw_rows = query_dicts(sql, client)
         chunks_done += 1
+        # Remap to normalised keys so compute_*_pnl always sees plain string keys
+        # regardless of how clickhouse-connect qualifies column names (e.g. "r.revision_ts").
+        if mode == "real_trade":
+            rows_dict = [
+                {
+                    "strategy_table_name": r["strategy_table_name"],
+                    "strategy_id": int(r["strategy_id"]),
+                    "strategy_name": r["strategy_name"],
+                    "underlying": r["underlying"],
+                    "config_timeframe": r["config_timeframe"],
+                    "weighting": float(r["weighting"]),
+                    "ts": str(r["ts"]),
+                    "closing_ts": str(r["closing_ts"]),
+                    "execution_ts": str(r["execution_ts"]),
+                    "revision_ts": str(r["revision_ts"]),
+                    "next_bar_closing_ts": str(r["next_bar_closing_ts"]),
+                    "position": float(r["position"]),
+                    "bar_price": float(r["bar_price"]),
+                    "final_signal": float(r["final_signal"]),
+                    "bar_benchmark": float(r["bar_benchmark"]),
+                }
+                for r in raw_rows
+            ]
+        else:
+            rows_dict = raw_rows
         if not rows_dict:
             chunk_start = chunk_end
             if chunks_done % 100 == 0:
