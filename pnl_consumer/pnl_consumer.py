@@ -3,6 +3,7 @@ import logging
 import os
 import signal
 import sys
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -26,6 +27,28 @@ from trading_dagster.utils.pnl_compute import (
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass
+class SinkConfig:
+    price: bool
+    prod: bool
+    real_trade: bool
+    bt: bool
+
+    @classmethod
+    def from_env(cls, env: dict[str, str] | None = None) -> "SinkConfig":
+        if env is None:
+            env = os.environ
+        def _flag(key: str, default: bool) -> bool:
+            return env.get(key, "true" if default else "false").lower() == "true"
+        return cls(
+            price=_flag("ENABLE_PRICE_SINK", True),
+            prod=_flag("ENABLE_PROD_SINK", False),
+            real_trade=_flag("ENABLE_REAL_TRADE_SINK", False),
+            bt=_flag("ENABLE_BT_SINK", False),
+        )
+
+
 FLUSH_EVERY = 10
 TOPIC = "binance.price.ticks"
 GROUP_ID = "flink-pnl-consumer"
@@ -42,11 +65,15 @@ PRICE_COLUMNS = [
 ]
 
 
+_ALL_SINKS_ENABLED = SinkConfig(price=True, prod=True, real_trade=True, bt=True)
+
+
 def process_candle(
     candle: CandleEvent,
     state_prod: AnchorState,
     state_real_trade: AnchorState,
     state_bt: AnchorState,
+    cfg: SinkConfig | None = None,
 ) -> list[dict]:
     """Pure business logic: lookup strategies, compute PnL, return rows.
 
@@ -56,24 +83,29 @@ def process_candle(
       '_sink' == 'pnl_real_trade' → write to strategy_pnl_1min_real_trade_v2
       '_sink' == 'pnl_bt'         → write to strategy_pnl_1min_bt_v2
 
-    Always emits one price row. Emits one pnl row per active strategy per sink.
+    cfg controls which sinks are active. Defaults to all enabled for backward
+    compatibility. In production, pass SinkConfig.from_env() to honour env vars.
     """
+    if cfg is None:
+        cfg = _ALL_SINKS_ENABLED
+
     now = datetime.now(UTC).replace(tzinfo=None)
     rows: list[dict] = []
 
-    rows.append(
-        {
-            "_sink": "price",
-            "exchange": candle.exchange,
-            "instrument": candle.instrument,
-            "ts": candle.ts,
-            "open": candle.open,
-            "high": candle.high,
-            "low": candle.low,
-            "close": candle.close,
-            "volume": candle.volume,
-        }
-    )
+    if cfg.price:
+        rows.append(
+            {
+                "_sink": "price",
+                "exchange": candle.exchange,
+                "instrument": candle.instrument,
+                "ts": candle.ts,
+                "open": candle.open,
+                "high": candle.high,
+                "low": candle.low,
+                "close": candle.close,
+                "volume": candle.volume,
+            }
+        )
 
     def _compute_pnl_with_lazy_seed(
         state: AnchorState, strategy_table_name: str, close_price: float, position: float
@@ -100,111 +132,114 @@ def process_candle(
             return state.compute_pnl(strategy_table_name, close_price, position)
 
     # --- prod ---
-    prod_strategies = fetch_strategies_for_candle(candle.instrument, candle.ts)
-    for bar in prod_strategies:
-        pnl = _compute_pnl_with_lazy_seed(
-            state_prod, bar.strategy_table_name, candle.open, bar.position
-        )
-        if pnl is None:
-            continue
-        rows.append(
-            {
-                "_sink": "pnl_prod",
-                "strategy_table_name": bar.strategy_table_name,
-                "strategy_id": bar.strategy_id,
-                "strategy_name": bar.strategy_name,
-                "underlying": bar.underlying,
-                "config_timeframe": bar.config_timeframe,
-                "source": "production",
-                "version": "v2",
-                "ts": candle.ts,
-                "cumulative_pnl": pnl,
-                "benchmark": bar.benchmark,
-                "position": bar.position,
-                "price": candle.open,
-                "final_signal": bar.final_signal,
-                "weighting": bar.weighting,
-                "updated_at": now,
-            }
-        )
+    if cfg.prod:
+        prod_strategies = fetch_strategies_for_candle(candle.instrument, candle.ts)
+        for bar in prod_strategies:
+            pnl = _compute_pnl_with_lazy_seed(
+                state_prod, bar.strategy_table_name, candle.open, bar.position
+            )
+            if pnl is None:
+                continue
+            rows.append(
+                {
+                    "_sink": "pnl_prod",
+                    "strategy_table_name": bar.strategy_table_name,
+                    "strategy_id": bar.strategy_id,
+                    "strategy_name": bar.strategy_name,
+                    "underlying": bar.underlying,
+                    "config_timeframe": bar.config_timeframe,
+                    "source": "production",
+                    "version": "v2",
+                    "ts": candle.ts,
+                    "cumulative_pnl": pnl,
+                    "benchmark": bar.benchmark,
+                    "position": bar.position,
+                    "price": candle.open,
+                    "final_signal": bar.final_signal,
+                    "weighting": bar.weighting,
+                    "updated_at": now,
+                }
+            )
 
     # --- real_trade ---
-    # Revisions are ordered by revision_ts ASC. We find the latest revision whose
-    # execution_ts <= candle.ts — that is the currently-active position for this minute.
-    # Revisions arriving in the future (execution_ts > candle.ts) are not yet active.
-    real_trade_revisions = fetch_real_trade_revisions_for_candle(
-        candle.instrument, candle.ts
-    )
-    # Group by strategy, pick the latest revision that is already active.
-    active_revisions: dict[str, StrategyRevision] = {}
-    for rev in real_trade_revisions:
-        execution_ts = (rev.revision_ts + timedelta(seconds=59)).replace(
-            second=0, microsecond=0
+    if cfg.real_trade:
+        # Revisions are ordered by revision_ts ASC. We find the latest revision whose
+        # execution_ts <= candle.ts — that is the currently-active position for this minute.
+        # Revisions arriving in the future (execution_ts > candle.ts) are not yet active.
+        real_trade_revisions = fetch_real_trade_revisions_for_candle(
+            candle.instrument, candle.ts
         )
-        if execution_ts <= candle.ts:
-            active_revisions[rev.strategy_table_name] = rev  # last one wins (ASC order)
+        # Group by strategy, pick the latest revision that is already active.
+        active_revisions: dict[str, StrategyRevision] = {}
+        for rev in real_trade_revisions:
+            execution_ts = (rev.revision_ts + timedelta(seconds=59)).replace(
+                second=0, microsecond=0
+            )
+            if execution_ts <= candle.ts:
+                active_revisions[rev.strategy_table_name] = rev  # last one wins (ASC order)
 
-    for stn, rev in active_revisions.items():
-        pnl = _compute_pnl_with_lazy_seed(
-            state_real_trade, stn, candle.open, rev.position
-        )
-        if pnl is None:
-            continue
-        execution_ts = (rev.revision_ts + timedelta(seconds=59)).replace(
-            second=0, microsecond=0
-        )
-        rows.append(
-            {
-                "_sink": "pnl_real_trade",
-                "strategy_table_name": stn,
-                "strategy_id": rev.strategy_id,
-                "strategy_name": rev.strategy_name,
-                "underlying": rev.underlying,
-                "config_timeframe": rev.config_timeframe,
-                "source": "real_trade",
-                "version": "v2",
-                "ts": candle.ts,
-                "cumulative_pnl": pnl,
-                "benchmark": rev.benchmark,
-                "position": rev.position,
-                "price": candle.open,
-                "final_signal": rev.final_signal,
-                "weighting": rev.weighting,
-                "updated_at": now,
-                "closing_ts": rev.closing_ts,
-                "execution_ts": execution_ts,
-                "traded": False,
-            }
-        )
+        for stn, rev in active_revisions.items():
+            pnl = _compute_pnl_with_lazy_seed(
+                state_real_trade, stn, candle.open, rev.position
+            )
+            if pnl is None:
+                continue
+            execution_ts = (rev.revision_ts + timedelta(seconds=59)).replace(
+                second=0, microsecond=0
+            )
+            rows.append(
+                {
+                    "_sink": "pnl_real_trade",
+                    "strategy_table_name": stn,
+                    "strategy_id": rev.strategy_id,
+                    "strategy_name": rev.strategy_name,
+                    "underlying": rev.underlying,
+                    "config_timeframe": rev.config_timeframe,
+                    "source": "real_trade",
+                    "version": "v2",
+                    "ts": candle.ts,
+                    "cumulative_pnl": pnl,
+                    "benchmark": rev.benchmark,
+                    "position": rev.position,
+                    "price": candle.open,
+                    "final_signal": rev.final_signal,
+                    "weighting": rev.weighting,
+                    "updated_at": now,
+                    "closing_ts": rev.closing_ts,
+                    "execution_ts": execution_ts,
+                    "traded": False,
+                }
+            )
 
     # --- bt ---
-    bt_bars = fetch_bt_strategies_for_candle(candle.instrument, candle.ts)
-    for bt_bar in bt_bars:
-        pnl = _compute_pnl_with_lazy_seed(
-            state_bt, bt_bar.strategy_table_name, candle.open, bt_bar.position
-        )
-        if pnl is None:
-            continue
-        rows.append(
-            {
-                "_sink": "pnl_bt",
-                "strategy_table_name": bt_bar.strategy_table_name,
-                "strategy_id": bt_bar.strategy_id,
-                "strategy_name": bt_bar.strategy_name,
-                "underlying": bt_bar.underlying,
-                "config_timeframe": bt_bar.config_timeframe,
-                "source": "backtest",
-                "version": "v2",
-                "ts": candle.ts,
-                "cumulative_pnl": pnl,
-                "benchmark": bt_bar.benchmark,
-                "position": bt_bar.position,
-                "price": candle.open,
-                "final_signal": bt_bar.final_signal,
-                "weighting": bt_bar.weighting,
-                "updated_at": now,
-            }
-        )
+    if cfg.bt:
+        bt_bars = fetch_bt_strategies_for_candle(candle.instrument, candle.ts)
+        for bt_bar in bt_bars:
+            pnl = _compute_pnl_with_lazy_seed(
+                state_bt, bt_bar.strategy_table_name, candle.open, bt_bar.position
+            )
+            if pnl is None:
+                continue
+            rows.append(
+                {
+                    "_sink": "pnl_bt",
+                    "strategy_table_name": bt_bar.strategy_table_name,
+                    "strategy_id": bt_bar.strategy_id,
+                    "strategy_name": bt_bar.strategy_name,
+                    "underlying": bt_bar.underlying,
+                    "config_timeframe": bt_bar.config_timeframe,
+                    "source": "backtest",
+                    "version": "v2",
+                    "ts": candle.ts,
+                    "cumulative_pnl": pnl,
+                    "benchmark": bt_bar.benchmark,
+                    "position": bt_bar.position,
+                    "price": candle.open,
+                    "final_signal": bt_bar.final_signal,
+                    "weighting": bt_bar.weighting,
+                    "updated_at": now,
+                }
+            )
 
     return rows
 
@@ -332,6 +367,12 @@ def _flush_and_reseed(
 def run() -> None:
     logging.basicConfig(level=logging.INFO)
 
+    sink_cfg = SinkConfig.from_env()
+    logger.info(
+        "Sink config: price=%s prod=%s real_trade=%s bt=%s",
+        sink_cfg.price, sink_cfg.prod, sink_cfg.real_trade, sink_cfg.bt,
+    )
+
     state_prod = AnchorState()
     state_real_trade = AnchorState()
     state_bt = AnchorState()
@@ -409,7 +450,7 @@ def run() -> None:
                 FLUSH_EVERY,
             )
 
-            for row in process_candle(candle, state_prod, state_real_trade, state_bt):
+            for row in process_candle(candle, state_prod, state_real_trade, state_bt, sink_cfg):
                 if row["_sink"] == "price":
                     price_batch.append(
                         [

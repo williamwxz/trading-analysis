@@ -1216,10 +1216,14 @@ resource "aws_ecs_task_definition" "pnl_consumer" {
       { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
     ]
     environment = [
-      { name = "CLICKHOUSE_PORT",     value = "8443" },
-      { name = "CLICKHOUSE_USER",     value = "dev_ro3" },
-      { name = "CLICKHOUSE_SECURE",   value = "true" },
-      { name = "REDPANDA_BROKERS",    value = "redpanda.${local.name_prefix}.local:9092" },
+      { name = "CLICKHOUSE_PORT",         value = "8443" },
+      { name = "CLICKHOUSE_USER",         value = "dev_ro3" },
+      { name = "CLICKHOUSE_SECURE",       value = "true" },
+      { name = "REDPANDA_BROKERS",        value = "redpanda.${local.name_prefix}.local:9092" },
+      { name = "ENABLE_PRICE_SINK",       value = "true" },
+      { name = "ENABLE_PROD_SINK",        value = "true" },
+      { name = "ENABLE_REAL_TRADE_SINK",  value = "false" },
+      { name = "ENABLE_BT_SINK",          value = "false" },
     ]
     healthCheck = {
       command     = ["CMD-SHELL", "python -c 'import os; os.kill(1, 0)'"]

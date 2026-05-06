@@ -11,6 +11,7 @@ from pnl_consumer.pnl_consumer import (
     _flush_and_reseed,
     emit_candle_lag,
     process_candle,
+    SinkConfig,
 )
 from streaming.models import CandleEvent
 from trading_dagster.utils.pnl_compute import (
@@ -624,3 +625,140 @@ def test_emit_candle_lag_swallows_exceptions_without_raising():
         mock_dt.now.return_value = datetime(2026, 5, 4, 10, 1, 0)
         mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
         emit_candle_lag(candle_ts, mock_cw)  # must not raise
+
+
+# --- SinkConfig tests ---
+
+
+@pytest.mark.unit
+def test_sink_config_defaults_price_true_others_false():
+    cfg = SinkConfig.from_env({})
+    assert cfg.price is True
+    assert cfg.prod is False
+    assert cfg.real_trade is False
+    assert cfg.bt is False
+
+
+@pytest.mark.unit
+def test_sink_config_enables_prod_via_env():
+    cfg = SinkConfig.from_env({"ENABLE_PROD_SINK": "true"})
+    assert cfg.prod is True
+    assert cfg.price is True
+    assert cfg.real_trade is False
+    assert cfg.bt is False
+
+
+@pytest.mark.unit
+def test_sink_config_enables_real_trade_via_env():
+    cfg = SinkConfig.from_env({"ENABLE_REAL_TRADE_SINK": "true"})
+    assert cfg.real_trade is True
+    assert cfg.prod is False
+
+
+@pytest.mark.unit
+def test_sink_config_enables_bt_via_env():
+    cfg = SinkConfig.from_env({"ENABLE_BT_SINK": "true"})
+    assert cfg.bt is True
+    assert cfg.prod is False
+
+
+@pytest.mark.unit
+def test_sink_config_can_disable_price_sink():
+    cfg = SinkConfig.from_env({"ENABLE_PRICE_SINK": "false"})
+    assert cfg.price is False
+
+
+@pytest.mark.unit
+def test_sink_config_enables_all_sinks():
+    cfg = SinkConfig.from_env(
+        {
+            "ENABLE_PRICE_SINK": "true",
+            "ENABLE_PROD_SINK": "true",
+            "ENABLE_REAL_TRADE_SINK": "true",
+            "ENABLE_BT_SINK": "true",
+        }
+    )
+    assert cfg.price is True
+    assert cfg.prod is True
+    assert cfg.real_trade is True
+    assert cfg.bt is True
+
+
+@pytest.mark.unit
+def test_process_candle_respects_sink_config_prod_disabled():
+    """When prod sink is disabled, no pnl_prod rows are emitted."""
+    state_prod = AnchorState()
+    state_prod.update(
+        "strat_prod_1",
+        AnchorRecord(anchor_pnl=0.0, anchor_price=93100.0, anchor_position=1.0),
+    )
+    candle = _make_candle(open=93200.0)
+    strategies = [_make_strategy(position=1.0)]
+    cfg = SinkConfig(price=True, prod=False, real_trade=False, bt=False)
+
+    with (
+        patch(f"{_MOD}.fetch_strategies_for_candle", return_value=strategies),
+        patch(f"{_MOD}.fetch_real_trade_revisions_for_candle", return_value=[]),
+        patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=[]),
+    ):
+        rows = process_candle(candle, state_prod, AnchorState(), AnchorState(), cfg)
+
+    assert [r for r in rows if r["_sink"] == "pnl_prod"] == []
+    assert len([r for r in rows if r["_sink"] == "price"]) == 1
+
+
+@pytest.mark.unit
+def test_process_candle_respects_sink_config_price_disabled():
+    """When price sink is disabled, no price rows are emitted."""
+    candle = _make_candle()
+    cfg = SinkConfig(price=False, prod=False, real_trade=False, bt=False)
+
+    with (
+        patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[]),
+        patch(f"{_MOD}.fetch_real_trade_revisions_for_candle", return_value=[]),
+        patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=[]),
+    ):
+        rows = process_candle(candle, AnchorState(), AnchorState(), AnchorState(), cfg)
+
+    assert rows == []
+
+
+@pytest.mark.unit
+def test_process_candle_respects_sink_config_bt_disabled():
+    """When bt sink is disabled, no pnl_bt rows are emitted."""
+    state_bt = AnchorState()
+    state_bt.update("strat_bt_1", AnchorRecord(anchor_pnl=0.0, anchor_price=93100.0, anchor_position=1.0))
+    candle = _make_candle(open=93200.0)
+    bt_bar = _make_bt_bar()
+    cfg = SinkConfig(price=True, prod=False, real_trade=False, bt=False)
+
+    with (
+        patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[]),
+        patch(f"{_MOD}.fetch_real_trade_revisions_for_candle", return_value=[]),
+        patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=[bt_bar]),
+    ):
+        rows = process_candle(candle, AnchorState(), AnchorState(), state_bt, cfg)
+
+    assert [r for r in rows if r["_sink"] == "pnl_bt"] == []
+
+
+@pytest.mark.unit
+def test_process_candle_no_sink_config_defaults_to_all_enabled():
+    """Calling process_candle without cfg uses backward-compatible all-enabled behaviour."""
+    state_prod = AnchorState()
+    state_prod.update(
+        "strat_prod_1",
+        AnchorRecord(anchor_pnl=0.0, anchor_price=93100.0, anchor_position=1.0),
+    )
+    candle = _make_candle(open=93200.0)
+    strategies = [_make_strategy(position=1.0)]
+
+    with (
+        patch(f"{_MOD}.fetch_strategies_for_candle", return_value=strategies),
+        patch(f"{_MOD}.fetch_real_trade_revisions_for_candle", return_value=[]),
+        patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=[]),
+    ):
+        rows = process_candle(candle, state_prod, AnchorState(), AnchorState())
+
+    assert len([r for r in rows if r["_sink"] == "price"]) == 1
+    assert len([r for r in rows if r["_sink"] == "pnl_prod"]) == 1
