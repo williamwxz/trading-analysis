@@ -236,7 +236,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "dfjc5vjyfcc8wf"
           },
-          "rawSql": "WITH bt_at_start AS (SELECT JSONExtractFloat(argMin(row_json, revision_ts), 'cumulative_pnl') AS v FROM analytics.strategy_output_history_bt_v2 WHERE strategy_table_name = '${strategy_instance}' AND ts = (SELECT min(ts) FROM analytics.strategy_output_history_v2 WHERE strategy_table_name = '${strategy_instance}')), dedup AS (SELECT ts, row_json, row_number() OVER (PARTITION BY ts ORDER BY revision_ts ASC) AS rn FROM analytics.strategy_output_history_v2 WHERE strategy_table_name = '${strategy_instance}'), running AS (SELECT ts AS time, sum(JSONExtractFloat(row_json, 'pnl')) OVER (ORDER BY ts) + ifNull((SELECT v FROM bt_at_start), 0) AS cumulative_pnl FROM dedup WHERE rn = 1) SELECT time, cumulative_pnl AS `Production PnL (sum_pnl)` FROM running WHERE time >= toDateTime(intDiv(${__from},1000)) AND time <= toDateTime(intDiv(${__to},1000)) ORDER BY time",
+          "rawSql": "WITH bt_at_start AS (SELECT argMin(cumulative_pnl, ts) AS v FROM analytics.strategy_pnl_1min_bt_v2 FINAL WHERE strategy_table_name = '${strategy_instance}'), dedup AS (SELECT ts, row_json, row_number() OVER (PARTITION BY ts ORDER BY revision_ts ASC) AS rn FROM analytics.strategy_output_history_v2 WHERE strategy_table_name = '${strategy_instance}'), running AS (SELECT ts AS time, sum(JSONExtractFloat(row_json, 'pnl')) OVER (ORDER BY ts) + ifNull((SELECT v FROM bt_at_start), 0) AS cumulative_pnl FROM dedup WHERE rn = 1) SELECT time, cumulative_pnl AS `Production PnL (sum_pnl)` FROM running WHERE time >= toDateTime(intDiv(${__from},1000)) AND time <= toDateTime(intDiv(${__to},1000)) ORDER BY time",
           "refId": "A",
           "format": 1,
           "queryType": "sql",
@@ -251,7 +251,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "dfjc5vjyfcc8wf"
           },
-          "rawSql": "WITH dedup AS (SELECT ts, row_json, row_number() OVER (PARTITION BY ts ORDER BY revision_ts ASC) AS rn FROM analytics.strategy_output_history_bt_v2 WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) SELECT d.ts AS time, JSONExtractFloat(d.row_json, 'cumulative_pnl') AS `Backtest PnL`, JSONExtractFloat(d.row_json, 'benchmark') AS `Benchmark` FROM dedup d WHERE d.rn = 1 ORDER BY d.ts ASC",
+          "rawSql": "SELECT ts AS time, cumulative_pnl AS `Backtest PnL`, benchmark AS `Benchmark` FROM analytics.strategy_pnl_1min_bt_v2 FINAL WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) ORDER BY ts ASC",
           "refId": "B",
           "format": 1,
           "queryType": "sql",
@@ -267,7 +267,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "dfjc5vjyfcc8wf"
           },
-          "rawSql": "WITH bt_at_start AS (SELECT JSONExtractFloat(argMin(row_json, revision_ts), 'cumulative_pnl') AS v FROM analytics.strategy_output_history_bt_v2 WHERE strategy_table_name = '${strategy_instance}' AND ts = (SELECT min(ts) FROM (SELECT strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, source, version, ts, cumulative_pnl, benchmark, position, price, final_signal, weighting, updated_at FROM analytics.strategy_pnl_1min_real_trade_v2 FINAL) WHERE strategy_table_name = '${strategy_instance}')), rt_at_start AS (SELECT argMin(cumulative_pnl, ts) AS v FROM (SELECT strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, source, version, ts, cumulative_pnl, benchmark, position, price, final_signal, weighting, updated_at FROM analytics.strategy_pnl_1min_real_trade_v2 FINAL) WHERE strategy_table_name = '${strategy_instance}') SELECT $__timeInterval(ts) AS time, argMax(cumulative_pnl, ts) - (SELECT v FROM rt_at_start) + ifNull((SELECT v FROM bt_at_start), 0) AS `Real Trade PnL (sum_pnl)` FROM (SELECT strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, source, version, ts, cumulative_pnl, benchmark, position, price, final_signal, weighting, updated_at FROM analytics.strategy_pnl_1min_real_trade_v2 FINAL) WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
+          "rawSql": "WITH bt_at_start AS (SELECT argMin(cumulative_pnl, ts) AS v FROM analytics.strategy_pnl_1min_bt_v2 FINAL WHERE strategy_table_name = '${strategy_instance}'), rt_at_start AS (SELECT argMin(cumulative_pnl, ts) AS v FROM analytics.strategy_pnl_1min_real_trade_v2 FINAL WHERE strategy_table_name = '${strategy_instance}') SELECT $__timeInterval(ts) AS time, argMax(cumulative_pnl, ts) - (SELECT v FROM rt_at_start) + ifNull((SELECT v FROM bt_at_start), 0) AS `Real Trade PnL (sum_pnl)` FROM analytics.strategy_pnl_1min_real_trade_v2 FINAL WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
           "refId": "C",
           "format": 1,
           "queryType": "sql",
@@ -349,7 +349,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "dfjc5vjyfcc8wf"
           },
-          "rawSql": "WITH dedup AS (SELECT ts, row_json, row_number() OVER (PARTITION BY ts ORDER BY revision_ts ASC) AS rn FROM analytics.strategy_output_history_bt_v2 WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))), base AS (SELECT d.ts AS time, JSONExtractFloat(d.row_json, 'cumulative_pnl') AS cumulative_pnl, JSONExtractFloat(d.row_json, 'benchmark') AS benchmark FROM dedup d WHERE d.rn = 1) SELECT time, cumulative_pnl - first_value(cumulative_pnl) OVER (ORDER BY time) AS `Backtest PnL`, benchmark - first_value(benchmark) OVER (ORDER BY time) AS `Benchmark` FROM base ORDER BY time",
+          "rawSql": "WITH base AS (SELECT ts AS time, cumulative_pnl, benchmark FROM analytics.strategy_pnl_1min_bt_v2 FINAL WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) SELECT time, cumulative_pnl - first_value(cumulative_pnl) OVER (ORDER BY time) AS `Backtest PnL`, benchmark - first_value(benchmark) OVER (ORDER BY time) AS `Benchmark` FROM base ORDER BY time",
           "refId": "B",
           "format": 1,
           "queryType": "sql",
@@ -365,7 +365,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "dfjc5vjyfcc8wf"
           },
-          "rawSql": "WITH rt_at_start AS (SELECT argMin(cumulative_pnl, ts) AS v FROM (SELECT strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, source, version, ts, cumulative_pnl, benchmark, position, price, final_signal, weighting, updated_at FROM analytics.strategy_pnl_1min_real_trade_v2 FINAL) WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) SELECT $__timeInterval(ts) AS time, argMax(cumulative_pnl, ts) - (SELECT v FROM rt_at_start) AS `Real Trade PnL (sum_pnl)` FROM (SELECT strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, source, version, ts, cumulative_pnl, benchmark, position, price, final_signal, weighting, updated_at FROM analytics.strategy_pnl_1min_real_trade_v2 FINAL) WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
+          "rawSql": "WITH rt_at_start AS (SELECT argMin(cumulative_pnl, ts) AS v FROM analytics.strategy_pnl_1min_real_trade_v2 FINAL WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) SELECT $__timeInterval(ts) AS time, argMax(cumulative_pnl, ts) - (SELECT v FROM rt_at_start) AS `Real Trade PnL (sum_pnl)` FROM analytics.strategy_pnl_1min_real_trade_v2 FINAL WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
           "refId": "C",
           "format": 1,
           "queryType": "sql",
@@ -444,7 +444,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "dfjc5vjyfcc8wf"
           },
-          "rawSql": "WITH dedup AS (SELECT ts, row_json, row_number() OVER (PARTITION BY ts ORDER BY revision_ts ASC) AS rn FROM analytics.strategy_output_history_bt_v2 WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))), base AS (SELECT d.ts AS time, JSONExtractFloat(d.row_json, 'cumulative_pnl') AS cumulative_pnl FROM dedup d WHERE d.rn = 1) SELECT time, cumulative_pnl - max(cumulative_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Backtest Drawdown` FROM base ORDER BY time",
+          "rawSql": "WITH base AS (SELECT ts AS time, cumulative_pnl FROM analytics.strategy_pnl_1min_bt_v2 FINAL WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) SELECT time, cumulative_pnl - max(cumulative_pnl) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `Backtest Drawdown` FROM base ORDER BY time",
           "refId": "B",
           "format": 1,
           "queryType": "sql",
@@ -627,7 +627,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "dfjc5vjyfcc8wf"
           },
-          "rawSql": "WITH dedup AS (SELECT ts, row_json, row_number() OVER (PARTITION BY ts ORDER BY revision_ts ASC) AS rn FROM analytics.strategy_output_history_bt_v2 WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) SELECT d.ts AS time, JSONExtractFloat(d.row_json, 'position_tX') AS `Backtest Position tX` FROM dedup d WHERE d.rn = 1 ORDER BY d.ts ASC",
+          "rawSql": "SELECT ts AS time, position AS `Backtest Position` FROM analytics.strategy_pnl_1min_bt_v2 FINAL WHERE strategy_table_name = '${strategy_instance}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) ORDER BY ts ASC",
           "refId": "B",
           "format": 1,
           "queryType": "sql",
