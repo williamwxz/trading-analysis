@@ -210,12 +210,14 @@ ORDER BY strategy_table_name, ts, revision_ts
                 )
             continue
 
+        price_col = "close" if mode == "bt" else "open"
         all_prices = fetch_prices_multi(
             underlyings=[underlying],
             ts_min=chunk_start_ts,
             ts_max=chunk_end_ts,
             client=client,
             extend_minutes=0,
+            price_column=price_col,
         )
         prices = all_prices.pop(underlying, {})
 
