@@ -12,6 +12,7 @@ from pnl_consumer.pnl_consumer import (
     emit_candle_lag,
     process_candle,
     SinkConfig,
+    resolve_group_id,
 )
 from streaming.models import CandleEvent
 from trading_dagster.utils.pnl_compute import (
@@ -762,3 +763,22 @@ def test_process_candle_no_sink_config_defaults_to_all_enabled():
 
     assert len([r for r in rows if r["_sink"] == "price"]) == 1
     assert len([r for r in rows if r["_sink"] == "pnl_prod"]) == 1
+
+
+# --- resolve_group_id tests ---
+
+
+@pytest.mark.unit
+def test_resolve_group_id_returns_env_var_when_set():
+    assert resolve_group_id({"KAFKA_GROUP_ID": "my-custom-group"}) == "my-custom-group"
+
+
+@pytest.mark.unit
+def test_resolve_group_id_returns_default_when_env_not_set():
+    assert resolve_group_id({}) == "flink-pnl-consumer"
+
+
+@pytest.mark.unit
+def test_resolve_group_id_uses_os_environ_by_default(monkeypatch):
+    monkeypatch.setenv("KAFKA_GROUP_ID", "env-group")
+    assert resolve_group_id() == "env-group"

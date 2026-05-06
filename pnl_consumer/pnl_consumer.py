@@ -51,7 +51,13 @@ class SinkConfig:
 
 FLUSH_EVERY = 10
 TOPIC = "binance.price.ticks"
-GROUP_ID = "flink-pnl-consumer"
+_DEFAULT_GROUP_ID = "flink-pnl-consumer"
+
+
+def resolve_group_id(env: dict[str, str] | None = None) -> str:
+    if env is None:
+        env = os.environ
+    return env.get("KAFKA_GROUP_ID", _DEFAULT_GROUP_ID)
 
 PRICE_COLUMNS = [
     "exchange",
@@ -380,16 +386,17 @@ def run() -> None:
 
     cw_client = boto3.client("cloudwatch", region_name=os.environ.get("AWS_REGION", "ap-northeast-1"))
 
+    group_id = resolve_group_id()
     consumer = Consumer(
         {
             "bootstrap.servers": os.environ["REDPANDA_BROKERS"],
-            "group.id": GROUP_ID,
+            "group.id": group_id,
             "auto.offset.reset": "earliest",
             "enable.auto.commit": False,
         }
     )
     consumer.subscribe([TOPIC])
-    logger.info("Subscribed to %s as group %s", TOPIC, GROUP_ID)
+    logger.info("Subscribed to %s as group %s", TOPIC, group_id)
 
     price_batch: list[list] = []
     pnl_prod_batch: list[list] = []

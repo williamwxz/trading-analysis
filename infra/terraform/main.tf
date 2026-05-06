@@ -1198,8 +1198,51 @@ resource "aws_ecs_task_definition" "ws_consumer" {
   tags = local.common_tags
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# PnL consumer — one task definition + service per sink
+# Each sink has its own Kafka consumer group so offsets are tracked independently.
+# ─────────────────────────────────────────────────────────────────────────────
+
+locals {
+  pnl_consumer_sinks = {
+    price = {
+      enable_price      = "true"
+      enable_prod       = "false"
+      enable_real_trade = "false"
+      enable_bt         = "false"
+      group_id          = "pnl-consumer-price"
+      desired_count     = 1
+    }
+    prod = {
+      enable_price      = "false"
+      enable_prod       = "true"
+      enable_real_trade = "false"
+      enable_bt         = "false"
+      group_id          = "pnl-consumer-prod"
+      desired_count     = 1
+    }
+    real-trade = {
+      enable_price      = "false"
+      enable_prod       = "false"
+      enable_real_trade = "true"
+      enable_bt         = "false"
+      group_id          = "pnl-consumer-real-trade"
+      desired_count     = 0
+    }
+    bt = {
+      enable_price      = "false"
+      enable_prod       = "false"
+      enable_real_trade = "false"
+      enable_bt         = "true"
+      group_id          = "pnl-consumer-bt"
+      desired_count     = 0
+    }
+  }
+}
+
 resource "aws_ecs_task_definition" "pnl_consumer" {
-  family                   = "${local.name_prefix}-pnl-consumer"
+  for_each                 = local.pnl_consumer_sinks
+  family                   = "${local.name_prefix}-pnl-consumer-${each.key}"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = 512
@@ -1220,10 +1263,11 @@ resource "aws_ecs_task_definition" "pnl_consumer" {
       { name = "CLICKHOUSE_USER",         value = "dev_ro3" },
       { name = "CLICKHOUSE_SECURE",       value = "true" },
       { name = "REDPANDA_BROKERS",        value = "redpanda.${local.name_prefix}.local:9092" },
-      { name = "ENABLE_PRICE_SINK",       value = "true" },
-      { name = "ENABLE_PROD_SINK",        value = "true" },
-      { name = "ENABLE_REAL_TRADE_SINK",  value = "false" },
-      { name = "ENABLE_BT_SINK",          value = "false" },
+      { name = "KAFKA_GROUP_ID",          value = each.value.group_id },
+      { name = "ENABLE_PRICE_SINK",       value = each.value.enable_price },
+      { name = "ENABLE_PROD_SINK",        value = each.value.enable_prod },
+      { name = "ENABLE_REAL_TRADE_SINK",  value = each.value.enable_real_trade },
+      { name = "ENABLE_BT_SINK",          value = each.value.enable_bt },
     ]
     healthCheck = {
       command     = ["CMD-SHELL", "python -c 'import os; os.kill(1, 0)'"]
@@ -1237,7 +1281,7 @@ resource "aws_ecs_task_definition" "pnl_consumer" {
       options = {
         "awslogs-group"         = aws_cloudwatch_log_group.streaming.name
         "awslogs-region"        = var.aws_region
-        "awslogs-stream-prefix" = "pnl-consumer"
+        "awslogs-stream-prefix" = "pnl-consumer-${each.key}"
       }
     }
   }])
@@ -1324,10 +1368,11 @@ resource "aws_ecs_service" "ws_consumer" {
 }
 
 resource "aws_ecs_service" "pnl_consumer" {
-  name            = "${local.name_prefix}-pnl-consumer"
+  for_each        = local.pnl_consumer_sinks
+  name            = "${local.name_prefix}-pnl-consumer-${each.key}"
   cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.pnl_consumer.arn
-  desired_count   = 1
+  task_definition = aws_ecs_task_definition.pnl_consumer[each.key].arn
+  desired_count   = each.value.desired_count
 
   capacity_provider_strategy {
     capacity_provider = "FARGATE_SPOT"

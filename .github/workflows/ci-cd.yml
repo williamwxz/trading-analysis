@@ -430,10 +430,14 @@ jobs:
           set -eu
           [ -n "$IMAGE_TAG" ] || { echo "ERROR: IMAGE_TAG is empty — build job output missing"; exit 1; }
           IMAGE_URI=$REGISTRY/trading-analysis-pnl-consumer:$IMAGE_TAG
-          TASK_DEF=$(aws ecs describe-task-definition \
-            --task-definition trading-analysis-pnl-consumer \
-            --region $DEPLOY_REGION --query taskDefinition --output json)
-          NEW_TASK=$(echo "$TASK_DEF" | python3 -c "
+          for SINK in price prod real-trade bt; do
+            TASK_FAMILY="trading-analysis-pnl-consumer-${SINK}"
+            SERVICE_NAME="trading-analysis-pnl-consumer-${SINK}"
+            echo "Deploying ${SERVICE_NAME}..."
+            TASK_DEF=$(aws ecs describe-task-definition \
+              --task-definition "$TASK_FAMILY" \
+              --region $DEPLOY_REGION --query taskDefinition --output json)
+            NEW_TASK=$(echo "$TASK_DEF" | python3 -c "
           import sys, json
           img = sys.argv[1]
           td = json.load(sys.stdin)
@@ -443,42 +447,50 @@ jobs:
           for k in ('taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy'):
               td.pop(k, None)
           print(json.dumps(td))
-          " "$IMAGE_URI")
-          NEW_ARN=$(aws ecs register-task-definition \
-            --cli-input-json "$NEW_TASK" \
-            --region $DEPLOY_REGION \
-            --query taskDefinition.taskDefinitionArn --output text)
-          [ -n "$NEW_ARN" ] || { echo "ERROR: register-task-definition returned empty ARN"; exit 1; }
-          echo "Registered: $NEW_ARN"
-          aws ecs update-service \
-            --cluster $ECS_CLUSTER \
-            --service trading-analysis-pnl-consumer \
-            --task-definition "$NEW_ARN" \
-            --force-new-deployment \
-            --region $DEPLOY_REGION \
-            --output json > /dev/null
+            " "$IMAGE_URI")
+            NEW_ARN=$(aws ecs register-task-definition \
+              --cli-input-json "$NEW_TASK" \
+              --region $DEPLOY_REGION \
+              --query taskDefinition.taskDefinitionArn --output text)
+            [ -n "$NEW_ARN" ] || { echo "ERROR: register-task-definition returned empty ARN for ${SINK}"; exit 1; }
+            echo "Registered: $NEW_ARN"
+            aws ecs update-service \
+              --cluster $ECS_CLUSTER \
+              --service "$SERVICE_NAME" \
+              --task-definition "$NEW_ARN" \
+              --force-new-deployment \
+              --region $DEPLOY_REGION \
+              --output json > /dev/null
+          done
 
       - name: Wait for pnl-consumer stability
         env:
           DEPLOY_REGION: ${{ secrets.AWS_REGION }}
           ECS_CLUSTER: trading-analysis
         run: |
-          echo "Waiting up to 20 min for trading-analysis-pnl-consumer to stabilise..."
+          SERVICES="trading-analysis-pnl-consumer-price trading-analysis-pnl-consumer-prod trading-analysis-pnl-consumer-real-trade trading-analysis-pnl-consumer-bt"
+          echo "Waiting up to 20 min for all pnl-consumer services to stabilise..."
           for i in $(seq 1 80); do
-            STATUS=$(aws ecs describe-services \
-              --cluster $ECS_CLUSTER \
-              --services trading-analysis-pnl-consumer \
-              --region $DEPLOY_REGION \
-              --query 'services[0].deployments' --output json)
-            PRIMARIES=$(echo "$STATUS" | python3 -c "
+            ALL_STABLE=true
+            for SVC in $SERVICES; do
+              STATUS=$(aws ecs describe-services \
+                --cluster $ECS_CLUSTER \
+                --services "$SVC" \
+                --region $DEPLOY_REGION \
+                --query 'services[0].deployments' --output json)
+              PRIMARIES=$(echo "$STATUS" | python3 -c "
           import sys,json
           d=json.load(sys.stdin)
           print(sum(1 for x in d if x['status']=='PRIMARY' and x['runningCount']>=x['desiredCount'] and x['failedTasks']==0))")
-            TOTAL=$(echo "$STATUS" | python3 -c "
+              TOTAL=$(echo "$STATUS" | python3 -c "
           import sys,json; d=json.load(sys.stdin); print(len(d))")
-            echo "Poll $i/80: deployments=$TOTAL primary_stable=$PRIMARIES"
-            if [ "$PRIMARIES" = "1" ] && [ "$TOTAL" = "1" ]; then
-              echo "pnl-consumer deploy complete."
+              echo "Poll $i/80 [$SVC]: deployments=$TOTAL primary_stable=$PRIMARIES"
+              if [ "$PRIMARIES" != "1" ] || [ "$TOTAL" != "1" ]; then
+                ALL_STABLE=false
+              fi
+            done
+            if [ "$ALL_STABLE" = "true" ]; then
+              echo "All pnl-consumer services stable."
               break
             fi
             if [ "$i" = "80" ]; then
