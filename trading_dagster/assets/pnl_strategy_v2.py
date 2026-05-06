@@ -163,43 +163,43 @@ GROUP BY strategy_table_name, strategy_id, strategy_name, underlying, config_tim
 ORDER BY strategy_table_name, ts
 """
         else:  # real_trade
+            tf_expr = "multiIf(config_timeframe = '5m', 5, config_timeframe = '10m', 10, config_timeframe = '15m', 15, config_timeframe = '30m', 30, config_timeframe = '1h', 60, config_timeframe = '4h', 240, config_timeframe = '1d', 1440, 5)"
             sql = f"""\
-WITH raw AS (
+SELECT
+    r.strategy_table_name,
+    r.strategy_id, r.strategy_name, r.underlying, r.config_timeframe, r.weighting,
+    toString(r.ts) AS ts,
+    toString(r.ts + toIntervalMinute({tf_expr})) AS closing_ts,
+    toString(toStartOfMinute(r.revision_ts + INTERVAL 59 SECOND)) AS execution_ts,
+    toString(r.revision_ts) AS revision_ts,
+    toString(nb.next_bar_ts + toIntervalMinute({tf_expr})) AS next_bar_closing_ts,
+    JSONExtractFloat(r.row_json, 'position') AS position,
+    JSONExtractFloat(r.row_json, 'price') AS bar_price,
+    JSONExtractFloat(r.row_json, 'final_signal') AS final_signal,
+    JSONExtractFloat(r.row_json, 'benchmark') AS bar_benchmark
+FROM analytics.{source_table} r
+LEFT JOIN (
     SELECT
         strategy_table_name,
-        strategy_id, strategy_name, underlying, config_timeframe, weighting,
         ts,
-        ts + toIntervalMinute(multiIf(
-            config_timeframe = '5m', 5, config_timeframe = '10m', 10,
-            config_timeframe = '15m', 15, config_timeframe = '30m', 30,
-            config_timeframe = '1h', 60, config_timeframe = '4h', 240,
-            config_timeframe = '1d', 1440, 5
-        )) AS closing_ts,
-        revision_ts,
-        row_json
-    FROM analytics.{source_table}
-    WHERE underlying = '{underlying}'
-      AND strategy_table_name NOT LIKE 'manual_probe%'
-      AND toDateTime(ts) >= toDateTime('{chunk_start_ts}') AND toDateTime(ts) < toDateTime('{chunk_end_ts}')
-)
-SELECT
-    strategy_table_name,
-    strategy_id, strategy_name, underlying, config_timeframe, weighting,
-    toString(ts) AS ts,
-    toString(closing_ts) AS closing_ts,
-    toString(toStartOfMinute(revision_ts + INTERVAL 59 SECOND)) AS execution_ts,
-    JSONExtractFloat(row_json, 'position') AS position,
-    JSONExtractFloat(row_json, 'price') AS bar_price,
-    JSONExtractFloat(row_json, 'final_signal') AS final_signal,
-    JSONExtractFloat(row_json, 'benchmark') AS bar_benchmark
-FROM raw
-WHERE revision_ts < ts + toIntervalMinute(2 * multiIf(
-    config_timeframe = '5m', 5, config_timeframe = '10m', 10,
-    config_timeframe = '15m', 15, config_timeframe = '30m', 30,
-    config_timeframe = '1h', 60, config_timeframe = '4h', 240,
-    config_timeframe = '1d', 1440, 5
-))
-ORDER BY strategy_table_name, ts, revision_ts
+        leadInFrame(ts, 1, ts) OVER (
+            PARTITION BY strategy_table_name ORDER BY ts
+            ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
+        ) AS next_bar_ts
+    FROM (
+        SELECT strategy_table_name, ts
+        FROM analytics.{source_table}
+        WHERE underlying = '{underlying}'
+          AND strategy_table_name NOT LIKE 'manual_probe%'
+          AND toDateTime(ts) >= toDateTime('{chunk_start_ts}')
+          AND toDateTime(ts) < toDateTime('{chunk_end_ts}')
+        GROUP BY strategy_table_name, ts
+    )
+) nb ON r.strategy_table_name = nb.strategy_table_name AND r.ts = nb.ts
+WHERE r.underlying = '{underlying}'
+  AND r.strategy_table_name NOT LIKE 'manual_probe%'
+  AND toDateTime(r.ts) >= toDateTime('{chunk_start_ts}') AND toDateTime(r.ts) < toDateTime('{chunk_end_ts}')
+ORDER BY r.strategy_table_name, r.ts, r.revision_ts
 """
 
         rows_dict = query_dicts(sql, client)

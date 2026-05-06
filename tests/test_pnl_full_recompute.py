@@ -208,6 +208,160 @@ class TestRecomputePnlFull:
         assert ctx.log.info.call_count >= 2
 
 
+class TestRecomputePnlFullRealTradeAcceptance:
+    """Verify revision acceptance logic: revision_ts < next_bar_closing_ts."""
+
+    @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
+    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
+    @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
+    def test_revision_accepted_when_before_next_bar_closing(
+        self, mock_client, mock_get_und, mock_qd, mock_prices, mock_insert
+    ):
+        """A revision arriving before next_bar_closing_ts is accepted and produces PnL rows."""
+        # bar open ts=00:00, closing=00:05, revision arrives at 00:04 (before next bar closes at 00:10)
+        bar = {
+            **_make_rt_bar(),
+            "closing_ts": "2026-02-27 00:05:00",
+            "execution_ts": "2026-02-27 00:05:00",  # toStartOfMinute(00:04 + 59s) = 00:04
+            "revision_ts": "2026-02-27 00:04:00",
+            "next_bar_closing_ts": "2026-02-27 00:10:00",  # next bar (00:05 open) closes at 00:10
+        }
+        mock_get_und.return_value = ["btc"]
+        mock_qd.return_value = [bar]
+        mock_prices.return_value = {"btc": {"2026-02-27 00:05:00": 100.0}}
+        mock_insert.return_value = 1
+
+        ctx = _make_context()
+        _recompute_pnl_full(
+            ctx,
+            target_table="strategy_pnl_1min_real_trade_v2",
+            source_table="strategy_output_history_v2",
+            label="real_trade",
+            insert_columns=REAL_TRADE_INSERT_COLUMNS,
+            mode="real_trade",
+        )
+
+        assert mock_insert.called
+
+    @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
+    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
+    @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
+    def test_revision_discarded_when_after_next_bar_closing(
+        self, mock_client, mock_get_und, mock_qd, mock_prices, mock_insert
+    ):
+        """A revision arriving at or after next_bar_closing_ts is discarded — produces 0 output rows."""
+        # revision_ts=00:11 >= next_bar_closing_ts=00:10 → discard
+        bar = {
+            **_make_rt_bar(),
+            "closing_ts": "2026-02-27 00:05:00",
+            "execution_ts": "2026-02-27 00:12:00",
+            "revision_ts": "2026-02-27 00:11:00",
+            "next_bar_closing_ts": "2026-02-27 00:10:00",
+        }
+        mock_get_und.return_value = ["btc"]
+        # Only the first chunk returns the bar; all others empty (single bar in range)
+        mock_qd.side_effect = lambda sql, client: [bar] if mock_qd.call_count == 1 else []
+        mock_prices.return_value = {"btc": {}}
+        mock_insert.return_value = 0
+
+        ctx = _make_context()
+        result = _recompute_pnl_full(
+            ctx,
+            target_table="strategy_pnl_1min_real_trade_v2",
+            source_table="strategy_output_history_v2",
+            label="real_trade",
+            insert_columns=REAL_TRADE_INSERT_COLUMNS,
+            mode="real_trade",
+        )
+
+        # Discarded revision → compute_real_trade_pnl returns [] → no rows ever inserted
+        all_row_args = [call.args[2] for call in mock_insert.call_args_list]
+        assert all(rows == [] for rows in all_row_args), f"Expected all inserts to have empty rows, got {all_row_args}"
+        assert result.metadata["rows_inserted"] == 0
+
+    @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
+    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
+    @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
+    def test_only_first_revision_accepted_when_second_is_late(
+        self, mock_client, mock_get_und, mock_qd, mock_prices, mock_insert
+    ):
+        """Two revisions for same bar: first accepted, second discarded (arrived after next bar closed)."""
+        bar_early = {
+            **_make_rt_bar(),
+            "closing_ts": "2026-02-27 00:05:00",
+            "execution_ts": "2026-02-27 00:04:00",
+            "revision_ts": "2026-02-27 00:03:00",   # 00:03 < next_bar_closing 00:10 → ACCEPT
+            "next_bar_closing_ts": "2026-02-27 00:10:00",
+        }
+        bar_late = {
+            **_make_rt_bar(),
+            "closing_ts": "2026-02-27 00:05:00",
+            "execution_ts": "2026-02-27 00:12:00",
+            "revision_ts": "2026-02-27 00:11:00",   # 00:11 >= next_bar_closing 00:10 → DISCARD
+            "next_bar_closing_ts": "2026-02-27 00:10:00",
+        }
+        mock_get_und.return_value = ["btc"]
+        # Only the first chunk returns both bars; all others empty
+        mock_qd.side_effect = lambda sql, client: [bar_early, bar_late] if mock_qd.call_count == 1 else []
+        mock_prices.return_value = {"btc": {"2026-02-27 00:04:00": 100.0}}
+        mock_insert.return_value = 1
+
+        ctx = _make_context()
+        result = _recompute_pnl_full(
+            ctx,
+            target_table="strategy_pnl_1min_real_trade_v2",
+            source_table="strategy_output_history_v2",
+            label="real_trade",
+            insert_columns=REAL_TRADE_INSERT_COLUMNS,
+            mode="real_trade",
+        )
+
+        # bar_late is discarded → only bar_early's rows inserted → total > 0
+        assert result.metadata["rows_inserted"] > 0
+        # All inserts that had rows came from the accepted revision only
+        non_empty_inserts = [call.args[2] for call in mock_insert.call_args_list if call.args[2]]
+        assert len(non_empty_inserts) == 1
+
+    @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
+    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
+    @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
+    def test_last_bar_in_chunk_sentinel_always_accepted(
+        self, mock_client, mock_get_und, mock_qd, mock_prices, mock_insert
+    ):
+        """When next_bar_closing_ts == closing_ts (sentinel, no next bar), revision is always accepted."""
+        bar = {
+            **_make_rt_bar(),
+            "closing_ts": "2026-02-27 00:05:00",
+            "execution_ts": "2026-02-27 00:59:00",
+            "revision_ts": "2026-02-27 00:58:00",   # very late, but sentinel → ACCEPT
+            "next_bar_closing_ts": "2026-02-27 00:05:00",  # == closing_ts: sentinel
+        }
+        mock_get_und.return_value = ["btc"]
+        mock_qd.return_value = [bar]
+        mock_prices.return_value = {"btc": {"2026-02-27 00:59:00": 100.0}}
+        mock_insert.return_value = 1
+
+        ctx = _make_context()
+        _recompute_pnl_full(
+            ctx,
+            target_table="strategy_pnl_1min_real_trade_v2",
+            source_table="strategy_output_history_v2",
+            label="real_trade",
+            insert_columns=REAL_TRADE_INSERT_COLUMNS,
+            mode="real_trade",
+        )
+
+        assert mock_insert.called
+
+
 class TestRecomputePnlFullParallel:
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
