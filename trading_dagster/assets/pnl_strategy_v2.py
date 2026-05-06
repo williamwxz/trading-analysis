@@ -24,6 +24,7 @@ from ..utils.clickhouse_client import (
     insert_rows,
     query_dicts,
     query_rows,
+    query_scalar,
 )
 from ..utils.pnl_compute import (
     BT_START_DATE,
@@ -93,6 +94,25 @@ _MAX_WORKERS = 2  # keep within 2-vCPU Dagster task allocation
 _log = logging.getLogger(__name__)
 
 
+def _get_underlying_resume_dt(
+    underlying: str, target_table: str, client
+) -> datetime | None:
+    """Return resume point for this underlying, or None if no data exists."""
+    result = query_scalar(
+        f"SELECT max(ts) FROM analytics.{target_table}"
+        f" WHERE underlying = '{underlying}'",
+        client=client,
+    )
+    if result is None:
+        return None
+    if isinstance(result, str):
+        result = _parse_ts(result)
+    # Step back one chunk to re-anchor from a clean boundary.
+    return (result.replace(tzinfo=UTC) - timedelta(days=_CHUNK_DAYS)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+
+
 def _process_underlying(
     underlying: str,
     target_table: str,
@@ -111,6 +131,15 @@ def _process_underlying(
     """
     _emit = log_fn or _log.info
     client = get_client()
+
+    resume_dt = _get_underlying_resume_dt(underlying, target_table, client)
+    if resume_dt is not None and resume_dt > start_dt:
+        _emit(
+            f"[{underlying}] resuming from {resume_dt.strftime('%Y-%m-%d')}"
+            " (skipping already-inserted data)"
+        )
+        start_dt = resume_dt
+
     anchors: dict = {}
     total_rows = 0
     chunk_count = math.ceil((end_dt - start_dt).total_seconds() / 86400 / _CHUNK_DAYS)
