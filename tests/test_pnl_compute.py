@@ -191,24 +191,27 @@ class TestComputeProdPnl:
 class TestComputeRealTradePnl:
     """Test compute_real_trade_pnl with execution timing."""
 
+    def _make_revision(self, ts, closing_ts, execution_ts, position):
+        return {
+            "strategy_table_name": "test_strategy",
+            "strategy_id": 1,
+            "strategy_name": "Test",
+            "underlying": "btc",
+            "config_timeframe": "5m",
+            "weighting": 1.0,
+            "ts": ts,
+            "closing_ts": closing_ts,
+            "execution_ts": execution_ts,
+            "position": position,
+            "bar_price": 100.0,
+            "final_signal": 1.0,
+            "bar_benchmark": 100.0,
+        }
+
     def test_single_bar(self):
-        bars = [
-            {
-                "strategy_table_name": "test_strategy",
-                "strategy_id": 1,
-                "strategy_name": "Test",
-                "underlying": "btc",
-                "config_timeframe": "5m",
-                "weighting": 1.0,
-                "ts": "2024-01-01 00:00:00",
-                "closing_ts": "2024-01-01 00:05:00",
-                "execution_ts": "2024-01-01 00:05:00",
-                "position": 1.0,
-                "bar_price": 100.0,
-                "final_signal": 1.0,
-                "bar_benchmark": 100.0,
-            }
-        ]
+        bars = [self._make_revision(
+            "2024-01-01 00:00:00", "2024-01-01 00:05:00", "2024-01-01 00:05:00", 1.0,
+        )]
         anchors = {}
         prices = {f"2024-01-01 00:0{5+i}:00": 100.0 for i in range(5)}
 
@@ -218,6 +221,57 @@ class TestComputeRealTradePnl:
         # Should include closing_ts and execution_ts columns
         assert rows[0][15] == "2024-01-01 00:05:00"  # closing_ts
         assert rows[0][16] == "2024-01-01 00:05:00"  # execution_ts
+
+    def test_multiple_revisions_no_overlap(self):
+        """Two revisions for the same bar must not produce overlapping timestamp ranges.
+
+        Old bug: each revision emitted its own tf_minutes rows independently,
+        causing timestamps 00:07 and 00:08 to appear twice with different positions,
+        which caused PnL overshoot/jumps in the Grafana aggregate curves.
+
+        Correct behaviour: the bar's [closing_ts, next_closing_ts) window is expanded
+        once, with position switching to revision 2's value at its execution_ts.
+        """
+        # Bar ts=00:00, closing=00:05.  Revision 1 executed at 00:05 (pos=0),
+        # revision 2 executed at 00:07 (pos=1, the trade fired late).
+        bars = [
+            self._make_revision("2024-01-01 00:00:00", "2024-01-01 00:05:00", "2024-01-01 00:05:00", 0.0),
+            self._make_revision("2024-01-01 00:00:00", "2024-01-01 00:05:00", "2024-01-01 00:07:00", 1.0),
+        ]
+        anchors = {}
+        # Flat price at 100 for minutes 00:05 through 00:09
+        prices = {f"2024-01-01 00:0{5+i}:00": 100.0 for i in range(5)}
+
+        rows = compute_real_trade_pnl(bars, anchors, prices)
+
+        # Must be exactly 5 rows (00:05 to 00:09) — no duplicates.
+        assert len(rows) == 5
+        ts_values = [r[7] for r in rows]
+        assert ts_values == sorted(set(ts_values)), "Duplicate timestamps detected"
+
+        # Position should be 0 at 00:05 and 00:06, then switch to 1 from 00:07.
+        positions = [r[10] for r in rows]
+        assert positions[0] == 0.0  # 00:05
+        assert positions[1] == 0.0  # 00:06
+        assert positions[2] == 1.0  # 00:07 — revision 2 kicks in
+        assert positions[3] == 1.0  # 00:08
+        assert positions[4] == 1.0  # 00:09
+
+    def test_two_consecutive_bars_hold_until_next_close(self):
+        """Position from bar 1 must hold until bar 2's closing_ts, matching prod behaviour."""
+        bars = [
+            self._make_revision("2024-01-01 00:00:00", "2024-01-01 00:05:00", "2024-01-01 00:05:00", 1.0),
+            self._make_revision("2024-01-01 00:05:00", "2024-01-01 00:10:00", "2024-01-01 00:10:00", -1.0),
+        ]
+        anchors = {}
+        prices = {f"2024-01-01 00:{str(5+i).zfill(2)}:00": 100.0 for i in range(10)}
+
+        rows = compute_real_trade_pnl(bars, anchors, prices)
+
+        # 5 rows from bar1 (00:05–00:09) + 5 rows from bar2 (00:10–00:14) = 10 total
+        assert len(rows) == 10
+        ts_values = [r[7] for r in rows]
+        assert ts_values == sorted(set(ts_values))
 
 
 class TestFetchNewBarsRealTradeSQL:

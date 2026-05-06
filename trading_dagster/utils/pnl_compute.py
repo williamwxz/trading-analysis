@@ -519,11 +519,18 @@ def compute_real_trade_pnl(
 ) -> List[list]:
     """Compute anchor-chained PnL for real_trade bars. Expand to 1-min intervals.
 
-    Same logic as compute_prod_pnl but bars are sorted by execution_ts (not ts)
-    and output includes closing_ts, execution_ts, traded columns.
+    Each revision is a (execution_ts, position) event. The position from each
+    revision holds until the next event's execution_ts. The terminal boundary
+    for a bar's last revision is the next bar's closing_ts (not +tf_minutes).
+
+    Example — 5m bar A (ts=10:00, closing_ts=10:05), bar B (ts=10:05, closing_ts=10:10):
+      Rev1 execution_ts=10:01 pos=X  → rows 10:01, 10:02 (holds until Rev2)
+      Rev2 execution_ts=10:03 pos=Y  → rows 10:03, 10:04 (holds until bar B closing_ts=10:05)
+      Bar B closing_ts=10:05 supersedes all of bar A's revisions.
 
     Args:
-        bars: List of bar dicts (one per revision, sorted by strategy, ts, revision_ts)
+        bars: List of revision dicts (one per revision), sorted by strategy, ts, revision_ts.
+              Each dict has: strategy_table_name, ts, closing_ts, execution_ts, position, ...
         anchors: {strategy_table_name: (anchor_pnl, anchor_price, anchor_position)}
         prices: {ts_string: open_price}
 
@@ -537,43 +544,59 @@ def compute_real_trade_pnl(
     output_rows = []
 
     for stn, strategy_bars in by_strategy.items():
+        # Flat list of all revisions sorted by execution_ts.
         strategy_bars.sort(key=lambda b: b["execution_ts"])
 
         anchor_pnl, anchor_open_price, active_position = anchors.get(stn, (0.0, 0.0, 0.0))
 
-        for bar in strategy_bars:
-            tf_minutes = TIMEFRAME_MAP.get(bar["config_timeframe"], 5)
-            exec_ts = _parse_ts(bar["execution_ts"])
-            position = bar["position"]
+        for i, rev in enumerate(strategy_bars):
+            exec_ts = _parse_ts(rev["execution_ts"])
 
-            for n in range(tf_minutes):
-                ts_1min = exec_ts + timedelta(minutes=n)
-                ts_str = ts_1min.strftime("%Y-%m-%d %H:%M:%S")
+            # This revision's position holds until the next event boundary:
+            # - next revision's execution_ts if it belongs to the same bar
+            # - next bar's closing_ts if it's the last revision of this bar
+            # - closing_ts + tf_minutes if this is the very last revision overall
+            if i + 1 < len(strategy_bars):
+                next_rev = strategy_bars[i + 1]
+                if next_rev["ts"] == rev["ts"]:
+                    # Same bar — hold until next revision fires.
+                    end_ts = _parse_ts(next_rev["execution_ts"])
+                else:
+                    # Next bar starts — hold until next bar's closing_ts.
+                    end_ts = _parse_ts(next_rev["closing_ts"])
+            else:
+                tf_minutes = TIMEFRAME_MAP.get(rev["config_timeframe"], 5)
+                end_ts = _parse_ts(rev["closing_ts"]) + timedelta(minutes=tf_minutes)
 
+            ts_cur = exec_ts
+            while ts_cur < end_ts:
+                ts_str = ts_cur.strftime("%Y-%m-%d %H:%M:%S")
                 live_open_price = prices.get(ts_str, anchor_open_price) if anchor_open_price != 0.0 else prices.get(ts_str)
 
                 if live_open_price is None:
+                    ts_cur += timedelta(minutes=1)
                     continue
 
                 if anchor_open_price == 0.0:
                     anchor_open_price = live_open_price
 
                 if anchor_open_price != 0.0:
-                    cpnl = anchor_pnl + position * (live_open_price - anchor_open_price) / anchor_open_price
+                    cpnl = anchor_pnl + rev["position"] * (live_open_price - anchor_open_price) / anchor_open_price
                 else:
                     cpnl = anchor_pnl
 
                 output_rows.append([
-                    stn, bar["strategy_id"], bar["strategy_name"],
-                    bar["underlying"], bar["config_timeframe"],
+                    stn, rev["strategy_id"], rev["strategy_name"],
+                    rev["underlying"], rev["config_timeframe"],
                     "real_trade", "v2", ts_str, cpnl,
-                    bar["bar_benchmark"], position, live_open_price,
-                    bar["final_signal"], bar["weighting"], now_str,
-                    bar["closing_ts"], bar["execution_ts"], "false",
+                    rev["bar_benchmark"], rev["position"], live_open_price,
+                    rev["final_signal"], rev["weighting"], now_str,
+                    rev["closing_ts"], rev["execution_ts"], "false",
                 ])
 
                 anchor_pnl = cpnl
                 anchor_open_price = live_open_price
+                ts_cur += timedelta(minutes=1)
 
     return output_rows
 
