@@ -53,6 +53,8 @@ def _make_rt_bar(stn="strat_a", ts="2026-02-27 00:00:00", tf="5m", pos=1.0):
         **_make_bar(stn, ts, tf, pos),
         "closing_ts": "2026-02-27 00:05:00",
         "execution_ts": "2026-02-27 00:01:00",
+        "revision_ts": "2026-02-27 00:00:30",
+        "next_bar_closing_ts": "2026-02-27 00:05:00",
     }
 
 
@@ -203,3 +205,59 @@ class TestRecomputePnlFull:
         )
 
         assert ctx.log.info.call_count >= 2
+
+
+class TestRecomputePnlFullParallel:
+
+    @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
+    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
+    @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
+    def test_both_underlyings_processed(
+        self, mock_client, mock_get_und, mock_qd, mock_prices, mock_insert
+    ):
+        """All underlyings returned by _get_underlyings are processed and rows summed."""
+        mock_get_und.return_value = ["btc", "eth"]
+        mock_qd.return_value = [_make_bar()]
+        mock_prices.return_value = {"btc": {"2026-02-27 00:00:00": 100.0}, "eth": {"2026-02-27 00:00:00": 50.0}}
+        mock_insert.return_value = 3
+
+        ctx = _make_context()
+        result = _recompute_pnl_full(
+            ctx,
+            target_table="strategy_pnl_1min_prod_v2",
+            source_table="strategy_output_history_v2",
+            label="production",
+            insert_columns=PROD_INSERT_COLUMNS,
+            mode="prod",
+        )
+
+        # insert_rows called at least once per underlying
+        assert mock_insert.call_count >= 2
+        # total_rows = sum across both underlyings
+        assert result.metadata["rows_inserted"] >= 2
+
+    @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
+    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
+    @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
+    def test_worker_exception_propagates(
+        self, mock_client, mock_get_und, mock_qd, mock_prices, mock_insert
+    ):
+        """An exception in a worker thread must propagate and fail the asset run."""
+        mock_get_und.return_value = ["btc"]
+        mock_qd.side_effect = RuntimeError("ClickHouse connection refused")
+
+        ctx = _make_context()
+        import pytest
+        with pytest.raises(RuntimeError, match="ClickHouse connection refused"):
+            _recompute_pnl_full(
+                ctx,
+                target_table="strategy_pnl_1min_prod_v2",
+                source_table="strategy_output_history_v2",
+                label="production",
+                insert_columns=PROD_INSERT_COLUMNS,
+                mode="prod",
+            )
