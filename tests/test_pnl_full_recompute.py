@@ -11,6 +11,7 @@ All ClickHouse calls are mocked. Tests verify:
 - empty underlying (no bars) is skipped gracefully
 """
 
+import pytest
 from datetime import date
 from unittest.mock import MagicMock, patch
 
@@ -251,7 +252,6 @@ class TestRecomputePnlFullParallel:
         mock_qd.side_effect = RuntimeError("ClickHouse connection refused")
 
         ctx = _make_context()
-        import pytest
         with pytest.raises(RuntimeError, match="ClickHouse connection refused"):
             _recompute_pnl_full(
                 ctx,
