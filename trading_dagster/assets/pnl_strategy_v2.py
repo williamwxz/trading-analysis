@@ -88,7 +88,7 @@ def _prepare_rows_for_clickhouse(rows: list[list]) -> list[list]:
 
 _CHUNK_DAYS = 7  # process this many days at a time to cap memory per underlying
 
-_MAX_WORKERS = 5  # I/O-bound; over-subscribe 4 vCPUs slightly for ClickHouse wait time
+_MAX_WORKERS = 2  # keep within 2-vCPU Dagster task allocation
 
 _log = logging.getLogger(__name__)
 
