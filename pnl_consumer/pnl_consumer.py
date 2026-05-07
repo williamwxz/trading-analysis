@@ -339,7 +339,11 @@ _COLD_START_DAYS = 3
 _PNL_TOLERANCE = 1e-6
 
 
-def _recompute_and_verify(table: str, state: AnchorState) -> int:
+def _recompute_and_verify(
+    table: str,
+    state: AnchorState,
+    reference_ts: "datetime | None" = None,
+) -> int:
     """Re-walk the last _COLD_START_DAYS of PnL rows and verify they match ClickHouse.
 
     For each strategy, fetches the anchor row just before the 3-day window, then walks
@@ -349,6 +353,16 @@ def _recompute_and_verify(table: str, state: AnchorState) -> int:
 
     Returns the number of strategies seeded.
     """
+    if reference_ts is not None:
+        window_start = reference_ts - timedelta(days=_COLD_START_DAYS)
+        window_start_str = window_start.strftime("%Y-%m-%d %H:%M:%S")
+        window_end_str = reference_ts.strftime("%Y-%m-%d %H:%M:%S")
+        seed_clause = f"ts < '{window_start_str}'"
+        window_clause = f"ts >= '{window_start_str}' AND ts <= '{window_end_str}'"
+    else:
+        seed_clause = f"ts < now() - INTERVAL {_COLD_START_DAYS} DAY"
+        window_clause = f"ts >= now() - INTERVAL {_COLD_START_DAYS} DAY"
+
     # Fetch the per-strategy anchor at the start of the 3-day window (latest row before it).
     seed_sql = f"""\
 SELECT
@@ -358,7 +372,7 @@ SELECT
     position        AS anchor_position,
     ts              AS anchor_ts
 FROM {table} FINAL
-WHERE ts < now() - INTERVAL {_COLD_START_DAYS} DAY
+WHERE {seed_clause}
 ORDER BY strategy_table_name, ts DESC, updated_at DESC
 LIMIT 1 BY strategy_table_name
 """
@@ -380,7 +394,7 @@ SELECT
     price,
     position
 FROM {table} FINAL
-WHERE ts >= now() - INTERVAL {_COLD_START_DAYS} DAY
+WHERE {window_clause}
 ORDER BY strategy_table_name, ts ASC, updated_at DESC
 """
     rows = query_dicts(window_sql)
@@ -459,12 +473,14 @@ def _bootstrap_anchors(
     state_real_trade: AnchorState,
     state_bt: AnchorState,
     cfg: SinkConfig | None = None,
+    reference_ts: "datetime | None" = None,
 ) -> None:
     """On cold start, seed anchor states from ClickHouse for enabled PnL sinks.
 
-    Fetches the last _COLD_START_DAYS of stored PnL rows, re-walks the anchor chain,
-    and crashes if any stored value deviates from the recomputed value — ensuring the
-    consumer never silently diverge from a manual backfill.
+    Fetches the last _COLD_START_DAYS of stored PnL rows relative to reference_ts
+    (defaults to now() when None), re-walks the anchor chain, and crashes if any
+    stored value deviates from the recomputed value — ensuring the consumer never
+    silently diverges from a manual backfill.
     """
     if cfg is not None and not any([cfg.prod, cfg.real_trade, cfg.bt]):
         logger.info("No PnL sinks enabled — skipping anchor bootstrap")
@@ -478,7 +494,7 @@ def _bootstrap_anchors(
     for table, state, enabled in candidates:
         if not enabled:
             continue
-        _recompute_and_verify(table, state)
+        _recompute_and_verify(table, state, reference_ts=reference_ts)
 
     enabled_states = [
         (state, enabled) for _, state, enabled in candidates if enabled
@@ -590,10 +606,19 @@ def run() -> None:
         sink_cfg.price, sink_cfg.prod, sink_cfg.real_trade, sink_cfg.bt,
     )
 
+    reference_ts = peek_reference_ts(
+        os.environ["REDPANDA_BROKERS"],
+        resolve_group_id(),
+    )
+    if reference_ts is not None:
+        logger.info("Cold-start reference_ts from Redpanda committed offset: %s", reference_ts)
+    else:
+        logger.info("Cold-start reference_ts: no committed offset found, using now()")
+
     state_prod = AnchorState()
     state_real_trade = AnchorState()
     state_bt = AnchorState()
-    _bootstrap_anchors(state_prod, state_real_trade, state_bt, sink_cfg)
+    _bootstrap_anchors(state_prod, state_real_trade, state_bt, sink_cfg, reference_ts)
 
     cw_client = boto3.client("cloudwatch", region_name=os.environ.get("AWS_REGION", "ap-northeast-1"))
 

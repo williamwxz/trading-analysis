@@ -1096,3 +1096,42 @@ def test_peek_reference_ts_returns_none_when_no_messages():
         result = peek_reference_ts(_MOCK_BROKERS, _MOCK_GROUP)
 
     assert result is None
+
+
+@pytest.mark.unit
+def test_recompute_and_verify_uses_reference_ts_in_sql():
+    """When reference_ts is provided, SQL uses it instead of now()."""
+    ref_ts = datetime(2026, 5, 1, 12, 0, 0)
+    captured_sqls = []
+
+    def mock_query(sql):
+        captured_sqls.append(sql)
+        return []
+
+    with patch("pnl_consumer.pnl_consumer.query_dicts", side_effect=mock_query):
+        _recompute_and_verify("analytics.strategy_pnl_1min_prod_v2", AnchorState(), reference_ts=ref_ts)
+
+    assert len(captured_sqls) == 2
+    # Seed query: ts < reference_ts - 3 days = 2026-04-28 12:00:00
+    assert "2026-04-28" in captured_sqls[0]
+    assert "< now()" not in captured_sqls[0]
+    # Window query: ts >= reference_ts - 3 days AND ts <= reference_ts
+    assert "2026-04-28" in captured_sqls[1]
+    assert "2026-05-01" in captured_sqls[1]
+    assert ">= now()" not in captured_sqls[1]
+
+
+@pytest.mark.unit
+def test_recompute_and_verify_falls_back_to_now_when_no_reference_ts():
+    """When reference_ts is None, SQL uses now() as before."""
+    captured_sqls = []
+
+    def mock_query(sql):
+        captured_sqls.append(sql)
+        return []
+
+    with patch("pnl_consumer.pnl_consumer.query_dicts", side_effect=mock_query):
+        _recompute_and_verify("analytics.strategy_pnl_1min_prod_v2", AnchorState(), reference_ts=None)
+
+    assert "now()" in captured_sqls[0]
+    assert "now()" in captured_sqls[1]
