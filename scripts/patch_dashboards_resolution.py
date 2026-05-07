@@ -5,7 +5,6 @@ variable (1min or 1hour) based on the selected time range.
 Run once: python3 scripts/patch_dashboards_resolution.py
 """
 import json
-import re
 from pathlib import Path
 
 DASHBOARDS_DIR = Path(__file__).parent.parent / "infra" / "grafana" / "dashboards"
@@ -36,10 +35,6 @@ TABLE_SUBSTITUTIONS = [
     ),
     (
         "analytics.strategy_pnl_1min_bt_v2",
-        "analytics.strategy_pnl_${resolution:raw}_bt_v2",
-    ),
-    (
-        "analytics.strategy_pnl_1hour_bt_v2",
         "analytics.strategy_pnl_${resolution:raw}_bt_v2",
     ),
     (
@@ -75,14 +70,12 @@ def patch_dashboard(path: Path) -> int:
     tvars.insert(0, RESOLUTION_VARIABLE)
 
     # Patch all panel SQL
-    count = 0
     for panel in d.get("panels", []):
         patch_panel(panel)
 
     # Count substitutions for reporting
     text_after = json.dumps(d)
-    for _, new in TABLE_SUBSTITUTIONS:
-        count += text_after.count(new)
+    count = sum(text_after.count(new) for _, new in TABLE_SUBSTITUTIONS)
 
     path.write_text(json.dumps(d, indent=2) + "\n")
     print(f"  PATCHED {path.name}: ~{count} table references updated")
