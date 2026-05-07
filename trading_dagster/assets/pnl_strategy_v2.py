@@ -11,6 +11,8 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 
+import boto3
+
 from dagster import (
     AssetExecutionContext,
     DailyPartitionsDefinition,
@@ -85,6 +87,19 @@ def _prepare_rows_for_clickhouse(rows: list[list]) -> list[list]:
 # ─────────────────────────────────────────────────────────────────────────────
 # Full Recompute Logic (unpartitioned, sequential anchor chain)
 # ─────────────────────────────────────────────────────────────────────────────
+
+_ECS_CLUSTER = "trading-analysis"
+_ECS_REGION = "ap-northeast-1"
+
+
+def _pause_ecs_service(service_name: str, cluster: str, region: str, boto_client) -> None:
+    boto_client.update_service(cluster=cluster, service=service_name, desiredCount=0)
+    waiter = boto_client.get_waiter("services_stable")
+    waiter.wait(cluster=cluster, services=[service_name])
+
+
+def _resume_ecs_service(service_name: str, cluster: str, region: str, boto_client) -> None:
+    boto_client.update_service(cluster=cluster, service=service_name, desiredCount=1)
 
 
 _CHUNK_DAYS = 7  # process this many days at a time to cap memory per underlying
