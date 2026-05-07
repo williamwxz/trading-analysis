@@ -388,7 +388,6 @@ def _process_underlying_recent(
 
     total_rows = 0
     chunk_count = math.ceil((end_dt - window_start).total_seconds() / 86400 / _CHUNK_DAYS)
-    chunks_done = 0
     _emit(f"[{underlying}] recomputing {chunk_count} chunks from {window_start_ts}")
 
     chunk_start = window_start
@@ -473,7 +472,6 @@ ORDER BY r.strategy_table_name, r.ts, r.revision_ts
 """
 
         raw_rows = query_dicts(sql, client)
-        chunks_done += 1
 
         if mode == "real_trade":
             rows_dict = [
@@ -550,7 +548,7 @@ ORDER BY r.strategy_table_name, r.ts, r.revision_ts
                     last = strategy_rows[-1]
                     anchors[stn] = (float(last[8]), float(last[11]), float(last[10]))
         else:
-            raise ValueError(f"Unknown mode: {mode!r}")
+            raise ValueError(f"Unknown mode: {mode!r}. Expected 'prod', 'bt', or 'real_trade'.")
 
         del rows_dict, prices
         chunk_start = chunk_end

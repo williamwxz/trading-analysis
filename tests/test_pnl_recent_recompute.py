@@ -181,3 +181,57 @@ class TestProcessUnderlyingRecent:
         first_bar_sql = mock_qd.call_args_list[0][0][0]
         assert "2026-05-03 00:00:00" in first_bar_sql
         assert "strategy_output_history_v2" in first_bar_sql
+
+    @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
+    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("trading_dagster.assets.pnl_strategy_v2.execute")
+    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
+    @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
+    def test_bt_mode_sql_includes_cumulative_pnl(self, mock_gc, mock_fa, mock_exec, mock_qd, mock_prices, mock_insert):
+        """bt mode SQL must include cumulative_pnl column (absent from prod SQL)."""
+        from datetime import datetime, UTC
+        from trading_dagster.assets.pnl_strategy_v2 import _process_underlying_recent
+        from trading_dagster.utils.pnl_compute import PROD_INSERT_COLUMNS
+
+        mock_fa.return_value = {}
+        mock_qd.return_value = []
+        mock_prices.return_value = {"btc": {}}
+        mock_insert.return_value = 0
+
+        window_start = datetime(2026, 5, 3, 0, 0, 0, tzinfo=UTC)
+        end_dt = datetime(2026, 5, 6, 0, 0, 0, tzinfo=UTC)
+        _process_underlying_recent(
+            "btc", "strategy_pnl_1min_bt_v2", "strategy_output_history_bt_v2",
+            "backtest", PROD_INSERT_COLUMNS, "bt", window_start, end_dt,
+        )
+        bt_sql = mock_qd.call_args_list[0][0][0]
+        assert "cumulative_pnl" in bt_sql
+        assert "strategy_output_history_bt_v2" in bt_sql
+
+    @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
+    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("trading_dagster.assets.pnl_strategy_v2.execute")
+    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
+    @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
+    def test_real_trade_mode_sql_includes_revision_ts(self, mock_gc, mock_fa, mock_exec, mock_qd, mock_prices, mock_insert):
+        """real_trade mode SQL must include revision_ts column (absent from prod/bt SQL)."""
+        from datetime import datetime, UTC
+        from trading_dagster.assets.pnl_strategy_v2 import _process_underlying_recent
+        from trading_dagster.utils.pnl_compute import REAL_TRADE_INSERT_COLUMNS
+
+        mock_fa.return_value = {}
+        mock_qd.return_value = []
+        mock_prices.return_value = {"btc": {}}
+        mock_insert.return_value = 0
+
+        window_start = datetime(2026, 5, 3, 0, 0, 0, tzinfo=UTC)
+        end_dt = datetime(2026, 5, 6, 0, 0, 0, tzinfo=UTC)
+        _process_underlying_recent(
+            "btc", "strategy_pnl_1min_real_trade_v2", "strategy_output_history_v2",
+            "real_trade", REAL_TRADE_INSERT_COLUMNS, "real_trade", window_start, end_dt,
+        )
+        rt_sql = mock_qd.call_args_list[0][0][0]
+        assert "revision_ts" in rt_sql
+        assert "strategy_output_history_v2" in rt_sql
