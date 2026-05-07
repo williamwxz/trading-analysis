@@ -1413,6 +1413,33 @@ resource "aws_ecs_service" "pnl_consumer" {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CloudWatch Alarms — pnl-consumer crash loop detection
+# Fires when StoppedTaskCount >= 3 in a 10-minute window for any pnl-consumer
+# service. No notification action — visible in CloudWatch console only.
+# ─────────────────────────────────────────────────────────────────────────────
+
+resource "aws_cloudwatch_metric_alarm" "pnl_consumer_crash" {
+  for_each = local.pnl_consumer_sinks
+
+  alarm_name          = "${local.name_prefix}-pnl-consumer-${each.key}-crash-loop"
+  alarm_description   = "pnl-consumer-${each.key} stopped >= 3 times in 10 min (crash loop)"
+  namespace           = "ECS/ContainerInsights"
+  metric_name         = "StoppedTaskCount"
+  dimensions = {
+    ClusterName = aws_ecs_cluster.main.name
+    ServiceName = aws_ecs_service.pnl_consumer[each.key].name
+  }
+  statistic           = "Sum"
+  period              = 600
+  evaluation_periods  = 1
+  threshold           = 3
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+
+  tags = local.common_tags
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Outputs
 # ─────────────────────────────────────────────────────────────────────────────
 
