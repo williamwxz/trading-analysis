@@ -98,7 +98,7 @@ def peek_reference_ts(
         for tp in committed:
             offset = tp.offset
             use_watermark = False
-            if offset == OFFSET_INVALID or offset <= 0:
+            if offset == OFFSET_INVALID:
                 # No committed offset — fall back to latest message.
                 low, high = consumer.get_watermark_offsets(
                     TopicPartition(topic, tp.partition), timeout=timeout

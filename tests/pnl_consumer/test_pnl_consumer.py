@@ -1009,6 +1009,10 @@ def test_peek_reference_ts_returns_min_ts_across_partitions():
     tp1 = MagicMock()
     tp1.partition = 1
     tp1.offset = 10
+    # Mock list_topics to return a metadata object with 2 partitions (0 and 1)
+    meta_mock = MagicMock()
+    meta_mock.topics = {"binance.price.ticks": MagicMock(partitions={0: MagicMock(), 1: MagicMock()})}
+    mock_consumer.list_topics.return_value = meta_mock
     mock_consumer.committed.return_value = [tp0, tp1]
 
     # get_watermark_offsets not needed (offsets are valid)
@@ -1048,6 +1052,9 @@ def test_peek_reference_ts_falls_back_to_high_watermark_when_no_committed_offset
     tp0 = MagicMock()
     tp0.partition = 0
     tp0.offset = OFFSET_INVALID  # no committed offset
+    meta_mock = MagicMock()
+    meta_mock.topics = {"binance.price.ticks": MagicMock(partitions={0: MagicMock()})}
+    mock_consumer.list_topics.return_value = meta_mock
     mock_consumer.committed.return_value = [tp0]
     mock_consumer.get_watermark_offsets.return_value = (0, 42)  # low=0, high=42
 
@@ -1079,6 +1086,9 @@ def test_peek_reference_ts_returns_none_when_no_messages():
     tp0 = MagicMock()
     tp0.partition = 0
     tp0.offset = 5
+    meta_mock = MagicMock()
+    meta_mock.topics = {"binance.price.ticks": MagicMock(partitions={0: MagicMock()})}
+    mock_consumer.list_topics.return_value = meta_mock
     mock_consumer.committed.return_value = [tp0]
     mock_consumer.poll.return_value = None  # timeout, no message
 
