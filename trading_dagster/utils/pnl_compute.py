@@ -24,6 +24,7 @@ def _parse_ts(s: str) -> datetime:
     """Parse a datetime string with or without fractional seconds."""
     return datetime.strptime(str(s)[:19], "%Y-%m-%d %H:%M:%S")
 
+
 # Partition start dates — strategies whose first bar falls on this date are
 # allowed to cold-start with no prior anchor (genuinely the first data point).
 PROD_REAL_TRADE_START_DATE = "2026-02-27"
@@ -46,15 +47,22 @@ TIMEFRAME_MAP = {
 
 
 def fetch_anchors(
-    target_table: str, underlying: str,
+    target_table: str,
+    underlying: str,
+    before_ts=None,
 ) -> Dict[str, Tuple[float, float, float]]:
     """Read last committed PnL per strategy from target.
 
     Returns: {strategy_table_name: (anchor_pnl, anchor_price, anchor_position)}
+    before_ts: if provided, only rows with ts < before_ts are considered.
     """
     # Use LIMIT 1 BY to get the latest row per strategy without FINAL or a self-join.
     # ORDER BY ts DESC, updated_at DESC aligns with the sort key (strategy_table_name, ts)
     # so ClickHouse can skip to the last part per strategy rather than doing a full scan.
+    ts_filter = ""
+    if before_ts is not None:
+        ts_str = before_ts.strftime("%Y-%m-%d %H:%M:%S")
+        ts_filter = f"  AND ts < toDateTime('{ts_str}')\n"
     sql = f"""\
 SELECT
     strategy_table_name,
@@ -63,7 +71,7 @@ SELECT
     position       AS anchor_position
 FROM analytics.{target_table}
 WHERE underlying = '{underlying}'
-ORDER BY strategy_table_name, ts DESC, updated_at DESC
+{ts_filter}ORDER BY strategy_table_name, ts DESC, updated_at DESC
 LIMIT 1 BY strategy_table_name
 """
     rows = query_dicts(sql)
@@ -118,7 +126,8 @@ def assert_anchors_present(
             earliest[stn] = ts
 
     missing_stns = [
-        stn for stn, ts in earliest.items()
+        stn
+        for stn, ts in earliest.items()
         if stn not in anchors and not stn.startswith("manual_probe_")
     ]
     if not missing_stns:
@@ -126,7 +135,8 @@ def assert_anchors_present(
 
     start_dates = fetch_strategy_start_dates(source_table)
     bad = [
-        stn for stn in missing_stns
+        stn
+        for stn in missing_stns
         if not earliest[stn].startswith(start_dates.get(stn, ""))
     ]
     if bad:
@@ -138,7 +148,9 @@ def assert_anchors_present(
 
 
 def fetch_new_bars_prod(
-    source_table: str, underlying: str, since: str,
+    source_table: str,
+    underlying: str,
+    since: str,
 ) -> List[dict]:
     """Fetch new bars for prod/bt: argMin(row_json, revision_ts) GROUP BY (strategy, ts)."""
     sql = f"""\
@@ -181,7 +193,10 @@ ORDER BY strategy_table_name, ts
 
 
 def fetch_new_bars_bt(
-    source_table: str, underlying: str, since: str, ts_end: str | None = None,
+    source_table: str,
+    underlying: str,
+    since: str,
+    ts_end: str | None = None,
 ) -> List[dict]:
     """Fetch new bars for bt: argMin(row_json, revision_ts) and extract cumulative_pnl.
 
@@ -221,30 +236,39 @@ ORDER BY strategy_table_name, ts
     for r in rows:
         tf = str(r["config_timeframe"])
         if tf not in TIMEFRAME_MAP:
-            raise ValueError(f"Unknown config_timeframe '{tf}' in {source_table} — add it to TIMEFRAME_MAP")
+            raise ValueError(
+                f"Unknown config_timeframe '{tf}' in {source_table} — add it to TIMEFRAME_MAP"
+            )
         tf_minutes = TIMEFRAME_MAP[tf]
         bar_ts = _parse_ts(r["ts"])
-        execution_ts = (bar_ts + timedelta(minutes=tf_minutes)).strftime("%Y-%m-%d %H:%M:%S")
-        result.append({
-            "strategy_table_name": r["strategy_table_name"],
-            "strategy_id": int(r["strategy_id"]),
-            "strategy_name": r["strategy_name"],
-            "underlying": r["underlying"],
-            "config_timeframe": tf,
-            "weighting": float(r["weighting"]),
-            "ts": str(r["ts"]),
-            "execution_ts": execution_ts,
-            "position": float(r["position"]),
-            "bar_price": float(r["bar_price"]),
-            "final_signal": float(r["final_signal"]),
-            "bar_benchmark": float(r["bar_benchmark"]),
-            "cumulative_pnl": float(r["cumulative_pnl"]),
-        })
+        execution_ts = (bar_ts + timedelta(minutes=tf_minutes)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        result.append(
+            {
+                "strategy_table_name": r["strategy_table_name"],
+                "strategy_id": int(r["strategy_id"]),
+                "strategy_name": r["strategy_name"],
+                "underlying": r["underlying"],
+                "config_timeframe": tf,
+                "weighting": float(r["weighting"]),
+                "ts": str(r["ts"]),
+                "execution_ts": execution_ts,
+                "position": float(r["position"]),
+                "bar_price": float(r["bar_price"]),
+                "final_signal": float(r["final_signal"]),
+                "bar_benchmark": float(r["bar_benchmark"]),
+                "cumulative_pnl": float(r["cumulative_pnl"]),
+            }
+        )
     return result
 
 
 def fetch_new_bars_real_trade(
-    source_table: str, underlying: str, since: str, ts_end: str | None = None,
+    source_table: str,
+    underlying: str,
+    since: str,
+    ts_end: str | None = None,
 ) -> List[dict]:
     """Fetch real_trade revisions for bars in the given window.
 
@@ -341,7 +365,9 @@ def _underlying_to_instrument(underlying: str) -> str:
 
 
 def fetch_prices(
-    underlying: str, ts_min: str, ts_max: str,
+    underlying: str,
+    ts_min: str,
+    ts_max: str,
     client=None,
 ) -> Dict[str, float]:
     """Read 1-min open prices for a time window. Returns {ts_string: open}.
@@ -363,7 +389,9 @@ WHERE exchange = 'binance'
 
 
 def fetch_prices_multi(
-    underlyings: List[str], ts_min: str, ts_max: str,
+    underlyings: List[str],
+    ts_min: str,
+    ts_max: str,
     client=None,
     extend_minutes: int = 1440,
     price_column: str = "open",
@@ -384,7 +412,9 @@ def fetch_prices_multi(
         return {}
     instruments = [_underlying_to_instrument(u) for u in underlyings]
     instrument_list = ", ".join(f"'{i}'" for i in instruments)
-    extend_clause = f" + toIntervalMinute({extend_minutes})" if extend_minutes > 0 else ""
+    extend_clause = (
+        f" + toIntervalMinute({extend_minutes})" if extend_minutes > 0 else ""
+    )
     sql = f"""\
 SELECT instrument, toString(ts), {price_column}
 FROM analytics.futures_price_1min
@@ -411,18 +441,41 @@ WHERE exchange = 'binance'
 
 
 PROD_INSERT_COLUMNS = [
-    "strategy_table_name", "strategy_id", "strategy_name",
-    "underlying", "config_timeframe", "source", "version",
-    "ts", "cumulative_pnl", "benchmark", "position", "price",
-    "final_signal", "weighting", "updated_at",
+    "strategy_table_name",
+    "strategy_id",
+    "strategy_name",
+    "underlying",
+    "config_timeframe",
+    "source",
+    "version",
+    "ts",
+    "cumulative_pnl",
+    "benchmark",
+    "position",
+    "price",
+    "final_signal",
+    "weighting",
+    "updated_at",
 ]
 
 REAL_TRADE_INSERT_COLUMNS = [
-    "strategy_table_name", "strategy_id", "strategy_name",
-    "underlying", "config_timeframe", "source", "version",
-    "ts", "cumulative_pnl", "benchmark", "position", "price",
-    "final_signal", "weighting", "updated_at",
-    "closing_ts", "execution_ts",
+    "strategy_table_name",
+    "strategy_id",
+    "strategy_name",
+    "underlying",
+    "config_timeframe",
+    "source",
+    "version",
+    "ts",
+    "cumulative_pnl",
+    "benchmark",
+    "position",
+    "price",
+    "final_signal",
+    "weighting",
+    "updated_at",
+    "closing_ts",
+    "execution_ts",
 ]
 
 
@@ -468,7 +521,9 @@ def iter_compute_prod_pnl(
     for stn, strategy_bars in by_strategy.items():
         strategy_bars.sort(key=lambda b: b["ts"])
 
-        anchor_pnl, anchor_open_price, active_position = anchors.get(stn, (0.0, 0.0, 0.0))
+        anchor_pnl, anchor_open_price, active_position = anchors.get(
+            stn, (0.0, 0.0, 0.0)
+        )
         strategy_rows = []
 
         for i, bar in enumerate(strategy_bars):
@@ -480,7 +535,9 @@ def iter_compute_prod_pnl(
             # Hold until next bar's closing_ts; last bar holds for tf_minutes.
             if i + 1 < len(strategy_bars):
                 next_tf = TIMEFRAME_MAP.get(strategy_bars[i + 1]["config_timeframe"], 5)
-                next_closing_ts = _parse_ts(strategy_bars[i + 1]["ts"]) + timedelta(minutes=next_tf)
+                next_closing_ts = _parse_ts(strategy_bars[i + 1]["ts"]) + timedelta(
+                    minutes=next_tf
+                )
             else:
                 next_closing_ts = closing_ts + timedelta(minutes=tf_minutes)
 
@@ -490,7 +547,11 @@ def iter_compute_prod_pnl(
 
                 # Price must come from futures_price_1min (Redpanda → pnl_consumer).
                 # Fall back to last known price on gaps; skip until first price arrives.
-                live_open_price = prices.get(ts_str, anchor_open_price) if anchor_open_price != 0.0 else prices.get(ts_str)
+                live_open_price = (
+                    prices.get(ts_str, anchor_open_price)
+                    if anchor_open_price != 0.0
+                    else prices.get(ts_str)
+                )
 
                 if live_open_price is None:
                     # No price from our source yet — skip until we have one.
@@ -501,17 +562,34 @@ def iter_compute_prod_pnl(
                     anchor_open_price = live_open_price
 
                 if anchor_open_price != 0.0:
-                    cpnl = anchor_pnl + position * (live_open_price - anchor_open_price) / anchor_open_price
+                    cpnl = (
+                        anchor_pnl
+                        + position
+                        * (live_open_price - anchor_open_price)
+                        / anchor_open_price
+                    )
                 else:
                     cpnl = anchor_pnl
 
-                strategy_rows.append([
-                    stn, bar["strategy_id"], bar["strategy_name"],
-                    bar["underlying"], bar["config_timeframe"],
-                    source_label, "v2", ts_str, cpnl,
-                    bar["bar_benchmark"], position, live_open_price,
-                    bar["final_signal"], bar["weighting"], now_str,
-                ])
+                strategy_rows.append(
+                    [
+                        stn,
+                        bar["strategy_id"],
+                        bar["strategy_name"],
+                        bar["underlying"],
+                        bar["config_timeframe"],
+                        source_label,
+                        "v2",
+                        ts_str,
+                        cpnl,
+                        bar["bar_benchmark"],
+                        position,
+                        live_open_price,
+                        bar["final_signal"],
+                        bar["weighting"],
+                        now_str,
+                    ]
+                )
 
                 anchor_pnl = cpnl
                 anchor_open_price = live_open_price
@@ -563,7 +641,9 @@ def compute_real_trade_pnl(
     for stn, strategy_bars in by_strategy.items():
         strategy_bars.sort(key=lambda b: (b["ts"], b["revision_ts"]))
 
-        anchor_pnl, anchor_open_price, active_position = anchors.get(stn, (0.0, 0.0, 0.0))
+        anchor_pnl, anchor_open_price, active_position = anchors.get(
+            stn, (0.0, 0.0, 0.0)
+        )
         # active_rev tracks the currently accepted revision (for metadata on output rows).
         active_rev = None
 
@@ -588,7 +668,11 @@ def compute_real_trade_pnl(
             ts_cur = exec_ts
             while ts_cur < end_ts:
                 ts_str = ts_cur.strftime("%Y-%m-%d %H:%M:%S")
-                live_open_price = prices.get(ts_str, anchor_open_price) if anchor_open_price != 0.0 else prices.get(ts_str)
+                live_open_price = (
+                    prices.get(ts_str, anchor_open_price)
+                    if anchor_open_price != 0.0
+                    else prices.get(ts_str)
+                )
 
                 if live_open_price is None:
                     ts_cur += timedelta(minutes=1)
@@ -598,18 +682,36 @@ def compute_real_trade_pnl(
                     anchor_open_price = live_open_price
 
                 if anchor_open_price != 0.0:
-                    cpnl = anchor_pnl + rev["position"] * (live_open_price - anchor_open_price) / anchor_open_price
+                    cpnl = (
+                        anchor_pnl
+                        + rev["position"]
+                        * (live_open_price - anchor_open_price)
+                        / anchor_open_price
+                    )
                 else:
                     cpnl = anchor_pnl
 
-                output_rows.append([
-                    stn, rev["strategy_id"], rev["strategy_name"],
-                    rev["underlying"], rev["config_timeframe"],
-                    "real_trade", "v2", ts_str, cpnl,
-                    rev["bar_benchmark"], rev["position"], live_open_price,
-                    rev["final_signal"], rev["weighting"], now_str,
-                    rev["closing_ts"], rev["execution_ts"],
-                ])
+                output_rows.append(
+                    [
+                        stn,
+                        rev["strategy_id"],
+                        rev["strategy_name"],
+                        rev["underlying"],
+                        rev["config_timeframe"],
+                        "real_trade",
+                        "v2",
+                        ts_str,
+                        cpnl,
+                        rev["bar_benchmark"],
+                        rev["position"],
+                        live_open_price,
+                        rev["final_signal"],
+                        rev["weighting"],
+                        now_str,
+                        rev["closing_ts"],
+                        rev["execution_ts"],
+                    ]
+                )
 
                 anchor_pnl = cpnl
                 anchor_open_price = live_open_price
@@ -681,7 +783,11 @@ def compute_bt_pnl(
             ts_cur = exec_ts
             while ts_cur < next_exec_ts:
                 ts_str = ts_cur.strftime("%Y-%m-%d %H:%M:%S")
-                live_price = prices.get(ts_str, anchor_price) if anchor_price is not None else prices.get(ts_str)
+                live_price = (
+                    prices.get(ts_str, anchor_price)
+                    if anchor_price is not None
+                    else prices.get(ts_str)
+                )
 
                 if live_price is None:
                     ts_cur += timedelta(minutes=1)
@@ -691,18 +797,32 @@ def compute_bt_pnl(
                     anchor_price = live_price
 
                 if anchor_price != 0.0:
-                    cpnl = anchor_pnl + bar["position"] * (live_price - anchor_price) / anchor_price
+                    cpnl = (
+                        anchor_pnl
+                        + bar["position"] * (live_price - anchor_price) / anchor_price
+                    )
                 else:
                     cpnl = anchor_pnl
 
-                output_rows.append([
-                    stn, bar["strategy_id"], bar["strategy_name"],
-                    bar["underlying"], bar["config_timeframe"],
-                    "backtest", "v2", ts_str,
-                    cpnl,
-                    bar["bar_benchmark"], bar["position"], live_price,
-                    bar["final_signal"], bar["weighting"], now_str,
-                ])
+                output_rows.append(
+                    [
+                        stn,
+                        bar["strategy_id"],
+                        bar["strategy_name"],
+                        bar["underlying"],
+                        bar["config_timeframe"],
+                        "backtest",
+                        "v2",
+                        ts_str,
+                        cpnl,
+                        bar["bar_benchmark"],
+                        bar["position"],
+                        live_price,
+                        bar["final_signal"],
+                        bar["weighting"],
+                        now_str,
+                    ]
+                )
 
                 anchor_pnl = cpnl
                 anchor_price = live_price
