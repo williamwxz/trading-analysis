@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -9,6 +10,7 @@ from pnl_consumer.pnl_consumer import (
     _bootstrap_anchors,
     _flush,
     _flush_and_reseed,
+    _recompute_and_verify,
     emit_candle_lag,
     process_candle,
     SinkConfig,
@@ -466,22 +468,27 @@ def test_flush_clears_all_batches_after_insert():
 
 @pytest.mark.unit
 def test_bootstrap_anchors_seeds_prod_and_real_trade():
-    prod_rows = [
+    """Bootstrap seeds anchors by re-verifying the last 3 days of stored rows."""
+    # The new bootstrap calls _recompute_and_verify per table, which issues two queries:
+    # 1. Seed query (ts < now - 3d): returns the pre-window anchor.
+    # 2. Window query (ts >= now - 3d): returns the rows to re-walk and verify.
+    # We return empty for the seed query and a single consistent row for the window query.
+    prod_window = [
         {
             "strategy_table_name": "strat_prod_1",
-            "anchor_pnl": 0.1,
-            "anchor_price": 93000.0,
-            "anchor_position": 1.0,
-            "anchor_ts": datetime(2026, 4, 26, 1, 0, 0),
+            "cumulative_pnl": 0.1,
+            "price": 93000.0,
+            "position": 1.0,
+            "ts": datetime(2026, 4, 26, 1, 0, 0),
         }
     ]
-    rt_rows = [
+    rt_window = [
         {
             "strategy_table_name": "strat_rt_1",
-            "anchor_pnl": 0.2,
-            "anchor_price": 92000.0,
-            "anchor_position": -1.0,
-            "anchor_ts": datetime(2026, 4, 26, 1, 0, 0),
+            "cumulative_pnl": 0.2,
+            "price": 92000.0,
+            "position": -1.0,
+            "ts": datetime(2026, 4, 26, 1, 0, 0),
         }
     ]
     state_prod = AnchorState()
@@ -489,10 +496,13 @@ def test_bootstrap_anchors_seeds_prod_and_real_trade():
     state_bt = AnchorState()
 
     def mock_query(sql):
+        # Seed query uses "< now()" — return empty (no pre-window anchor).
+        if "< now()" in sql:
+            return []
         if "strategy_pnl_1min_prod_v2" in sql:
-            return prod_rows
+            return prod_window
         if "strategy_pnl_1min_real_trade_v2" in sql:
-            return rt_rows
+            return rt_window
         return []
 
     with patch("pnl_consumer.pnl_consumer.query_dicts", side_effect=mock_query):
@@ -523,19 +533,22 @@ def test_flush_and_reseed_reseeds_anchors_from_clickhouse_after_flush():
         ),
     )
 
-    fresh_rows = [
+    # Window rows: a single row consistent with itself (no pre-window seed → accepted as chain start).
+    fresh_window = [
         {
             "strategy_table_name": "strat_prod_1",
-            "anchor_pnl": 0.5,
-            "anchor_price": 95000.0,
-            "anchor_position": 1.0,
-            "anchor_ts": datetime(2026, 4, 26, 1, 0, 0),  # newer ts → should overwrite
+            "cumulative_pnl": 0.5,
+            "price": 95000.0,
+            "position": 1.0,
+            "ts": datetime(2026, 4, 26, 1, 0, 0),
         }
     ]
 
     def mock_query(sql):
+        if "< now()" in sql:
+            return []
         if "strategy_pnl_1min_prod_v2" in sql:
-            return fresh_rows
+            return fresh_window
         return []
 
     with (
@@ -557,19 +570,21 @@ def test_flush_and_reseed_reseeds_even_when_batches_empty():
     state_prod = AnchorState()
     state_real_trade = AnchorState()
 
-    fresh_rows = [
+    fresh_window = [
         {
             "strategy_table_name": "strat_prod_1",
-            "anchor_pnl": 0.9,
-            "anchor_price": 96000.0,
-            "anchor_position": -1.0,
-            "anchor_ts": datetime(2026, 4, 26, 2, 0, 0),
+            "cumulative_pnl": 0.9,
+            "price": 96000.0,
+            "position": -1.0,
+            "ts": datetime(2026, 4, 26, 2, 0, 0),
         }
     ]
 
     def mock_query(sql):
+        if "< now()" in sql:
+            return []
         if "strategy_pnl_1min_prod_v2" in sql:
-            return fresh_rows
+            return fresh_window
         return []
 
     with (
@@ -579,6 +594,139 @@ def test_flush_and_reseed_reseeds_even_when_batches_empty():
         _flush_and_reseed(consumer, [], [], [], [], state_prod, state_real_trade, AnchorState())
 
     assert state_prod.get("strat_prod_1").anchor_price == 96000.0
+
+
+# --- _recompute_and_verify tests ---
+
+
+@pytest.mark.unit
+def test_recompute_and_verify_passes_when_values_consistent():
+    """Rows where recomputed PnL matches stored PnL must not raise."""
+    # seed: anchor_pnl=0.0, anchor_price=100.0 at t0
+    seed_rows = [
+        {
+            "strategy_table_name": "s1",
+            "anchor_pnl": 0.0,
+            "anchor_price": 100.0,
+            "anchor_position": 1.0,
+            "anchor_ts": datetime(2026, 4, 25, 0, 0, 0),
+        }
+    ]
+    # window: s1 at t1=101.0 → pnl = 0.0 + 1.0*(101-100)/100 = 0.01
+    #          s1 at t2=102.0 → pnl = 0.01 + 1.0*(102-101)/101 ≈ 0.01990...
+    t1_pnl = 0.0 + 1.0 * (101.0 - 100.0) / 100.0
+    t2_pnl = t1_pnl + 1.0 * (102.0 - 101.0) / 101.0
+    window_rows = [
+        {"strategy_table_name": "s1", "ts": datetime(2026, 4, 26, 0, 1, 0), "cumulative_pnl": t1_pnl, "price": 101.0, "position": 1.0},
+        {"strategy_table_name": "s1", "ts": datetime(2026, 4, 26, 0, 2, 0), "cumulative_pnl": t2_pnl, "price": 102.0, "position": 1.0},
+    ]
+
+    call_count = [0]
+
+    def mock_query(sql):
+        call_count[0] += 1
+        if "< now()" in sql:
+            return seed_rows
+        return window_rows
+
+    state = AnchorState()
+    with patch("pnl_consumer.pnl_consumer.query_dicts", side_effect=mock_query):
+        count = _recompute_and_verify("analytics.strategy_pnl_1min_prod_v2", state)
+
+    assert count == 1
+    assert state.get("s1").anchor_price == 102.0
+    assert state.get("s1").anchor_pnl == pytest.approx(t2_pnl)
+
+
+@pytest.mark.unit
+def test_recompute_and_verify_crashes_on_mismatch():
+    """Rows where recomputed PnL diverges from stored PnL must raise RuntimeError."""
+    seed_rows = [
+        {
+            "strategy_table_name": "s1",
+            "anchor_pnl": 0.0,
+            "anchor_price": 100.0,
+            "anchor_position": 1.0,
+            "anchor_ts": datetime(2026, 4, 25, 0, 0, 0),
+        }
+    ]
+    # Stored value is wrong: should be 0.01 but says 0.99
+    window_rows = [
+        {"strategy_table_name": "s1", "ts": datetime(2026, 4, 26, 0, 1, 0), "cumulative_pnl": 0.99, "price": 101.0, "position": 1.0},
+    ]
+
+    def mock_query(sql):
+        if "< now()" in sql:
+            return seed_rows
+        return window_rows
+
+    state = AnchorState()
+    with patch("pnl_consumer.pnl_consumer.query_dicts", side_effect=mock_query):
+        with pytest.raises(RuntimeError, match="Cold-start PnL verification failed"):
+            _recompute_and_verify("analytics.strategy_pnl_1min_prod_v2", state)
+
+
+@pytest.mark.unit
+def test_recompute_and_verify_accepts_chain_start_when_no_seed():
+    """When no pre-window seed exists, the first row in the window is accepted as chain start."""
+    window_rows = [
+        {"strategy_table_name": "s1", "ts": datetime(2026, 4, 26, 0, 1, 0), "cumulative_pnl": 0.5, "price": 101.0, "position": 1.0},
+    ]
+
+    def mock_query(sql):
+        if "< now()" in sql:
+            return []  # no pre-window seed
+        return window_rows
+
+    state = AnchorState()
+    with patch("pnl_consumer.pnl_consumer.query_dicts", side_effect=mock_query):
+        count = _recompute_and_verify("analytics.strategy_pnl_1min_prod_v2", state)
+
+    assert count == 1
+    assert state.get("s1").anchor_pnl == 0.5
+    assert state.get("s1").anchor_price == 101.0
+
+
+@pytest.mark.unit
+def test_recompute_and_verify_returns_zero_when_window_empty():
+    """Empty window (no data in last 3 days) returns 0 — no crash."""
+    def mock_query(sql):
+        return []
+
+    state = AnchorState()
+    with patch("pnl_consumer.pnl_consumer.query_dicts", side_effect=mock_query):
+        count = _recompute_and_verify("analytics.strategy_pnl_1min_prod_v2", state)
+
+    assert count == 0
+    assert len(state) == 0
+
+
+@pytest.mark.unit
+def test_recompute_and_verify_handles_multiple_strategies_independently():
+    """Two strategies with different seeds must be chained independently."""
+    seed_rows = [
+        {"strategy_table_name": "s1", "anchor_pnl": 0.0, "anchor_price": 100.0, "anchor_position": 1.0, "anchor_ts": datetime(2026, 4, 25, 0, 0, 0)},
+        {"strategy_table_name": "s2", "anchor_pnl": 0.1, "anchor_price": 200.0, "anchor_position": -1.0, "anchor_ts": datetime(2026, 4, 25, 0, 0, 0)},
+    ]
+    s1_pnl = 0.0 + 1.0 * (101.0 - 100.0) / 100.0
+    s2_pnl = 0.1 + (-1.0) * (201.0 - 200.0) / 200.0
+    window_rows = [
+        {"strategy_table_name": "s1", "ts": datetime(2026, 4, 26, 0, 1, 0), "cumulative_pnl": s1_pnl, "price": 101.0, "position": 1.0},
+        {"strategy_table_name": "s2", "ts": datetime(2026, 4, 26, 0, 1, 0), "cumulative_pnl": s2_pnl, "price": 201.0, "position": -1.0},
+    ]
+
+    def mock_query(sql):
+        if "< now()" in sql:
+            return seed_rows
+        return window_rows
+
+    state = AnchorState()
+    with patch("pnl_consumer.pnl_consumer.query_dicts", side_effect=mock_query):
+        count = _recompute_and_verify("analytics.strategy_pnl_1min_prod_v2", state)
+
+    assert count == 2
+    assert state.get("s1").anchor_price == 101.0
+    assert state.get("s2").anchor_price == 201.0
 
 
 @pytest.mark.unit
@@ -798,17 +946,20 @@ def test_bootstrap_anchors_skipped_when_no_pnl_sinks_enabled():
 def test_bootstrap_anchors_runs_when_any_pnl_sink_enabled():
     """Bootstrap must run when at least one PnL sink is enabled."""
     cfg = SinkConfig(price=True, prod=True, real_trade=False, bt=False)
-    prod_rows = [{
+    # Window row: single consistent row; no pre-window seed (empty seed query).
+    prod_window = [{
         "strategy_table_name": "s1",
-        "anchor_pnl": 0.1,
-        "anchor_price": 93000.0,
-        "anchor_position": 1.0,
-        "anchor_ts": datetime(2026, 4, 26, 1, 0, 0),
+        "cumulative_pnl": 0.1,
+        "price": 93000.0,
+        "position": 1.0,
+        "ts": datetime(2026, 4, 26, 1, 0, 0),
     }]
 
     def mock_query(sql):
+        if "< now()" in sql:
+            return []
         if "strategy_pnl_1min_prod_v2" in sql:
-            return prod_rows
+            return prod_window
         return []
 
     state_prod = AnchorState()
@@ -832,3 +983,106 @@ def test_resolve_group_id_returns_default_when_env_not_set():
 def test_resolve_group_id_uses_os_environ_by_default(monkeypatch):
     monkeypatch.setenv("KAFKA_GROUP_ID", "env-group")
     assert resolve_group_id() == "env-group"
+
+
+# --- peek_reference_ts tests ---
+
+from pnl_consumer.pnl_consumer import peek_reference_ts
+from unittest.mock import call as mock_call
+
+_MOCK_BROKERS = "localhost:9092"
+_MOCK_GROUP = "test-group"
+
+
+@pytest.mark.unit
+def test_peek_reference_ts_returns_min_ts_across_partitions():
+    """Returns the minimum candle ts from the committed-offset messages."""
+    from confluent_kafka import OFFSET_INVALID
+    from unittest.mock import MagicMock
+
+    mock_consumer = MagicMock()
+
+    # Two partitions, committed offsets 5 and 10
+    tp0 = MagicMock()
+    tp0.partition = 0
+    tp0.offset = 5
+    tp1 = MagicMock()
+    tp1.partition = 1
+    tp1.offset = 10
+    mock_consumer.committed.return_value = [tp0, tp1]
+
+    # get_watermark_offsets not needed (offsets are valid)
+    ts0 = datetime(2026, 5, 4, 10, 0, 0)
+    ts1 = datetime(2026, 5, 4, 11, 0, 0)
+
+    msg0 = MagicMock()
+    msg0.error.return_value = None
+    msg0.value.return_value = json.dumps({
+        "exchange": "binance", "instrument": "BTCUSDT",
+        "ts": ts0.isoformat(), "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0,
+    }).encode()
+
+    msg1 = MagicMock()
+    msg1.error.return_value = None
+    msg1.value.return_value = json.dumps({
+        "exchange": "binance", "instrument": "BTCUSDT",
+        "ts": ts1.isoformat(), "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0,
+    }).encode()
+
+    mock_consumer.poll.side_effect = [msg0, msg1]
+
+    with patch(f"{_MOD}.Consumer", return_value=mock_consumer):
+        result = peek_reference_ts(_MOCK_BROKERS, _MOCK_GROUP)
+
+    assert result == ts0  # min of ts0, ts1
+
+
+@pytest.mark.unit
+def test_peek_reference_ts_falls_back_to_high_watermark_when_no_committed_offset():
+    """When committed offset is OFFSET_INVALID, use high-watermark offset."""
+    from confluent_kafka import OFFSET_INVALID
+    from unittest.mock import MagicMock
+
+    mock_consumer = MagicMock()
+
+    tp0 = MagicMock()
+    tp0.partition = 0
+    tp0.offset = OFFSET_INVALID  # no committed offset
+    mock_consumer.committed.return_value = [tp0]
+    mock_consumer.get_watermark_offsets.return_value = (0, 42)  # low=0, high=42
+
+    ts0 = datetime(2026, 5, 4, 10, 0, 0)
+    msg0 = MagicMock()
+    msg0.error.return_value = None
+    msg0.value.return_value = json.dumps({
+        "exchange": "binance", "instrument": "BTCUSDT",
+        "ts": ts0.isoformat(), "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0,
+    }).encode()
+    mock_consumer.poll.return_value = msg0
+
+    with patch(f"{_MOD}.Consumer", return_value=mock_consumer):
+        result = peek_reference_ts(_MOCK_BROKERS, _MOCK_GROUP)
+
+    assert result == ts0
+    # Should have seeked to high watermark - 1 = 41
+    mock_consumer.seek.assert_called_once()
+    seek_tp = mock_consumer.seek.call_args[0][0]
+    assert seek_tp.offset == 41
+
+
+@pytest.mark.unit
+def test_peek_reference_ts_returns_none_when_no_messages():
+    """Returns None when poll yields no messages (e.g. empty topic)."""
+    from unittest.mock import MagicMock
+
+    mock_consumer = MagicMock()
+    tp0 = MagicMock()
+    tp0.partition = 0
+    tp0.offset = 5
+    mock_consumer.committed.return_value = [tp0]
+    mock_consumer.poll.return_value = None  # timeout, no message
+
+    with patch(f"{_MOD}.Consumer", return_value=mock_consumer):
+        result = peek_reference_ts(_MOCK_BROKERS, _MOCK_GROUP)
+
+    assert result is None

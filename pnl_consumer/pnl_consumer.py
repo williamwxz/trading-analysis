@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import boto3
-from confluent_kafka import Consumer, KafkaError, KafkaException
+from confluent_kafka import Consumer, KafkaError, KafkaException, OFFSET_INVALID, TopicPartition
 
 from pnl_consumer.anchor_state import AnchorRecord, AnchorState
 from pnl_consumer.ch_lookup import (
@@ -58,6 +58,74 @@ def resolve_group_id(env: dict[str, str] | None = None) -> str:
     if env is None:
         env = os.environ
     return env.get("KAFKA_GROUP_ID", _DEFAULT_GROUP_ID)
+
+
+def peek_reference_ts(
+    brokers: str,
+    group_id: str,
+    topic: str = TOPIC,
+    timeout: float = 5.0,
+) -> "datetime | None":
+    """Return the min candle ts at this group's committed offsets across all partitions.
+
+    Used on cold start to anchor the ClickHouse verification window to where Kafka
+    will actually replay from, rather than wall-clock now(). Falls back to the
+    high-watermark offset when no committed offset exists (first-ever start).
+    Returns None if no messages can be read (empty topic or timeout).
+    """
+    consumer = Consumer({
+        "bootstrap.servers": brokers,
+        "group.id": group_id,
+        "enable.auto.commit": False,
+    })
+    try:
+        try:
+            meta = consumer.list_topics(topic, timeout=timeout)
+            if topic in meta.topics:
+                partitions = [
+                    TopicPartition(topic, p)
+                    for p in meta.topics[topic].partitions
+                ]
+            else:
+                logger.warning("peek_reference_ts: topic %s not found", topic)
+                partitions = []
+        except Exception:
+            logger.debug("peek_reference_ts: list_topics failed, proceeding with empty partition list")
+            partitions = []
+        committed = consumer.committed(partitions, timeout=timeout)
+
+        timestamps: list[datetime] = []
+        for tp in committed:
+            offset = tp.offset
+            use_watermark = False
+            if offset == OFFSET_INVALID or offset <= 0:
+                # No committed offset — fall back to latest message.
+                low, high = consumer.get_watermark_offsets(
+                    TopicPartition(topic, tp.partition), timeout=timeout
+                )
+                offset = max(high - 1, low)
+                if offset < 0:
+                    continue  # empty partition
+                use_watermark = True
+            seek_tp = TopicPartition(topic, tp.partition, offset)
+            consumer.assign([seek_tp])
+            if use_watermark:
+                consumer.seek(seek_tp)
+            msg = consumer.poll(timeout=timeout)
+            if msg is None or msg.error():
+                continue
+            raw = msg.value()
+            data = json.loads(raw.decode() if raw is not None else "{}")
+            ts = datetime.fromisoformat(data["ts"])
+            timestamps.append(ts)
+
+        return min(timestamps) if timestamps else None
+    except Exception:
+        logger.warning("peek_reference_ts failed — falling back to now()", exc_info=True)
+        return None
+    finally:
+        consumer.close()
+
 
 PRICE_COLUMNS = [
     "exchange",
@@ -267,13 +335,137 @@ def process_candle(
     return rows
 
 
+_COLD_START_DAYS = 3
+_PNL_TOLERANCE = 1e-6
+
+
+def _recompute_and_verify(table: str, state: AnchorState) -> int:
+    """Re-walk the last _COLD_START_DAYS of PnL rows and verify they match ClickHouse.
+
+    For each strategy, fetches the anchor row just before the 3-day window, then walks
+    every stored minute in chronological order re-applying the anchor-chain formula.
+    Crashes if any recomputed value deviates from the stored value by more than
+    _PNL_TOLERANCE — this catches silent drift between the consumer and a manual backfill.
+
+    Returns the number of strategies seeded.
+    """
+    # Fetch the per-strategy anchor at the start of the 3-day window (latest row before it).
+    seed_sql = f"""\
+SELECT
+    strategy_table_name,
+    cumulative_pnl  AS anchor_pnl,
+    price           AS anchor_price,
+    position        AS anchor_position,
+    ts              AS anchor_ts
+FROM {table} FINAL
+WHERE ts < now() - INTERVAL {_COLD_START_DAYS} DAY
+ORDER BY strategy_table_name, ts DESC, updated_at DESC
+LIMIT 1 BY strategy_table_name
+"""
+    seeds: dict[str, AnchorRecord] = {}
+    for row in query_dicts(seed_sql):
+        seeds[row["strategy_table_name"]] = AnchorRecord(
+            anchor_pnl=row["anchor_pnl"],
+            anchor_price=row["anchor_price"],
+            anchor_position=row["anchor_position"],
+            anchor_ts=row["anchor_ts"],
+        )
+
+    # Fetch all rows in the 3-day window, ordered chronologically per strategy.
+    window_sql = f"""\
+SELECT
+    strategy_table_name,
+    ts,
+    cumulative_pnl,
+    price,
+    position
+FROM {table} FINAL
+WHERE ts >= now() - INTERVAL {_COLD_START_DAYS} DAY
+ORDER BY strategy_table_name, ts ASC, updated_at DESC
+"""
+    rows = query_dicts(window_sql)
+    if not rows:
+        logger.warning("Cold-start verify: no rows in 3-day window for %s — skipping", table)
+        return 0
+
+    # Re-walk the anchor chain per strategy and compare against stored values.
+    mismatches: list[str] = []
+    anchors: dict[str, AnchorRecord] = dict(seeds)
+
+    for row in rows:
+        stn = row["strategy_table_name"]
+        stored_pnl: float = row["cumulative_pnl"]
+        price: float = row["price"]
+        position: float = row["position"]
+        ts = row["ts"]
+
+        anchor = anchors.get(stn)
+        if anchor is None or anchor.anchor_price == 0.0:
+            # No seed before the window — accept stored value as the chain start.
+            anchors[stn] = AnchorRecord(
+                anchor_pnl=stored_pnl,
+                anchor_price=price,
+                anchor_position=position,
+                anchor_ts=ts,
+            )
+            continue
+
+        recomputed = (
+            anchor.anchor_pnl
+            + position * (price - anchor.anchor_price) / anchor.anchor_price
+        )
+        deviation = abs(recomputed - stored_pnl)
+        if deviation > _PNL_TOLERANCE:
+            mismatches.append(
+                f"{stn} ts={ts} stored={stored_pnl:.8f} recomputed={recomputed:.8f} "
+                f"delta={deviation:.2e}"
+            )
+
+        # Advance anchor regardless — use the stored value to stay in sync with ClickHouse.
+        anchors[stn] = AnchorRecord(
+            anchor_pnl=stored_pnl,
+            anchor_price=price,
+            anchor_position=position,
+            anchor_ts=ts,
+        )
+
+    if mismatches:
+        detail = "\n  ".join(mismatches[:20])
+        raise RuntimeError(
+            f"Cold-start PnL verification failed for {table} "
+            f"({len(mismatches)} mismatch(es)):\n  {detail}\n"
+            "Consumer cannot start with inconsistent PnL state. "
+            "Run a Dagster backfill to reconcile ClickHouse before restarting."
+        )
+
+    # Seed anchors from the last recomputed row per strategy.
+    seeded = 0
+    for stn, anchor in anchors.items():
+        if anchor.anchor_ts is not None:
+            state.update_if_newer(stn, anchor)
+            seeded += 1
+
+    logger.info(
+        "Cold-start verify passed for %s: walked %d row(s), seeded %d strategy anchor(s)",
+        table,
+        len(rows),
+        seeded,
+    )
+    return seeded
+
+
 def _bootstrap_anchors(
     state_prod: AnchorState,
     state_real_trade: AnchorState,
     state_bt: AnchorState,
     cfg: SinkConfig | None = None,
 ) -> None:
-    """On cold start, seed anchor states from ClickHouse for enabled PnL sinks."""
+    """On cold start, seed anchor states from ClickHouse for enabled PnL sinks.
+
+    Fetches the last _COLD_START_DAYS of stored PnL rows, re-walks the anchor chain,
+    and crashes if any stored value deviates from the recomputed value — ensuring the
+    consumer never silently diverge from a manual backfill.
+    """
     if cfg is not None and not any([cfg.prod, cfg.real_trade, cfg.bt]):
         logger.info("No PnL sinks enabled — skipping anchor bootstrap")
         return
@@ -286,34 +478,15 @@ def _bootstrap_anchors(
     for table, state, enabled in candidates:
         if not enabled:
             continue
-        sql = f"""\
-SELECT
-    strategy_table_name,
-    cumulative_pnl  AS anchor_pnl,
-    price           AS anchor_price,
-    position        AS anchor_position,
-    ts              AS anchor_ts
-FROM {table} FINAL
-WHERE ts >= now() - INTERVAL 48 HOUR
-ORDER BY strategy_table_name, ts DESC, updated_at DESC
-LIMIT 1 BY strategy_table_name
-"""
-        for row in query_dicts(sql):
-            state.update_if_newer(
-                row["strategy_table_name"],
-                AnchorRecord(
-                    anchor_pnl=row["anchor_pnl"],
-                    anchor_price=row["anchor_price"],
-                    anchor_position=row["anchor_position"],
-                    anchor_ts=row["anchor_ts"],
-                ),
-            )
+        _recompute_and_verify(table, state)
+
     enabled_states = [
         (state, enabled) for _, state, enabled in candidates if enabled
     ]
     if all(len(state) == 0 for state, _ in enabled_states):
         raise RuntimeError(
-            "Bootstrap failed: no anchor rows found in ClickHouse. "
+            "Bootstrap failed: no anchor rows found in ClickHouse within the last "
+            f"{_COLD_START_DAYS} days. "
             "Cannot start consumer without a valid PnL baseline."
         )
     logger.info(
