@@ -342,6 +342,37 @@ class TestRecomputePnlRecent:
         assert len(resume_calls) == 1
 
     @patch("trading_dagster.assets.pnl_strategy_v2.boto3")
+    @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
+    @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
+    def test_consumer_resumed_even_when_pause_waiter_fails(
+        self, mock_gc, mock_get_und, mock_boto3
+    ):
+        """ECS update_service(desiredCount=1) must be called even when the pause waiter raises."""
+        from trading_dagster.assets.pnl_strategy_v2 import _recompute_pnl_recent
+        from trading_dagster.utils.pnl_compute import PROD_INSERT_COLUMNS
+
+        mock_ecs = MagicMock()
+        waiter = MagicMock()
+        waiter.wait.side_effect = RuntimeError("waiter timeout")
+        mock_ecs.get_waiter.return_value = waiter
+        mock_boto3.client.return_value = mock_ecs
+        mock_get_und.return_value = ["btc"]
+
+        with pytest.raises(RuntimeError, match="waiter timeout"):
+            _recompute_pnl_recent(
+                self._make_context(),
+                target_table="strategy_pnl_1min_prod_v2",
+                source_table="strategy_output_history_v2",
+                label="production",
+                insert_columns=PROD_INSERT_COLUMNS,
+                mode="prod",
+                ecs_service="trading-analysis-pnl-consumer-prod",
+            )
+
+        resume_calls = [c for c in mock_ecs.update_service.call_args_list if c.kwargs.get("desiredCount") == 1]
+        assert len(resume_calls) == 1
+
+    @patch("trading_dagster.assets.pnl_strategy_v2.boto3")
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")

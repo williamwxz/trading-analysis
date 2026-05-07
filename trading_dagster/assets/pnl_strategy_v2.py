@@ -652,11 +652,10 @@ def _recompute_pnl_recent(
     )
 
     ecs = boto3.client("ecs", region_name=_ECS_REGION)
-    _pause_ecs_service(ecs_service, _ECS_CLUSTER, ecs)
-    context.log.info(f"Paused ECS service {ecs_service}")
-
     total_rows = 0
     try:
+        _pause_ecs_service(ecs_service, _ECS_CLUSTER, ecs)
+        context.log.info(f"Paused ECS service {ecs_service}")
         with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
             futures = {
                 pool.submit(
@@ -679,8 +678,11 @@ def _recompute_pnl_recent(
                 total_rows += rows
                 context.log.info(f"[{underlying}] complete: {rows:,} rows inserted")
     finally:
-        _resume_ecs_service(ecs_service, _ECS_CLUSTER, ecs)
-        context.log.info(f"Resumed ECS service {ecs_service}")
+        try:
+            _resume_ecs_service(ecs_service, _ECS_CLUSTER, ecs)
+            context.log.info(f"Resumed ECS service {ecs_service}")
+        except Exception as resume_err:
+            context.log.error(f"Failed to resume ECS service {ecs_service}: {resume_err}")
 
     context.log.info(f"Recent recompute {label} complete: {total_rows:,} total rows inserted")
     return MaterializeResult(metadata={
@@ -818,7 +820,7 @@ def pnl_real_trade_v2_full_asset(context: AssetExecutionContext) -> MaterializeR
     op_tags={"dagster/timeout": 86400, "dagster/concurrency_limit": "pnl_bt_v2_full"},
 )
 def pnl_bt_v2_full_asset(context: AssetExecutionContext) -> MaterializeResult:
-    """Delete last 3 days and recompute BT PnL from anchors. bt consumer is already stopped (desired_count=0)."""
+    """Delete last 3 days and recompute BT PnL from anchors. bt consumer has desired_count=0 so pause/resume are no-ops."""
     return _recompute_pnl_recent(
         context,
         target_table="strategy_pnl_1min_bt_v2",
