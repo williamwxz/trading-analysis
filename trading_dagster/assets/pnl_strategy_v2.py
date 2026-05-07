@@ -101,8 +101,8 @@ def _pause_ecs_service(service_name: str, cluster: str, boto_client) -> None:
     waiter.wait(cluster=cluster, services=[service_name])
 
 
-def _resume_ecs_service(service_name: str, cluster: str, boto_client) -> None:
-    boto_client.update_service(cluster=cluster, service=service_name, desiredCount=1)
+def _resume_ecs_service(service_name: str, cluster: str, boto_client, desired_count: int = 1) -> None:
+    boto_client.update_service(cluster=cluster, service=service_name, desiredCount=desired_count)
 
 
 _CHUNK_DAYS = 7  # process this many days at a time to cap memory per underlying
@@ -632,11 +632,14 @@ def _recompute_pnl_recent(
     insert_columns: list,
     mode: str,
     ecs_service: str,
+    ecs_resume_count: int = 1,
 ) -> MaterializeResult:
     """Delete last 3 days from target and recompute, seeded from anchors before the window.
 
     Pauses the named ECS consumer service before any writes and resumes it in a finally
     block so it always restarts even if the recompute fails.
+
+    Pass ecs_resume_count=0 for services that must stay stopped (e.g. pnl-consumer-bt).
     """
     window_start = (
         datetime.now(tz=UTC).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -679,8 +682,8 @@ def _recompute_pnl_recent(
                 context.log.info(f"[{underlying}] complete: {rows:,} rows inserted")
     finally:
         try:
-            _resume_ecs_service(ecs_service, _ECS_CLUSTER, ecs)
-            context.log.info(f"Resumed ECS service {ecs_service}")
+            _resume_ecs_service(ecs_service, _ECS_CLUSTER, ecs, desired_count=ecs_resume_count)
+            context.log.info(f"Resumed ECS service {ecs_service} (desiredCount={ecs_resume_count})")
         except Exception as resume_err:
             context.log.error(f"Failed to resume ECS service {ecs_service}: {resume_err}")
 
@@ -820,7 +823,7 @@ def pnl_real_trade_v2_full_asset(context: AssetExecutionContext) -> MaterializeR
     op_tags={"dagster/timeout": 86400, "dagster/concurrency_limit": "pnl_bt_v2_full"},
 )
 def pnl_bt_v2_full_asset(context: AssetExecutionContext) -> MaterializeResult:
-    """Delete last 3 days and recompute BT PnL from anchors. bt consumer has desired_count=0 so pause/resume are no-ops."""
+    """Delete last 3 days and recompute BT PnL from anchors. bt consumer stays at desired_count=0."""
     return _recompute_pnl_recent(
         context,
         target_table="strategy_pnl_1min_bt_v2",
@@ -829,6 +832,7 @@ def pnl_bt_v2_full_asset(context: AssetExecutionContext) -> MaterializeResult:
         insert_columns=PROD_INSERT_COLUMNS,
         mode="bt",
         ecs_service="trading-analysis-pnl-consumer-bt",
+        ecs_resume_count=0,
     )
 
 

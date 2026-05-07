@@ -72,7 +72,7 @@ class TestEcsPauseResume:
         )
 
     def test_resume_sets_desired_count_one(self):
-        """_resume_ecs_service calls update_service with desiredCount=1."""
+        """_resume_ecs_service defaults desiredCount=1."""
         from trading_dagster.assets.pnl_strategy_v2 import _resume_ecs_service
 
         mock_client = MagicMock()
@@ -81,6 +81,18 @@ class TestEcsPauseResume:
             cluster="trading-analysis",
             service="trading-analysis-pnl-consumer-prod",
             desiredCount=1,
+        )
+
+    def test_resume_desired_count_zero_keeps_service_stopped(self):
+        """_resume_ecs_service with desired_count=0 keeps the service stopped (bt consumer case)."""
+        from trading_dagster.assets.pnl_strategy_v2 import _resume_ecs_service
+
+        mock_client = MagicMock()
+        _resume_ecs_service("trading-analysis-pnl-consumer-bt", "trading-analysis", mock_client, desired_count=0)
+        mock_client.update_service.assert_called_once_with(
+            cluster="trading-analysis",
+            service="trading-analysis-pnl-consumer-bt",
+            desiredCount=0,
         )
 
 
@@ -340,6 +352,46 @@ class TestRecomputePnlRecent:
 
         resume_calls = [c for c in mock_ecs.update_service.call_args_list if c.kwargs.get("desiredCount") == 1]
         assert len(resume_calls) == 1
+
+    @patch("trading_dagster.assets.pnl_strategy_v2.boto3")
+    @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
+    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("trading_dagster.assets.pnl_strategy_v2.execute")
+    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
+    @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
+    @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
+    def test_bt_ecs_resume_count_is_zero(
+        self, mock_gc, mock_get_und, mock_fa, mock_exec, mock_qd, mock_prices, mock_insert, mock_boto3
+    ):
+        """bt asset must restore ECS desiredCount=0 so the bt consumer stays stopped."""
+        from trading_dagster.assets.pnl_strategy_v2 import _recompute_pnl_recent
+        from trading_dagster.utils.pnl_compute import PROD_INSERT_COLUMNS
+
+        mock_ecs = MagicMock()
+        mock_ecs.get_waiter.return_value = MagicMock()
+        mock_boto3.client.return_value = mock_ecs
+        mock_get_und.return_value = ["btc"]
+        mock_fa.return_value = {}
+        mock_qd.return_value = []
+        mock_prices.return_value = {"btc": {}}
+        mock_insert.return_value = 0
+
+        _recompute_pnl_recent(
+            self._make_context(),
+            target_table="strategy_pnl_1min_bt_v2",
+            source_table="strategy_output_history_bt_v2",
+            label="backtest",
+            insert_columns=PROD_INSERT_COLUMNS,
+            mode="bt",
+            ecs_service="trading-analysis-pnl-consumer-bt",
+            ecs_resume_count=0,
+        )
+
+        resume_calls = [c for c in mock_ecs.update_service.call_args_list if c.kwargs.get("desiredCount") == 1]
+        stay_stopped_calls = [c for c in mock_ecs.update_service.call_args_list if c.kwargs.get("desiredCount") == 0]
+        assert len(resume_calls) == 0, "bt consumer must NOT be set to desiredCount=1"
+        assert len(stay_stopped_calls) >= 1  # at least the pause call
 
     @patch("trading_dagster.assets.pnl_strategy_v2.boto3")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
