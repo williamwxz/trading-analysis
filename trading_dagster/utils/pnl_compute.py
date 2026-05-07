@@ -15,7 +15,7 @@ Migrated from falcon-lakehouse — uses clickhouse_client instead of raw urllib.
 
 from collections import defaultdict
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .clickhouse_client import query_dicts, query_rows
 
@@ -49,7 +49,7 @@ TIMEFRAME_MAP = {
 def fetch_anchors(
     target_table: str,
     underlying: str,
-    before_ts=None,
+    before_ts: Optional[datetime] = None,
 ) -> Dict[str, Tuple[float, float, float]]:
     """Read last committed PnL per strategy from target.
 
