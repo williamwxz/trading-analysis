@@ -1,8 +1,7 @@
 """Unit tests for the 3-day recent recompute additions."""
 
-import pytest
-from unittest.mock import patch, MagicMock
 from datetime import datetime
+from unittest.mock import MagicMock, patch
 
 from trading_dagster.utils.pnl_compute import fetch_anchors
 
@@ -47,9 +46,10 @@ class TestEcsPauseResume:
     def test_pause_sets_desired_count_zero(self):
         """_pause_ecs_service calls update_service with desiredCount=0."""
         from trading_dagster.assets.pnl_strategy_v2 import _pause_ecs_service
+
         mock_client = MagicMock()
         mock_client.get_waiter.return_value = MagicMock()
-        _pause_ecs_service("trading-analysis-pnl-consumer-prod", "trading-analysis", "ap-northeast-1", mock_client)
+        _pause_ecs_service("trading-analysis-pnl-consumer-prod", "trading-analysis", mock_client)
         mock_client.update_service.assert_called_once_with(
             cluster="trading-analysis",
             service="trading-analysis-pnl-consumer-prod",
@@ -59,10 +59,11 @@ class TestEcsPauseResume:
     def test_pause_waits_for_stable(self):
         """_pause_ecs_service waits using the services_stable waiter."""
         from trading_dagster.assets.pnl_strategy_v2 import _pause_ecs_service
+
         mock_client = MagicMock()
         waiter = MagicMock()
         mock_client.get_waiter.return_value = waiter
-        _pause_ecs_service("trading-analysis-pnl-consumer-prod", "trading-analysis", "ap-northeast-1", mock_client)
+        _pause_ecs_service("trading-analysis-pnl-consumer-prod", "trading-analysis", mock_client)
         mock_client.get_waiter.assert_called_once_with("services_stable")
         waiter.wait.assert_called_once_with(
             cluster="trading-analysis",
@@ -72,8 +73,9 @@ class TestEcsPauseResume:
     def test_resume_sets_desired_count_one(self):
         """_resume_ecs_service calls update_service with desiredCount=1."""
         from trading_dagster.assets.pnl_strategy_v2 import _resume_ecs_service
+
         mock_client = MagicMock()
-        _resume_ecs_service("trading-analysis-pnl-consumer-prod", "trading-analysis", "ap-northeast-1", mock_client)
+        _resume_ecs_service("trading-analysis-pnl-consumer-prod", "trading-analysis", mock_client)
         mock_client.update_service.assert_called_once_with(
             cluster="trading-analysis",
             service="trading-analysis-pnl-consumer-prod",
