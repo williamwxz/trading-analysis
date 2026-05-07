@@ -206,7 +206,6 @@ def test_process_candle_produces_pnl_real_trade_rows():
     assert row["closing_ts"] == revision.closing_ts
     expected_exec_ts = datetime(2026, 4, 26, 2, 6, 0)
     assert row["execution_ts"] == expected_exec_ts
-    assert row["traded"] is False
     assert abs(row["cumulative_pnl"] - (100.0 / 93100.0)) < 1e-6
 
 

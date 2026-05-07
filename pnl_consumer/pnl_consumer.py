@@ -227,7 +227,6 @@ def process_candle(
                     "updated_at": now,
                     "closing_ts": rev.closing_ts,
                     "execution_ts": execution_ts,
-                    "traded": False,
                 }
             )
 

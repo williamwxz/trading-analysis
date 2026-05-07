@@ -189,7 +189,7 @@ def fetch_new_bars_bt(
     and PnL starts being counted.
 
     Daily path: since=start_ts, ts_end=end_ts — filter on ts in [since, ts_end).
-    Live path: since=watermark, ts_end=None — filter on revision_ts >= since.
+    Full-recompute path: since=chunk_start, ts_end=None — filter on revision_ts >= since.
     """
     if ts_end is not None:
         ts_filter = f"toDateTime(ts) >= toDateTime('{since}') AND toDateTime(ts) < toDateTime('{ts_end}')"
@@ -248,8 +248,8 @@ def fetch_new_bars_real_trade(
 ) -> List[dict]:
     """Fetch real_trade revisions for bars in the given window.
 
-    Live path: since=watermark, ts_end=None — filter on revision_ts >= since.
     Daily path: since=start_ts, ts_end=end_ts — filter on bar ts in [since, ts_end).
+    Full-recompute path: since=chunk_start, ts_end=None — filter on revision_ts >= since.
 
     Each revision includes next_bar_closing_ts (the closing time of the *following*
     bar for that strategy). compute_real_trade_pnl uses this to decide whether to
@@ -422,7 +422,7 @@ REAL_TRADE_INSERT_COLUMNS = [
     "underlying", "config_timeframe", "source", "version",
     "ts", "cumulative_pnl", "benchmark", "position", "price",
     "final_signal", "weighting", "updated_at",
-    "closing_ts", "execution_ts", "traded",
+    "closing_ts", "execution_ts",
 ]
 
 
@@ -608,7 +608,7 @@ def compute_real_trade_pnl(
                     "real_trade", "v2", ts_str, cpnl,
                     rev["bar_benchmark"], rev["position"], live_open_price,
                     rev["final_signal"], rev["weighting"], now_str,
-                    rev["closing_ts"], rev["execution_ts"], False,
+                    rev["closing_ts"], rev["execution_ts"],
                 ])
 
                 anchor_pnl = cpnl
