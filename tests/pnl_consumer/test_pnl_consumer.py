@@ -473,6 +473,7 @@ def test_bootstrap_anchors_seeds_prod_and_real_trade():
             "anchor_pnl": 0.1,
             "anchor_price": 93000.0,
             "anchor_position": 1.0,
+            "anchor_ts": datetime(2026, 4, 26, 1, 0, 0),
         }
     ]
     rt_rows = [
@@ -481,6 +482,7 @@ def test_bootstrap_anchors_seeds_prod_and_real_trade():
             "anchor_pnl": 0.2,
             "anchor_price": 92000.0,
             "anchor_position": -1.0,
+            "anchor_ts": datetime(2026, 4, 26, 1, 0, 0),
         }
     ]
     state_prod = AnchorState()
@@ -506,13 +508,20 @@ def test_bootstrap_anchors_seeds_prod_and_real_trade():
 @pytest.mark.unit
 def test_flush_and_reseed_reseeds_anchors_from_clickhouse_after_flush():
     """After a backfill overwrites ClickHouse data, the next flush must re-read
-    anchor state from ClickHouse so stale in-memory anchors don't corrupt PnL."""
+    anchor state from ClickHouse when the ClickHouse row is strictly newer than
+    the in-memory anchor_ts."""
     consumer = MagicMock()
     state_prod = AnchorState()
     state_real_trade = AnchorState()
+    # Seed with an older anchor_ts so reseed (with a newer ts) will overwrite.
     state_prod.update(
         "strat_prod_1",
-        AnchorRecord(anchor_pnl=0.0, anchor_price=50000.0, anchor_position=1.0),
+        AnchorRecord(
+            anchor_pnl=0.0,
+            anchor_price=50000.0,
+            anchor_position=1.0,
+            anchor_ts=datetime(2026, 4, 26, 0, 0, 0),
+        ),
     )
 
     fresh_rows = [
@@ -521,6 +530,7 @@ def test_flush_and_reseed_reseeds_anchors_from_clickhouse_after_flush():
             "anchor_pnl": 0.5,
             "anchor_price": 95000.0,
             "anchor_position": 1.0,
+            "anchor_ts": datetime(2026, 4, 26, 1, 0, 0),  # newer ts → should overwrite
         }
     ]
 
@@ -554,6 +564,7 @@ def test_flush_and_reseed_reseeds_even_when_batches_empty():
             "anchor_pnl": 0.9,
             "anchor_price": 96000.0,
             "anchor_position": -1.0,
+            "anchor_ts": datetime(2026, 4, 26, 2, 0, 0),
         }
     ]
 
@@ -793,6 +804,7 @@ def test_bootstrap_anchors_runs_when_any_pnl_sink_enabled():
         "anchor_pnl": 0.1,
         "anchor_price": 93000.0,
         "anchor_position": 1.0,
+        "anchor_ts": datetime(2026, 4, 26, 1, 0, 0),
     }]
 
     def mock_query(sql):

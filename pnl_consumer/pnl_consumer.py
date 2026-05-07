@@ -80,6 +80,7 @@ def process_candle(
     state_real_trade: AnchorState,
     state_bt: AnchorState,
     cfg: SinkConfig | None = None,
+    last_real_trade_revisions: "dict[str, StrategyRevision] | None" = None,
 ) -> list[dict]:
     """Pure business logic: lookup strategies, compute PnL, return rows.
 
@@ -91,6 +92,11 @@ def process_candle(
 
     cfg controls which sinks are active. Defaults to all enabled for backward
     compatibility. In production, pass SinkConfig.from_env() to honour env vars.
+
+    last_real_trade_revisions: mutable dict updated in-place with the active revision
+    per strategy after each candle. Strategies missing from the current candle's lookup
+    are carried forward from this dict so the strategy count never drops due to gaps
+    in strategy_output_history_v2.
     """
     if cfg is None:
         cfg = _ALL_SINKS_ENABLED
@@ -184,6 +190,14 @@ def process_candle(
             if execution_ts <= candle.ts:
                 active_revisions[rev.strategy_table_name] = rev  # last one wins (ASC order)
 
+        # Carry forward strategies that had no bar in this candle's lookback window.
+        # This prevents the "Strategy Count Over Time" from dropping when strategy_output_history_v2
+        # has a gap — the last known position continues to hold.
+        if last_real_trade_revisions is not None:
+            for stn, prev_rev in last_real_trade_revisions.items():
+                if stn not in active_revisions:
+                    active_revisions[stn] = prev_rev
+
         for stn, rev in active_revisions.items():
             pnl = _compute_pnl_with_lazy_seed(
                 state_real_trade, stn, candle.open, rev.position
@@ -216,6 +230,10 @@ def process_candle(
                     "traded": False,
                 }
             )
+
+        # Update carry-forward state with this candle's active revisions.
+        if last_real_trade_revisions is not None:
+            last_real_trade_revisions.update(active_revisions)
 
     # --- bt ---
     if cfg.bt:
@@ -274,19 +292,21 @@ SELECT
     strategy_table_name,
     cumulative_pnl  AS anchor_pnl,
     price           AS anchor_price,
-    position        AS anchor_position
-FROM {table}
+    position        AS anchor_position,
+    ts              AS anchor_ts
+FROM {table} FINAL
 WHERE ts >= now() - INTERVAL 48 HOUR
 ORDER BY strategy_table_name, ts DESC, updated_at DESC
 LIMIT 1 BY strategy_table_name
 """
         for row in query_dicts(sql):
-            state.update(
+            state.update_if_newer(
                 row["strategy_table_name"],
                 AnchorRecord(
                     anchor_pnl=row["anchor_pnl"],
                     anchor_price=row["anchor_price"],
                     anchor_position=row["anchor_position"],
+                    anchor_ts=row["anchor_ts"],
                 ),
             )
     enabled_states = [
@@ -422,6 +442,7 @@ def run() -> None:
     pnl_prod_batch: list[list] = []
     pnl_real_trade_batch: list[list] = []
     pnl_bt_batch: list[list] = []
+    last_real_trade_revisions: dict[str, StrategyRevision] = {}
 
     def _shutdown(signum, frame):
         logger.info("Shutdown signal received, flushing and closing")
@@ -477,7 +498,7 @@ def run() -> None:
                 FLUSH_EVERY,
             )
 
-            for row in process_candle(candle, state_prod, state_real_trade, state_bt, sink_cfg):
+            for row in process_candle(candle, state_prod, state_real_trade, state_bt, sink_cfg, last_real_trade_revisions):
                 if row["_sink"] == "price":
                     price_batch.append(
                         [
