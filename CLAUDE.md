@@ -101,18 +101,20 @@ Rollup asset (hourly, argMax aggregation)
 
 Every data source has two complementary assets:
 - **Partitioned (backfill)**: `DailyPartitionsDefinition`, idempotent DELETE+INSERT, triggered manually or via backfill UI
-- **Unpartitioned (live)**: `AutomationCondition.on_cron(...)`, uses watermark to fetch only new data
+- **Unpartitioned (full recompute)**: `pnl_*_v2_full` assets, process all underlyings from start date to now in `_CHUNK_DAYS=7` day chunks
 
-Example: `binance_futures_backfill` (daily partitions from 2024-01-01) + `binance_futures_ohlcv_minutely` (every 5 min, auto-incremental).
+Example: `binance_futures_backfill` (daily partitions from 2024-01-01).
 
-### Incremental Refresh Pattern (PnL Assets)
+### PnL Refresh Pattern (Daily Partitioned Assets)
 
-1. **Watermark check**: read `analytics.pnl_refresh_watermarks` (or fall back to `max(updated_at) - 2h` from target)
-2. **Skip if up to date**: compare source `max(revision_ts)` against watermark
-3. **Python PnL computation**: `fetch_new_bars_*` → `fetch_anchors` → `fetch_prices` → `compute_*_pnl` → `insert_rows`
-4. **Write watermark**: update `analytics.pnl_refresh_watermarks` after successful insert
+1. **Delete partition**: idempotent DELETE WHERE ts in [start, end) AND source=label
+2. **Fetch anchors**: `fetch_anchors()` reads the last committed row per strategy from the target table (previous day's tail)
+3. **Fetch bars**: `fetch_new_bars_*()` queries `strategy_output_history_v2` for bars in the partition window
+4. **Fetch prices**: `fetch_prices_multi()` reads `analytics.futures_price_1min` — prices ALWAYS come from here, never from `row_json`
+5. **Compute PnL**: `compute_*_pnl()` expands each bar into 1-min rows, chaining anchors forward
+6. **Insert rows**: `insert_rows()` writes to the target table
 
-`_CHUNK_DAYS = 7` in `pnl_strategy_v2.py` controls how many days of bars are processed per ClickHouse INSERT to cap memory usage. Each chunk fetches only that window's prices and chains anchors forward at the end.
+`_CHUNK_DAYS = 7` in `pnl_strategy_v2.py` controls how many days the full-recompute path processes per chunk. The daily partitioned path processes exactly one day per run.
 
 ### Why Python for PnL (not SQL)
 
@@ -120,11 +122,28 @@ V1 used a SQL anchor CTE which fails when multiple bars arrive in a single INSER
 
 PnL formula: `cumulative_pnl = anchor_pnl + position * (live_price - anchor_price) / anchor_price`
 
+**Critical invariants:**
+- `price` in all PnL output tables is always the 1-min open from `analytics.futures_price_1min` — never the `price` field from `row_json`/`strategy_output_history_*`
+- `cumulative_pnl` is always recomputed from scratch using our own anchor chain — the `cumulative_pnl` field in `row_json` is only used as a cold-start seed for BT (where we have no prior anchor), never for prod or real_trade
+- `traded` column in `strategy_pnl_1min_real_trade_v2` is always `False` — it was intended for future use and is never set; do not use it for any logic or reporting
+- `pnl_refresh_watermarks` table does not exist — the live refresh path is not active; no watermark table or watermark logic should be referenced
+
+### 1-Min Expansion Window
+
+Each bar's position is held from its `closing_ts` (= `ts + tf_minutes`) until the next bar's `closing_ts`. The last bar in a partition holds for one extra `tf_minutes` past its own `closing_ts` — this covers the gap until the next partition's first bar arrives. For daily bars (`1d`, `tf_minutes=1440`) this means rows extend into the next calendar day, which is correct and expected. Do not confuse future-dated `ts` values from `1d`-bar expansion with data errors.
+
 ### Real Trade vs Prod/Bt
 
-`real_trade` bars have multiple revisions per bar (live updates). `fetch_new_bars_real_trade` fetches all revisions that arrive before bar close (`revision_ts < ts + tf_minutes`), computing `execution_ts = toStartOfMinute(revision_ts + 59s)` per revision. All revisions are returned ordered by `ts, revision_ts`. `compute_real_trade_pnl` iterates by `execution_ts` and advances `active_position` as each revision is reached. Prod/bt use `argMin(row_json, revision_ts)` (first revision wins) and a simpler `compute_prod_pnl`.
+`real_trade` bars have multiple revisions per bar (position updates arriving after bar open). `fetch_new_bars_real_trade` fetches all revisions for bars in the window, computing:
+- `execution_ts = toStartOfMinute(revision_ts + 59s)` — the minute when the new position becomes active
+- `closing_ts = ts + tf_minutes` — the bar's own close time
+- `next_bar_closing_ts` — the close time of the following bar (via SQL `leadInFrame`); used to filter stale revisions
 
-`_refresh_pnl_real_trade` in `pnl_strategy_v2.py` is fully implemented for both live and daily paths, using `fetch_new_bars_real_trade` and `compute_real_trade_pnl` from `pnl_compute.py`.
+`compute_real_trade_pnl` acceptance rule: a revision is accepted if `revision_ts < next_bar_closing_ts`. When no next bar exists, the sentinel `next_bar_closing_ts == closing_ts` always accepts. Accepted revisions are expanded 1-min from their `execution_ts` until the next accepted revision's `execution_ts`. The last accepted revision holds for `tf_minutes` past its own `closing_ts`.
+
+`execution_ts` in `strategy_pnl_1min_real_trade_v2` is `toStartOfMinute(revision_ts + 59s)` — the minute the position took effect. It is NOT the bar's closing time. `closing_ts` is the bar closing time.
+
+Prod/bt use `argMin(row_json, revision_ts)` (first revision only) and `iter_compute_prod_pnl` / `compute_bt_pnl`. BT additionally extracts `cumulative_pnl` from `row_json` as a cold-start seed when no prior anchor exists in the target table.
 
 ### ClickHouse Patterns
 
