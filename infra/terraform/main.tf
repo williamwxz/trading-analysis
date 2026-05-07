@@ -1242,8 +1242,8 @@ locals {
       enable_prod       = "true"
       enable_real_trade = "false"
       enable_bt         = "false"
-      group_id          = "pnl-consumer-prod"
-      desired_count     = 1
+      group_id          = "pnl-consumer-prod-2"
+      desired_count     = 0
     }
     real-trade = {
       enable_price      = "false"
