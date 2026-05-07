@@ -1,5 +1,6 @@
 """Unit tests for the 3-day recent recompute additions."""
 
+import pytest
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
@@ -235,3 +236,151 @@ class TestProcessUnderlyingRecent:
         rt_sql = mock_qd.call_args_list[0][0][0]
         assert "revision_ts" in rt_sql
         assert "strategy_output_history_v2" in rt_sql
+
+
+class TestRecomputePnlRecent:
+
+    def _make_bar(self, stn="strat_a", ts="2026-05-04 00:00:00"):
+        return {
+            "strategy_table_name": stn,
+            "strategy_id": 1,
+            "strategy_name": "Test",
+            "underlying": "btc",
+            "config_timeframe": "5m",
+            "weighting": 1.0,
+            "ts": ts,
+            "position": 1.0,
+            "bar_price": 100.0,
+            "final_signal": 1.0,
+            "bar_benchmark": 100.0,
+        }
+
+    def _make_context(self):
+        ctx = MagicMock()
+        ctx.log = MagicMock()
+        ctx.log.info = MagicMock()
+        return ctx
+
+    @patch("trading_dagster.assets.pnl_strategy_v2.boto3")
+    @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
+    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("trading_dagster.assets.pnl_strategy_v2.execute")
+    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
+    @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
+    @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
+    def test_consumer_paused_before_recompute(
+        self, mock_gc, mock_get_und, mock_fa, mock_exec, mock_qd, mock_prices, mock_insert, mock_boto3
+    ):
+        """ECS update_service(desiredCount=0) must be called before any DELETE or INSERT."""
+        from trading_dagster.assets.pnl_strategy_v2 import _recompute_pnl_recent
+        from trading_dagster.utils.pnl_compute import PROD_INSERT_COLUMNS
+
+        call_order = []
+        mock_ecs = MagicMock()
+        mock_ecs.get_waiter.return_value = MagicMock()
+        mock_boto3.client.return_value = mock_ecs
+        mock_ecs.update_service.side_effect = lambda **kw: call_order.append(("ecs", kw.get("desiredCount")))
+        mock_get_und.return_value = ["btc"]
+        mock_fa.return_value = {}
+        mock_exec.side_effect = lambda *a, **kw: call_order.append("delete")
+        mock_qd.return_value = []
+        mock_prices.return_value = {"btc": {}}
+        mock_insert.return_value = 0
+
+        _recompute_pnl_recent(
+            self._make_context(),
+            target_table="strategy_pnl_1min_prod_v2",
+            source_table="strategy_output_history_v2",
+            label="production",
+            insert_columns=PROD_INSERT_COLUMNS,
+            mode="prod",
+            ecs_service="trading-analysis-pnl-consumer-prod",
+        )
+
+        pause_idx = next(i for i, x in enumerate(call_order) if x == ("ecs", 0))
+        delete_idx = call_order.index("delete")
+        assert pause_idx < delete_idx
+
+    @patch("trading_dagster.assets.pnl_strategy_v2.boto3")
+    @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
+    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("trading_dagster.assets.pnl_strategy_v2.execute")
+    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
+    @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
+    @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
+    def test_consumer_resumed_even_on_failure(
+        self, mock_gc, mock_get_und, mock_fa, mock_exec, mock_qd, mock_prices, mock_insert, mock_boto3
+    ):
+        """ECS update_service(desiredCount=1) must be called even when recompute raises."""
+        from trading_dagster.assets.pnl_strategy_v2 import _recompute_pnl_recent
+        from trading_dagster.utils.pnl_compute import PROD_INSERT_COLUMNS
+
+        mock_ecs = MagicMock()
+        mock_ecs.get_waiter.return_value = MagicMock()
+        mock_boto3.client.return_value = mock_ecs
+        mock_get_und.return_value = ["btc"]
+        mock_fa.return_value = {}
+        mock_exec.side_effect = RuntimeError("ClickHouse unavailable")
+        mock_qd.return_value = []
+        mock_prices.return_value = {"btc": {}}
+        mock_insert.return_value = 0
+
+        with pytest.raises(RuntimeError, match="ClickHouse unavailable"):
+            _recompute_pnl_recent(
+                self._make_context(),
+                target_table="strategy_pnl_1min_prod_v2",
+                source_table="strategy_output_history_v2",
+                label="production",
+                insert_columns=PROD_INSERT_COLUMNS,
+                mode="prod",
+                ecs_service="trading-analysis-pnl-consumer-prod",
+            )
+
+        resume_calls = [c for c in mock_ecs.update_service.call_args_list if c.kwargs.get("desiredCount") == 1]
+        assert len(resume_calls) == 1
+
+    @patch("trading_dagster.assets.pnl_strategy_v2.boto3")
+    @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
+    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("trading_dagster.assets.pnl_strategy_v2.execute")
+    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
+    @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
+    @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
+    def test_window_start_is_3_days_ago_midnight(
+        self, mock_gc, mock_get_und, mock_fa, mock_exec, mock_qd, mock_prices, mock_insert, mock_boto3
+    ):
+        """window_start passed to fetch_anchors must be (today - 3 days) at UTC midnight."""
+        from datetime import datetime, UTC, timedelta
+        from trading_dagster.assets.pnl_strategy_v2 import _recompute_pnl_recent
+        from trading_dagster.utils.pnl_compute import PROD_INSERT_COLUMNS
+
+        mock_ecs = MagicMock()
+        mock_ecs.get_waiter.return_value = MagicMock()
+        mock_boto3.client.return_value = mock_ecs
+        mock_get_und.return_value = ["btc"]
+        mock_fa.return_value = {}
+        mock_qd.return_value = []
+        mock_prices.return_value = {"btc": {}}
+        mock_insert.return_value = 0
+
+        _recompute_pnl_recent(
+            self._make_context(),
+            target_table="strategy_pnl_1min_prod_v2",
+            source_table="strategy_output_history_v2",
+            label="production",
+            insert_columns=PROD_INSERT_COLUMNS,
+            mode="prod",
+            ecs_service="trading-analysis-pnl-consumer-prod",
+        )
+
+        expected_window = (
+            datetime.now(tz=UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+            - timedelta(days=3)
+        )
+        actual_before_ts = mock_fa.call_args.kwargs.get("before_ts") or mock_fa.call_args[1].get("before_ts")
+        assert actual_before_ts.date() == expected_window.date()
+        assert actual_before_ts.hour == 0
+        assert actual_before_ts.minute == 0

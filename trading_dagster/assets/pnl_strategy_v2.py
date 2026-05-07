@@ -11,6 +11,8 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 
+import boto3
+
 from dagster import (
     AssetExecutionContext,
     DailyPartitionsDefinition,
@@ -622,6 +624,72 @@ def _recompute_pnl_full(
     )
 
 
+def _recompute_pnl_recent(
+    context: AssetExecutionContext,
+    target_table: str,
+    source_table: str,
+    label: str,
+    insert_columns: list,
+    mode: str,
+    ecs_service: str,
+) -> MaterializeResult:
+    """Delete last 3 days from target and recompute, seeded from anchors before the window.
+
+    Pauses the named ECS consumer service before any writes and resumes it in a finally
+    block so it always restarts even if the recompute fails.
+    """
+    window_start = (
+        datetime.now(tz=UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+        - timedelta(days=3)
+    )
+    end_dt = datetime.now(tz=UTC)
+
+    underlyings = _get_underlyings(source_table)
+    context.log.info(
+        f"Recent recompute {label}: {len(underlyings)} underlyings, "
+        f"{window_start.strftime('%Y-%m-%d')} → {end_dt.strftime('%Y-%m-%d %H:%M:%S')}, "
+        f"ecs_service={ecs_service}"
+    )
+
+    ecs = boto3.client("ecs", region_name=_ECS_REGION)
+    _pause_ecs_service(ecs_service, _ECS_CLUSTER, ecs)
+    context.log.info(f"Paused ECS service {ecs_service}")
+
+    total_rows = 0
+    try:
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+            futures = {
+                pool.submit(
+                    _process_underlying_recent,
+                    underlying,
+                    target_table,
+                    source_table,
+                    label,
+                    insert_columns,
+                    mode,
+                    window_start,
+                    end_dt,
+                    context.log.info,
+                ): underlying
+                for underlying in underlyings
+            }
+            for future in as_completed(futures):
+                underlying = futures[future]
+                rows = future.result()
+                total_rows += rows
+                context.log.info(f"[{underlying}] complete: {rows:,} rows inserted")
+    finally:
+        _resume_ecs_service(ecs_service, _ECS_CLUSTER, ecs)
+        context.log.info(f"Resumed ECS service {ecs_service}")
+
+    context.log.info(f"Recent recompute {label} complete: {total_rows:,} total rows inserted")
+    return MaterializeResult(metadata={
+        "rows_inserted": total_rows,
+        "window_start": window_start.strftime("%Y-%m-%d %H:%M:%S"),
+        "end_ts": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+    })
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. Production PnL (Daily Backfill)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -697,17 +765,15 @@ def pnl_real_trade_v2_daily_asset(context: AssetExecutionContext) -> Materialize
     op_tags={"dagster/timeout": 86400, "dagster/concurrency_limit": "pnl_prod_v2_full"},
 )
 def pnl_prod_v2_full_asset(context: AssetExecutionContext) -> MaterializeResult:
-    """Full prod recompute from PROD_REAL_TRADE_START_DATE to now, 7-day chunks, anchors in-memory.
-
-    No DELETE — safe to rerun; ReplacingMergeTree deduplicates on updated_at.
-    """
-    return _recompute_pnl_full(
+    """Delete last 3 days and recompute prod PnL from anchors, pausing the prod consumer."""
+    return _recompute_pnl_recent(
         context,
         target_table="strategy_pnl_1min_prod_v2",
         source_table="strategy_output_history_v2",
         label="production",
         insert_columns=PROD_INSERT_COLUMNS,
         mode="prod",
+        ecs_service="trading-analysis-pnl-consumer-prod",
     )
 
 
@@ -727,17 +793,15 @@ def pnl_prod_v2_full_asset(context: AssetExecutionContext) -> MaterializeResult:
     },
 )
 def pnl_real_trade_v2_full_asset(context: AssetExecutionContext) -> MaterializeResult:
-    """Full real_trade recompute from PROD_REAL_TRADE_START_DATE to now, 7-day chunks, anchors in-memory.
-
-    No DELETE — safe to rerun; ReplacingMergeTree deduplicates on updated_at.
-    """
-    return _recompute_pnl_full(
+    """Delete last 3 days and recompute real_trade PnL from anchors, pausing the real-trade consumer."""
+    return _recompute_pnl_recent(
         context,
         target_table="strategy_pnl_1min_real_trade_v2",
         source_table="strategy_output_history_v2",
         label="real_trade",
         insert_columns=REAL_TRADE_INSERT_COLUMNS,
         mode="real_trade",
+        ecs_service="trading-analysis-pnl-consumer-real-trade",
     )
 
 
@@ -754,20 +818,15 @@ def pnl_real_trade_v2_full_asset(context: AssetExecutionContext) -> MaterializeR
     op_tags={"dagster/timeout": 86400, "dagster/concurrency_limit": "pnl_bt_v2_full"},
 )
 def pnl_bt_v2_full_asset(context: AssetExecutionContext) -> MaterializeResult:
-    """Full BT recompute from BT_START_DATE to now, 7-day chunks, anchors in-memory.
-
-    Use this instead of pnl_bt_v2_daily when the backtester rewrites multi-year history.
-    No DELETE — safe to rerun; ReplacingMergeTree deduplicates on updated_at.
-    Expect 6+ hours for a full 6-year recompute.
-    """
-    return _recompute_pnl_full(
+    """Delete last 3 days and recompute BT PnL from anchors. bt consumer is already stopped (desired_count=0)."""
+    return _recompute_pnl_recent(
         context,
         target_table="strategy_pnl_1min_bt_v2",
         source_table="strategy_output_history_bt_v2",
         label="backtest",
         insert_columns=PROD_INSERT_COLUMNS,
         mode="bt",
-        start_date=BT_START_DATE,
+        ecs_service="trading-analysis-pnl-consumer-bt",
     )
 
 
