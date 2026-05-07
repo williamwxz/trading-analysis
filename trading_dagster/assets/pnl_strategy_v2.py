@@ -356,6 +356,209 @@ ORDER BY r.strategy_table_name, r.ts, r.revision_ts
     return total_rows
 
 
+def _process_underlying_recent(
+    underlying: str,
+    target_table: str,
+    source_table: str,
+    label: str,
+    insert_columns: list,
+    mode: str,
+    window_start: datetime,
+    end_dt: datetime,
+    log_fn=None,
+) -> int:
+    """Delete the last 3 days and recompute for one underlying. Returns rows inserted.
+
+    Order: load anchors (before window) → DELETE → recompute [window_start, end_dt).
+    Designed to run in a thread — owns its own ClickHouse client.
+    """
+    _emit = log_fn or _log.info
+    client = get_client()
+    window_start_ts = window_start.strftime("%Y-%m-%d %H:%M:%S")
+
+    anchors = fetch_anchors(target_table, underlying, before_ts=window_start)
+    _emit(f"[{underlying}] loaded {len(anchors)} anchors before {window_start_ts}")
+
+    execute(
+        f"ALTER TABLE analytics.{target_table} DELETE "
+        f"WHERE underlying = '{underlying}' AND ts >= toDateTime('{window_start_ts}')",
+        client=client,
+    )
+    _emit(f"[{underlying}] deleted rows >= {window_start_ts}")
+
+    total_rows = 0
+    chunk_count = math.ceil((end_dt - window_start).total_seconds() / 86400 / _CHUNK_DAYS)
+    chunks_done = 0
+    _emit(f"[{underlying}] recomputing {chunk_count} chunks from {window_start_ts}")
+
+    chunk_start = window_start
+    while chunk_start < end_dt:
+        chunk_end = min(chunk_start + timedelta(days=_CHUNK_DAYS), end_dt)
+        chunk_start_ts = chunk_start.strftime("%Y-%m-%d %H:%M:%S")
+        chunk_end_ts = chunk_end.strftime("%Y-%m-%d %H:%M:%S")
+
+        if mode == "prod":
+            sql = f"""\
+SELECT
+    strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe,
+    argMin(weighting, revision_ts) AS weighting,
+    toString(ts) AS ts,
+    JSONExtractFloat(argMin(row_json, revision_ts), 'position') AS position,
+    JSONExtractFloat(argMin(row_json, revision_ts), 'price') AS bar_price,
+    JSONExtractFloat(argMin(row_json, revision_ts), 'final_signal') AS final_signal,
+    JSONExtractFloat(argMin(row_json, revision_ts), 'benchmark') AS bar_benchmark
+FROM analytics.{source_table}
+WHERE underlying = '{underlying}'
+  AND strategy_table_name NOT LIKE 'manual_probe%'
+  AND toDateTime(ts) >= toDateTime('{chunk_start_ts}') AND toDateTime(ts) < toDateTime('{chunk_end_ts}')
+GROUP BY strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, ts
+ORDER BY strategy_table_name, ts
+"""
+        elif mode == "bt":
+            sql = f"""\
+SELECT
+    strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe,
+    argMin(weighting, revision_ts) AS weighting,
+    toString(ts) AS ts,
+    JSONExtractFloat(argMin(row_json, revision_ts), 'position') AS position,
+    JSONExtractFloat(argMin(row_json, revision_ts), 'price') AS bar_price,
+    JSONExtractFloat(argMin(row_json, revision_ts), 'final_signal') AS final_signal,
+    JSONExtractFloat(argMin(row_json, revision_ts), 'benchmark') AS bar_benchmark,
+    JSONExtractFloat(argMin(row_json, revision_ts), 'cumulative_pnl') AS cumulative_pnl
+FROM analytics.{source_table}
+WHERE underlying = '{underlying}'
+  AND strategy_table_name NOT LIKE 'manual_probe%'
+  AND toDateTime(ts) >= toDateTime('{chunk_start_ts}') AND toDateTime(ts) < toDateTime('{chunk_end_ts}')
+GROUP BY strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, ts
+ORDER BY strategy_table_name, ts
+"""
+        else:  # real_trade
+            tf_expr = "multiIf(config_timeframe = '5m', 5, config_timeframe = '10m', 10, config_timeframe = '15m', 15, config_timeframe = '30m', 30, config_timeframe = '1h', 60, config_timeframe = '4h', 240, config_timeframe = '1d', 1440, 5)"
+            sql = f"""\
+SELECT
+    r.strategy_table_name,
+    r.strategy_id, r.strategy_name, r.underlying, r.config_timeframe, r.weighting,
+    toString(r.ts) AS ts,
+    toString(r.ts + toIntervalMinute({tf_expr})) AS closing_ts,
+    toString(toStartOfMinute(r.revision_ts + INTERVAL 59 SECOND)) AS execution_ts,
+    toString(r.revision_ts) AS revision_ts,
+    toString(nb.next_bar_ts + toIntervalMinute({tf_expr})) AS next_bar_closing_ts,
+    JSONExtractFloat(r.row_json, 'position') AS position,
+    JSONExtractFloat(r.row_json, 'price') AS bar_price,
+    JSONExtractFloat(r.row_json, 'final_signal') AS final_signal,
+    JSONExtractFloat(r.row_json, 'benchmark') AS bar_benchmark
+FROM analytics.{source_table} r
+LEFT JOIN (
+    SELECT
+        strategy_table_name,
+        ts,
+        leadInFrame(ts, 1, ts) OVER (
+            PARTITION BY strategy_table_name ORDER BY ts
+            ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
+        ) AS next_bar_ts
+    FROM (
+        SELECT strategy_table_name, ts
+        FROM analytics.{source_table}
+        WHERE underlying = '{underlying}'
+          AND strategy_table_name NOT LIKE 'manual_probe%'
+          AND toDateTime(ts) >= toDateTime('{chunk_start_ts}')
+          AND toDateTime(ts) < toDateTime('{chunk_end_ts}')
+        GROUP BY strategy_table_name, ts
+    )
+) nb ON r.strategy_table_name = nb.strategy_table_name AND r.ts = nb.ts
+WHERE r.underlying = '{underlying}'
+  AND r.strategy_table_name NOT LIKE 'manual_probe%'
+  AND toDateTime(r.ts) >= toDateTime('{chunk_start_ts}') AND toDateTime(r.ts) < toDateTime('{chunk_end_ts}')
+ORDER BY r.strategy_table_name, r.ts, r.revision_ts
+"""
+
+        raw_rows = query_dicts(sql, client)
+        chunks_done += 1
+
+        if mode == "real_trade":
+            rows_dict = [
+                {
+                    "strategy_table_name": r["strategy_table_name"],
+                    "strategy_id": int(r["strategy_id"]),
+                    "strategy_name": r["strategy_name"],
+                    "underlying": r["underlying"],
+                    "config_timeframe": r["config_timeframe"],
+                    "weighting": float(r["weighting"]),
+                    "ts": str(r["ts"]),
+                    "closing_ts": str(r["closing_ts"]),
+                    "execution_ts": str(r["execution_ts"]),
+                    "revision_ts": str(r["revision_ts"]),
+                    "next_bar_closing_ts": str(r["next_bar_closing_ts"]),
+                    "position": float(r["position"]),
+                    "bar_price": float(r["bar_price"]),
+                    "final_signal": float(r["final_signal"]),
+                    "bar_benchmark": float(r["bar_benchmark"]),
+                }
+                for r in raw_rows
+            ]
+        else:
+            rows_dict = raw_rows
+
+        if not rows_dict:
+            chunk_start = chunk_end
+            continue
+
+        all_prices = fetch_prices_multi(
+            underlyings=[underlying],
+            ts_min=chunk_start_ts,
+            ts_max=chunk_end_ts,
+            client=client,
+            extend_minutes=0,
+        )
+        prices = all_prices.pop(underlying, {})
+
+        if mode == "prod":
+            for _stn, strategy_rows in iter_compute_prod_pnl(rows_dict, anchors, prices, source_label=label):
+                _prepare_rows_for_clickhouse(strategy_rows)
+                n = insert_rows(f"analytics.{target_table}", insert_columns, strategy_rows, client)
+                total_rows += n
+                if strategy_rows:
+                    last = strategy_rows[-1]
+                    anchors[_stn] = (float(last[8]), float(last[11]), float(last[10]))
+        elif mode == "bt":
+            for bar in rows_dict:
+                tf_minutes = TIMEFRAME_MAP.get(bar["config_timeframe"], 5)
+                bar["execution_ts"] = (
+                    _parse_ts(bar["ts"]) + timedelta(minutes=tf_minutes)
+                ).strftime("%Y-%m-%d %H:%M:%S")
+            by_stn: dict[str, list] = defaultdict(list)
+            for bar in rows_dict:
+                by_stn[bar["strategy_table_name"]].append(bar)
+            for _stn, stn_bars in by_stn.items():
+                strategy_rows = compute_bt_pnl(stn_bars, prices, anchors=anchors)
+                _prepare_rows_for_clickhouse(strategy_rows)
+                n = insert_rows(f"analytics.{target_table}", insert_columns, strategy_rows, client)
+                total_rows += n
+                if strategy_rows:
+                    last = strategy_rows[-1]
+                    anchors[_stn] = (float(last[8]), float(last[11]), float(last[10]))
+        elif mode == "real_trade":
+            by_strategy: dict[str, list] = defaultdict(list)
+            for bar in rows_dict:
+                by_strategy[bar["strategy_table_name"]].append(bar)
+            for stn, strategy_bars in by_strategy.items():
+                strategy_rows = compute_real_trade_pnl(strategy_bars, anchors, prices)
+                _prepare_rows_for_clickhouse(strategy_rows)
+                n = insert_rows(f"analytics.{target_table}", insert_columns, strategy_rows, client)
+                total_rows += n
+                if strategy_rows:
+                    last = strategy_rows[-1]
+                    anchors[stn] = (float(last[8]), float(last[11]), float(last[10]))
+        else:
+            raise ValueError(f"Unknown mode: {mode!r}")
+
+        del rows_dict, prices
+        chunk_start = chunk_end
+
+    _emit(f"[{underlying}] recent recompute complete: {total_rows:,} rows inserted")
+    return total_rows
+
+
 def _recompute_pnl_full(
     context: AssetExecutionContext,
     target_table: str,

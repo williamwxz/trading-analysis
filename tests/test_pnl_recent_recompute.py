@@ -81,3 +81,103 @@ class TestEcsPauseResume:
             service="trading-analysis-pnl-consumer-prod",
             desiredCount=1,
         )
+
+
+class TestProcessUnderlyingRecent:
+
+    def _make_bar(self, stn="strat_a", ts="2026-05-04 00:00:00"):
+        return {
+            "strategy_table_name": stn,
+            "strategy_id": 1,
+            "strategy_name": "Test",
+            "underlying": "btc",
+            "config_timeframe": "5m",
+            "weighting": 1.0,
+            "ts": ts,
+            "position": 1.0,
+            "bar_price": 100.0,
+            "final_signal": 1.0,
+            "bar_benchmark": 100.0,
+        }
+
+    @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
+    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("trading_dagster.assets.pnl_strategy_v2.execute")
+    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
+    @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
+    def test_anchors_loaded_before_delete(self, mock_gc, mock_fa, mock_exec, mock_qd, mock_prices, mock_insert):
+        """fetch_anchors must be called before the DELETE execute call."""
+        from datetime import datetime, UTC, timedelta
+        from trading_dagster.assets.pnl_strategy_v2 import _process_underlying_recent
+        from trading_dagster.utils.pnl_compute import PROD_INSERT_COLUMNS
+
+        call_order = []
+        mock_fa.side_effect = lambda *a, **kw: call_order.append("anchor") or {}
+        mock_exec.side_effect = lambda *a, **kw: call_order.append("delete")
+        mock_qd.return_value = []
+        mock_prices.return_value = {"btc": {}}
+        mock_insert.return_value = 0
+
+        window_start = datetime(2026, 5, 3, 0, 0, 0, tzinfo=UTC)
+        end_dt = datetime(2026, 5, 6, 0, 0, 0, tzinfo=UTC)
+        _process_underlying_recent(
+            "btc", "strategy_pnl_1min_prod_v2", "strategy_output_history_v2",
+            "production", PROD_INSERT_COLUMNS, "prod", window_start, end_dt,
+        )
+        assert call_order.index("anchor") < call_order.index("delete")
+
+    @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
+    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("trading_dagster.assets.pnl_strategy_v2.execute")
+    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
+    @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
+    def test_delete_uses_correct_table_and_window(self, mock_gc, mock_fa, mock_exec, mock_qd, mock_prices, mock_insert):
+        """DELETE statement must reference the target table and window_start."""
+        from datetime import datetime, UTC
+        from trading_dagster.assets.pnl_strategy_v2 import _process_underlying_recent
+        from trading_dagster.utils.pnl_compute import PROD_INSERT_COLUMNS
+
+        mock_fa.return_value = {}
+        mock_qd.return_value = []
+        mock_prices.return_value = {"btc": {}}
+        mock_insert.return_value = 0
+
+        window_start = datetime(2026, 5, 3, 0, 0, 0, tzinfo=UTC)
+        end_dt = datetime(2026, 5, 6, 0, 0, 0, tzinfo=UTC)
+        _process_underlying_recent(
+            "btc", "strategy_pnl_1min_prod_v2", "strategy_output_history_v2",
+            "production", PROD_INSERT_COLUMNS, "prod", window_start, end_dt,
+        )
+        delete_sql = mock_exec.call_args[0][0]
+        assert "strategy_pnl_1min_prod_v2" in delete_sql
+        assert "btc" in delete_sql
+        assert "2026-05-03 00:00:00" in delete_sql
+
+    @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
+    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("trading_dagster.assets.pnl_strategy_v2.execute")
+    @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
+    @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
+    def test_recompute_only_covers_window(self, mock_gc, mock_fa, mock_exec, mock_qd, mock_prices, mock_insert):
+        """Bars query must be scoped to [window_start, end_dt), not full history."""
+        from datetime import datetime, UTC
+        from trading_dagster.assets.pnl_strategy_v2 import _process_underlying_recent
+        from trading_dagster.utils.pnl_compute import PROD_INSERT_COLUMNS
+
+        mock_fa.return_value = {}
+        mock_qd.return_value = [self._make_bar()]
+        mock_prices.return_value = {"btc": {"2026-05-04 00:00:00": 100.0}}
+        mock_insert.return_value = 5
+
+        window_start = datetime(2026, 5, 3, 0, 0, 0, tzinfo=UTC)
+        end_dt = datetime(2026, 5, 6, 0, 0, 0, tzinfo=UTC)
+        _process_underlying_recent(
+            "btc", "strategy_pnl_1min_prod_v2", "strategy_output_history_v2",
+            "production", PROD_INSERT_COLUMNS, "prod", window_start, end_dt,
+        )
+        first_bar_sql = mock_qd.call_args_list[0][0][0]
+        assert "2026-05-03 00:00:00" in first_bar_sql
+        assert "strategy_output_history_v2" in first_bar_sql
