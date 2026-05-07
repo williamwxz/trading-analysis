@@ -9,7 +9,6 @@ from dagster import Definitions
 from ..assets.binance_futures_ohlcv import (
     binance_futures_backfill_asset,
 )
-from ..assets.clickhouse_connectivity_check import clickhouse_connectivity_check_asset
 from ..assets.pnl_strategy_v2 import (
     pnl_bt_v2_daily_asset,
     pnl_bt_v2_full_asset,
@@ -33,7 +32,6 @@ all_assets = [
     pnl_real_trade_v2_full_asset,
     pnl_bt_v2_full_asset,
     # Infra checks
-    clickhouse_connectivity_check_asset,
     postgres_cleanup_asset,
 ]
 

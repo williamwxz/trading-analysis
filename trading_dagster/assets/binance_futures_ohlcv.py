@@ -11,6 +11,7 @@ from typing import List
 import pandas as pd
 
 from dagster import (
+    AutomationCondition,
     DailyPartitionsDefinition,
     AssetExecutionContext,
     MaterializeResult,
@@ -61,9 +62,10 @@ def _df_to_rows(instrument: str, df: pd.DataFrame) -> List[list]:
     name="binance_futures_backfill",
     group_name="market_data",
     partitions_def=DailyPartitionsDefinition(start_date=START_DATE),
-    description="Historical daily backfill asset. Trigger manually for specific dates.",
+    description="Daily market data backfill. Auto-runs at 1 AM UTC for yesterday's partition.",
     compute_kind="binance",
     op_tags={"dagster/timeout": 300},
+    automation_condition=AutomationCondition.on_cron("0 1 * * *") & ~AutomationCondition.in_progress(),
 )
 def binance_futures_backfill_asset(context: AssetExecutionContext) -> MaterializeResult:
     partition_date_str = context.partition_key
