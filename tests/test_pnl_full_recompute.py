@@ -65,9 +65,10 @@ class TestRecomputePnlFull:
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_scalar", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
     def test_prod_fetches_bars_for_full_range(
-        self, mock_client, mock_get_und, mock_qd, mock_prices, mock_insert
+        self, mock_client, mock_qs, mock_get_und, mock_qd, mock_prices, mock_insert
     ):
         """Bars query covers PROD_REAL_TRADE_START_DATE to now for all underlyings."""
         mock_get_und.return_value = ["btc"]
@@ -96,9 +97,10 @@ class TestRecomputePnlFull:
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_scalar", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
     def test_prod_inserts_to_correct_table(
-        self, mock_client, mock_get_und, mock_qd, mock_prices, mock_insert
+        self, mock_client, mock_qs, mock_get_und, mock_qd, mock_prices, mock_insert
     ):
         """Rows must be inserted into the target table with PROD_INSERT_COLUMNS."""
         mock_get_und.return_value = ["btc"]
@@ -126,9 +128,10 @@ class TestRecomputePnlFull:
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_scalar", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
     def test_empty_underlying_skipped_gracefully(
-        self, mock_client, mock_get_und, mock_qd, mock_prices, mock_insert
+        self, mock_client, mock_qs, mock_get_und, mock_qd, mock_prices, mock_insert
     ):
         """If source table has no bars for an underlying, insert is not called."""
         mock_get_und.return_value = ["btc"]
@@ -153,9 +156,10 @@ class TestRecomputePnlFull:
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_scalar", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
     def test_real_trade_uses_real_trade_columns(
-        self, mock_client, mock_get_und, mock_qd, mock_prices, mock_insert
+        self, mock_client, mock_qs, mock_get_und, mock_qd, mock_prices, mock_insert
     ):
         """real_trade mode must insert with REAL_TRADE_INSERT_COLUMNS."""
         mock_get_und.return_value = ["btc"]
@@ -182,9 +186,10 @@ class TestRecomputePnlFull:
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_scalar", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
     def test_progress_logged_per_underlying(
-        self, mock_client, mock_get_und, mock_qd, mock_prices, mock_insert
+        self, mock_client, mock_qs, mock_get_und, mock_qd, mock_prices, mock_insert
     ):
         """context.log.info must be called at least once per underlying processed."""
         mock_get_und.return_value = ["btc", "eth"]
@@ -215,9 +220,10 @@ class TestRecomputePnlFullRealTradeAcceptance:
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_scalar", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
     def test_revision_accepted_when_before_next_bar_closing(
-        self, mock_client, mock_get_und, mock_qd, mock_prices, mock_insert
+        self, mock_client, mock_qs, mock_get_und, mock_qd, mock_prices, mock_insert
     ):
         """A revision arriving before next_bar_closing_ts is accepted and produces PnL rows."""
         # bar open ts=00:00, closing=00:05, revision arrives at 00:04 (before next bar closes at 00:10)
@@ -249,9 +255,10 @@ class TestRecomputePnlFullRealTradeAcceptance:
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_scalar", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
     def test_revision_discarded_when_after_next_bar_closing(
-        self, mock_client, mock_get_und, mock_qd, mock_prices, mock_insert
+        self, mock_client, mock_qs, mock_get_und, mock_qd, mock_prices, mock_insert
     ):
         """A revision arriving at or after next_bar_closing_ts is discarded — produces 0 output rows."""
         # revision_ts=00:11 >= next_bar_closing_ts=00:10 → discard
@@ -287,9 +294,10 @@ class TestRecomputePnlFullRealTradeAcceptance:
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_scalar", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
     def test_only_first_revision_accepted_when_second_is_late(
-        self, mock_client, mock_get_und, mock_qd, mock_prices, mock_insert
+        self, mock_client, mock_qs, mock_get_und, mock_qd, mock_prices, mock_insert
     ):
         """Two revisions for same bar: first accepted, second discarded (arrived after next bar closed)."""
         bar_early = {
@@ -332,9 +340,10 @@ class TestRecomputePnlFullRealTradeAcceptance:
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_scalar", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
     def test_last_bar_in_chunk_sentinel_always_accepted(
-        self, mock_client, mock_get_und, mock_qd, mock_prices, mock_insert
+        self, mock_client, mock_qs, mock_get_und, mock_qd, mock_prices, mock_insert
     ):
         """When next_bar_closing_ts == closing_ts (sentinel, no next bar), revision is always accepted."""
         bar = {
@@ -368,9 +377,10 @@ class TestRecomputePnlFullParallel:
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_scalar", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
     def test_both_underlyings_processed(
-        self, mock_client, mock_get_und, mock_qd, mock_prices, mock_insert
+        self, mock_client, mock_qs, mock_get_und, mock_qd, mock_prices, mock_insert
     ):
         """All underlyings returned by _get_underlyings are processed and rows summed."""
         mock_get_und.return_value = ["btc", "eth"]
@@ -397,9 +407,10 @@ class TestRecomputePnlFullParallel:
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
+    @patch("trading_dagster.assets.pnl_strategy_v2.query_scalar", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
     def test_worker_exception_propagates(
-        self, mock_client, mock_get_und, mock_qd, mock_prices, mock_insert
+        self, mock_client, mock_qs, mock_get_und, mock_qd, mock_prices, mock_insert
     ):
         """An exception in a worker thread must propagate and fail the asset run."""
         mock_get_und.return_value = ["btc"]
