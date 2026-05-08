@@ -181,9 +181,9 @@ LIMIT 1
         if rows:
             r = rows[0]
             return AnchorRecord(
-                anchor_pnl=r["anchor_pnl"],
-                anchor_price=r["anchor_price"],
-                anchor_position=r["anchor_position"],
+                pnl=r["anchor_pnl"],
+                price=r["anchor_price"],
+                position=r["anchor_position"],
             )
     return None
 

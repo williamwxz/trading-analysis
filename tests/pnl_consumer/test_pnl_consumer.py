@@ -9,7 +9,6 @@ from pnl_consumer.ch_lookup import BtStrategyBar, StrategyBar, StrategyRevision
 from pnl_consumer.pnl_consumer import (
     _bootstrap_anchors,
     _flush,
-    _flush_and_reseed,
     _recompute_and_verify,
     emit_candle_lag,
     process_candle,
@@ -55,9 +54,9 @@ def _make_strategy(position=1.0, instrument="BTCUSDT") -> StrategyBar:
 @pytest.mark.unit
 def test_process_candle_produces_pnl_rows():
     state_prod = AnchorState()
-    state_prod.update(
+    state_prod.set(
         "strat_prod_1",
-        AnchorRecord(anchor_pnl=0.0, anchor_price=93100.0, anchor_position=1.0),
+        AnchorRecord(pnl=0.0, price=93100.0, position=1.0),
     )
     candle = _make_candle(open=93200.0)
     strategies = [_make_strategy(position=1.0)]
@@ -100,7 +99,7 @@ def test_process_candle_always_emits_price_row():
     candle = _make_candle()
     strategies = [_make_strategy()]
     state_prod = AnchorState()
-    state_prod.update("strat_prod_1", AnchorRecord(anchor_pnl=0.0, anchor_price=93100.0, anchor_position=1.0))
+    state_prod.set("strat_prod_1", AnchorRecord(pnl=0.0, price=93100.0, position=1.0))
 
     with (
         patch(f"{_MOD}.fetch_strategies_for_candle", return_value=strategies),
@@ -181,9 +180,9 @@ def test_process_candle_produces_pnl_real_trade_rows():
     execution_ts = 02:06. Candle tick at 02:06 — revision is active.
     """
     state_real_trade = AnchorState()
-    state_real_trade.update(
+    state_real_trade.set(
         "strat_rt_1",
-        AnchorRecord(anchor_pnl=0.0, anchor_price=93100.0, anchor_position=1.0),
+        AnchorRecord(pnl=0.0, price=93100.0, position=1.0),
     )
     # candle.ts=02:06, revision_ts=02:05:30 → execution_ts=02:06 <= 02:06 ✓
     candle = _make_candle(open=93200.0, ts=datetime(2026, 4, 26, 2, 6, 0))
@@ -220,9 +219,9 @@ def test_process_candle_revision_not_yet_fired_is_skipped():
     At candle tick 02:05, the revision hasn't fired yet.
     """
     state_real_trade = AnchorState()
-    state_real_trade.update(
+    state_real_trade.set(
         "strat_rt_1",
-        AnchorRecord(anchor_pnl=0.0, anchor_price=93100.0, anchor_position=1.0),
+        AnchorRecord(pnl=0.0, price=93100.0, position=1.0),
     )
     # candle.ts=02:05, execution_ts=02:06 → 02:06 > 02:05, skip
     candle = _make_candle(open=93200.0, ts=datetime(2026, 4, 26, 2, 5, 0))
@@ -252,9 +251,9 @@ def test_process_candle_two_revisions_only_first_active():
     At candle.ts=02:10, only rev1 is active.
     """
     state_real_trade = AnchorState()
-    state_real_trade.update(
+    state_real_trade.set(
         "strat_rt_1",
-        AnchorRecord(anchor_pnl=0.0, anchor_price=93100.0, anchor_position=0.0),
+        AnchorRecord(pnl=0.0, price=93100.0, position=0.0),
     )
     candle = _make_candle(open=93200.0, ts=datetime(2026, 4, 26, 2, 10, 0))
     rev1 = _make_revision(
@@ -290,9 +289,9 @@ def test_process_candle_two_revisions_both_active_last_wins():
     At candle.ts=02:33, rev2 supersedes rev1 — emit position=0.0.
     """
     state_real_trade = AnchorState()
-    state_real_trade.update(
+    state_real_trade.set(
         "strat_rt_1",
-        AnchorRecord(anchor_pnl=0.0, anchor_price=93100.0, anchor_position=1.0),
+        AnchorRecord(pnl=0.0, price=93100.0, position=1.0),
     )
     candle = _make_candle(open=93200.0, ts=datetime(2026, 4, 26, 2, 33, 0))
     rev1 = _make_revision(
@@ -321,11 +320,11 @@ def test_process_candle_two_revisions_both_active_last_wins():
 
 @pytest.mark.unit
 def test_process_candle_produces_pnl_bt_rows():
-    """BT rows are anchor-chained via state_bt, not raw cumulative_pnl from bar."""
+    """BT rows are chained via state_bt, not raw cumulative_pnl from bar."""
     state_prod = AnchorState()
     state_real_trade = AnchorState()
     state_bt = AnchorState()
-    state_bt.update("strat_bt_1", AnchorRecord(anchor_pnl=0.05, anchor_price=93100.0, anchor_position=1.0))
+    state_bt.set("strat_bt_1", AnchorRecord(pnl=0.05, price=93100.0, position=1.0))
     candle = _make_candle(open=93200.0)
     bt_bar = _make_bt_bar(cumulative_pnl=99.0)  # raw value must be ignored
 
@@ -341,13 +340,13 @@ def test_process_candle_produces_pnl_bt_rows():
     row = bt_rows[0]
     assert row["strategy_table_name"] == "strat_bt_1"
     assert row["source"] == "backtest"
-    # Anchor-chained: 0.05 + 1.0 * (93200 - 93100) / 93100 ≈ 0.0511
+    # Chained: 0.05 + 1.0 * (93200 - 93100) / 93100 ≈ 0.0511
     assert abs(row["cumulative_pnl"] - (0.05 + 100.0 / 93100.0)) < 1e-6
 
 
 @pytest.mark.unit
 def test_process_candle_bt_lazy_seeds_anchor_when_missing():
-    """bt row is skipped when no anchor exists and lazy-seed also fails."""
+    """bt row is skipped when no state exists and lazy-seed also fails."""
     state_bt = AnchorState()
     candle = _make_candle(open=93200.0)
     bt_bar = _make_bt_bar(cumulative_pnl=0.05)
@@ -361,15 +360,15 @@ def test_process_candle_bt_lazy_seeds_anchor_when_missing():
         rows = process_candle(candle, AnchorState(), AnchorState(), state_bt)
 
     bt_rows = [r for r in rows if r.get("_sink") == "pnl_bt"]
-    assert bt_rows == []  # skipped — no anchor, lazy-seed returned None
+    assert bt_rows == []  # skipped — no state, lazy-seed returned None
 
 
 @pytest.mark.unit
 def test_process_candle_lazy_seeds_anchor_when_missing():
-    """When anchor is absent, fetch_anchor_for_strategy is called and PnL row is emitted."""
+    """When state is absent, fetch_anchor_for_strategy is called and PnL row is emitted."""
     candle = _make_candle(open=93200.0)
     strategies = [_make_strategy(position=1.0)]
-    seeded_anchor = AnchorRecord(anchor_pnl=0.0, anchor_price=93100.0, anchor_position=1.0)
+    seeded_anchor = AnchorRecord(pnl=0.0, price=93100.0, position=1.0)
 
     with (
         patch(f"{_MOD}.fetch_strategies_for_candle", return_value=strategies),
@@ -468,11 +467,7 @@ def test_flush_clears_all_batches_after_insert():
 
 @pytest.mark.unit
 def test_bootstrap_anchors_seeds_prod_and_real_trade():
-    """Bootstrap seeds anchors by re-verifying the last 3 days of stored rows."""
-    # The new bootstrap calls _recompute_and_verify per table, which issues two queries:
-    # 1. Seed query (ts < now - 3d): returns the pre-window anchor.
-    # 2. Window query (ts >= now - 3d): returns the rows to re-walk and verify.
-    # We return empty for the seed query and a single consistent row for the window query.
+    """Bootstrap seeds state by re-verifying the last 3 days of stored rows."""
     prod_window = [
         {
             "strategy_table_name": "strat_prod_1",
@@ -496,7 +491,6 @@ def test_bootstrap_anchors_seeds_prod_and_real_trade():
     state_bt = AnchorState()
 
     def mock_query(sql):
-        # Seed query uses "< now()" — return empty (no pre-window anchor).
         if "< now()" in sql:
             return []
         if "strategy_pnl_1min_prod_v2" in sql:
@@ -508,92 +502,10 @@ def test_bootstrap_anchors_seeds_prod_and_real_trade():
     with patch("pnl_consumer.pnl_consumer.query_dicts", side_effect=mock_query):
         _bootstrap_anchors(state_prod, state_real_trade, state_bt)
 
-    assert state_prod.get("strat_prod_1").anchor_price == 93000.0
-    assert state_real_trade.get("strat_rt_1").anchor_price == 92000.0
+    assert state_prod.get("strat_prod_1").price == 93000.0
+    assert state_real_trade.get("strat_rt_1").price == 92000.0
     assert len(state_prod) == 1
     assert len(state_real_trade) == 1
-
-
-@pytest.mark.unit
-def test_flush_and_reseed_reseeds_anchors_from_clickhouse_after_flush():
-    """After a backfill overwrites ClickHouse data, the next flush must re-read
-    anchor state from ClickHouse when the ClickHouse row is strictly newer than
-    the in-memory anchor_ts."""
-    consumer = MagicMock()
-    state_prod = AnchorState()
-    state_real_trade = AnchorState()
-    # Seed with an older anchor_ts so reseed (with a newer ts) will overwrite.
-    state_prod.update(
-        "strat_prod_1",
-        AnchorRecord(
-            anchor_pnl=0.0,
-            anchor_price=50000.0,
-            anchor_position=1.0,
-            anchor_ts=datetime(2026, 4, 26, 0, 0, 0),
-        ),
-    )
-
-    # Window rows: a single row consistent with itself (no pre-window seed → accepted as chain start).
-    fresh_window = [
-        {
-            "strategy_table_name": "strat_prod_1",
-            "cumulative_pnl": 0.5,
-            "price": 95000.0,
-            "position": 1.0,
-            "ts": datetime(2026, 4, 26, 1, 0, 0),
-        }
-    ]
-
-    def mock_query(sql):
-        if "< now()" in sql:
-            return []
-        if "strategy_pnl_1min_prod_v2" in sql:
-            return fresh_window
-        return []
-
-    with (
-        patch("pnl_consumer.pnl_consumer.insert_rows"),
-        patch("pnl_consumer.pnl_consumer.query_dicts", side_effect=mock_query),
-    ):
-        _flush_and_reseed(
-            consumer, [["row"]], [], [], [], state_prod, state_real_trade, AnchorState()
-        )
-
-    assert state_prod.get("strat_prod_1").anchor_price == 95000.0
-    assert state_prod.get("strat_prod_1").anchor_pnl == 0.5
-
-
-@pytest.mark.unit
-def test_flush_and_reseed_reseeds_even_when_batches_empty():
-    """Reseed happens on every flush, not just when there were rows to write."""
-    consumer = MagicMock()
-    state_prod = AnchorState()
-    state_real_trade = AnchorState()
-
-    fresh_window = [
-        {
-            "strategy_table_name": "strat_prod_1",
-            "cumulative_pnl": 0.9,
-            "price": 96000.0,
-            "position": -1.0,
-            "ts": datetime(2026, 4, 26, 2, 0, 0),
-        }
-    ]
-
-    def mock_query(sql):
-        if "< now()" in sql:
-            return []
-        if "strategy_pnl_1min_prod_v2" in sql:
-            return fresh_window
-        return []
-
-    with (
-        patch("pnl_consumer.pnl_consumer.insert_rows"),
-        patch("pnl_consumer.pnl_consumer.query_dicts", side_effect=mock_query),
-    ):
-        _flush_and_reseed(consumer, [], [], [], [], state_prod, state_real_trade, AnchorState())
-
-    assert state_prod.get("strat_prod_1").anchor_price == 96000.0
 
 
 # --- _recompute_and_verify tests ---
@@ -602,18 +514,14 @@ def test_flush_and_reseed_reseeds_even_when_batches_empty():
 @pytest.mark.unit
 def test_recompute_and_verify_passes_when_values_consistent():
     """Rows where recomputed PnL matches stored PnL must not raise."""
-    # seed: anchor_pnl=0.0, anchor_price=100.0 at t0
     seed_rows = [
         {
             "strategy_table_name": "s1",
-            "anchor_pnl": 0.0,
-            "anchor_price": 100.0,
-            "anchor_position": 1.0,
-            "anchor_ts": datetime(2026, 4, 25, 0, 0, 0),
+            "pnl": 0.0,
+            "price": 100.0,
+            "position": 1.0,
         }
     ]
-    # window: s1 at t1=101.0 → pnl = 0.0 + 1.0*(101-100)/100 = 0.01
-    #          s1 at t2=102.0 → pnl = 0.01 + 1.0*(102-101)/101 ≈ 0.01990...
     t1_pnl = 0.0 + 1.0 * (101.0 - 100.0) / 100.0
     t2_pnl = t1_pnl + 1.0 * (102.0 - 101.0) / 101.0
     window_rows = [
@@ -621,10 +529,7 @@ def test_recompute_and_verify_passes_when_values_consistent():
         {"strategy_table_name": "s1", "ts": datetime(2026, 4, 26, 0, 2, 0), "cumulative_pnl": t2_pnl, "price": 102.0, "position": 1.0},
     ]
 
-    call_count = [0]
-
     def mock_query(sql):
-        call_count[0] += 1
         if "< now()" in sql:
             return seed_rows
         return window_rows
@@ -634,8 +539,8 @@ def test_recompute_and_verify_passes_when_values_consistent():
         count = _recompute_and_verify("analytics.strategy_pnl_1min_prod_v2", state)
 
     assert count == 1
-    assert state.get("s1").anchor_price == 102.0
-    assert state.get("s1").anchor_pnl == pytest.approx(t2_pnl)
+    assert state.get("s1").price == 102.0
+    assert state.get("s1").pnl == pytest.approx(t2_pnl)
 
 
 @pytest.mark.unit
@@ -644,13 +549,11 @@ def test_recompute_and_verify_crashes_on_mismatch():
     seed_rows = [
         {
             "strategy_table_name": "s1",
-            "anchor_pnl": 0.0,
-            "anchor_price": 100.0,
-            "anchor_position": 1.0,
-            "anchor_ts": datetime(2026, 4, 25, 0, 0, 0),
+            "pnl": 0.0,
+            "price": 100.0,
+            "position": 1.0,
         }
     ]
-    # Stored value is wrong: should be 0.01 but says 0.99
     window_rows = [
         {"strategy_table_name": "s1", "ts": datetime(2026, 4, 26, 0, 1, 0), "cumulative_pnl": 0.99, "price": 101.0, "position": 1.0},
     ]
@@ -675,7 +578,7 @@ def test_recompute_and_verify_accepts_chain_start_when_no_seed():
 
     def mock_query(sql):
         if "< now()" in sql:
-            return []  # no pre-window seed
+            return []
         return window_rows
 
     state = AnchorState()
@@ -683,8 +586,8 @@ def test_recompute_and_verify_accepts_chain_start_when_no_seed():
         count = _recompute_and_verify("analytics.strategy_pnl_1min_prod_v2", state)
 
     assert count == 1
-    assert state.get("s1").anchor_pnl == 0.5
-    assert state.get("s1").anchor_price == 101.0
+    assert state.get("s1").pnl == 0.5
+    assert state.get("s1").price == 101.0
 
 
 @pytest.mark.unit
@@ -705,8 +608,8 @@ def test_recompute_and_verify_returns_zero_when_window_empty():
 def test_recompute_and_verify_handles_multiple_strategies_independently():
     """Two strategies with different seeds must be chained independently."""
     seed_rows = [
-        {"strategy_table_name": "s1", "anchor_pnl": 0.0, "anchor_price": 100.0, "anchor_position": 1.0, "anchor_ts": datetime(2026, 4, 25, 0, 0, 0)},
-        {"strategy_table_name": "s2", "anchor_pnl": 0.1, "anchor_price": 200.0, "anchor_position": -1.0, "anchor_ts": datetime(2026, 4, 25, 0, 0, 0)},
+        {"strategy_table_name": "s1", "pnl": 0.0, "price": 100.0, "position": 1.0},
+        {"strategy_table_name": "s2", "pnl": 0.1, "price": 200.0, "position": -1.0},
     ]
     s1_pnl = 0.0 + 1.0 * (101.0 - 100.0) / 100.0
     s2_pnl = 0.1 + (-1.0) * (201.0 - 200.0) / 200.0
@@ -725,8 +628,8 @@ def test_recompute_and_verify_handles_multiple_strategies_independently():
         count = _recompute_and_verify("analytics.strategy_pnl_1min_prod_v2", state)
 
     assert count == 2
-    assert state.get("s1").anchor_price == 101.0
-    assert state.get("s2").anchor_price == 201.0
+    assert state.get("s1").price == 101.0
+    assert state.get("s2").price == 201.0
 
 
 @pytest.mark.unit
@@ -849,9 +752,9 @@ def test_sink_config_enables_all_sinks():
 def test_process_candle_respects_sink_config_prod_disabled():
     """When prod sink is disabled, no pnl_prod rows are emitted."""
     state_prod = AnchorState()
-    state_prod.update(
+    state_prod.set(
         "strat_prod_1",
-        AnchorRecord(anchor_pnl=0.0, anchor_price=93100.0, anchor_position=1.0),
+        AnchorRecord(pnl=0.0, price=93100.0, position=1.0),
     )
     candle = _make_candle(open=93200.0)
     strategies = [_make_strategy(position=1.0)]
@@ -888,7 +791,7 @@ def test_process_candle_respects_sink_config_price_disabled():
 def test_process_candle_respects_sink_config_bt_disabled():
     """When bt sink is disabled, no pnl_bt rows are emitted."""
     state_bt = AnchorState()
-    state_bt.update("strat_bt_1", AnchorRecord(anchor_pnl=0.0, anchor_price=93100.0, anchor_position=1.0))
+    state_bt.set("strat_bt_1", AnchorRecord(pnl=0.0, price=93100.0, position=1.0))
     candle = _make_candle(open=93200.0)
     bt_bar = _make_bt_bar()
     cfg = SinkConfig(price=True, prod=False, real_trade=False, bt=False)
@@ -907,9 +810,9 @@ def test_process_candle_respects_sink_config_bt_disabled():
 def test_process_candle_no_sink_config_defaults_to_all_enabled():
     """Calling process_candle without cfg uses backward-compatible all-enabled behaviour."""
     state_prod = AnchorState()
-    state_prod.update(
+    state_prod.set(
         "strat_prod_1",
-        AnchorRecord(anchor_pnl=0.0, anchor_price=93100.0, anchor_position=1.0),
+        AnchorRecord(pnl=0.0, price=93100.0, position=1.0),
     )
     candle = _make_candle(open=93200.0)
     strategies = [_make_strategy(position=1.0)]
@@ -946,7 +849,6 @@ def test_bootstrap_anchors_skipped_when_no_pnl_sinks_enabled():
 def test_bootstrap_anchors_runs_when_any_pnl_sink_enabled():
     """Bootstrap must run when at least one PnL sink is enabled."""
     cfg = SinkConfig(price=True, prod=True, real_trade=False, bt=False)
-    # Window row: single consistent row; no pre-window seed (empty seed query).
     prod_window = [{
         "strategy_table_name": "s1",
         "cumulative_pnl": 0.1,
@@ -966,7 +868,7 @@ def test_bootstrap_anchors_runs_when_any_pnl_sink_enabled():
     with patch("pnl_consumer.pnl_consumer.query_dicts", side_effect=mock_query):
         _bootstrap_anchors(state_prod, AnchorState(), AnchorState(), cfg)
 
-    assert state_prod.get("s1").anchor_price == 93000.0
+    assert state_prod.get("s1").price == 93000.0
 
 
 @pytest.mark.unit
@@ -1002,20 +904,17 @@ def test_peek_reference_ts_returns_min_ts_across_partitions():
 
     mock_consumer = MagicMock()
 
-    # Two partitions, committed offsets 5 and 10
     tp0 = MagicMock()
     tp0.partition = 0
     tp0.offset = 5
     tp1 = MagicMock()
     tp1.partition = 1
     tp1.offset = 10
-    # Mock list_topics to return a metadata object with 2 partitions (0 and 1)
     meta_mock = MagicMock()
     meta_mock.topics = {"binance.price.ticks": MagicMock(partitions={0: MagicMock(), 1: MagicMock()})}
     mock_consumer.list_topics.return_value = meta_mock
     mock_consumer.committed.return_value = [tp0, tp1]
 
-    # get_watermark_offsets not needed (offsets are valid)
     ts0 = datetime(2026, 5, 4, 10, 0, 0)
     ts1 = datetime(2026, 5, 4, 11, 0, 0)
 
@@ -1051,12 +950,12 @@ def test_peek_reference_ts_falls_back_to_high_watermark_when_no_committed_offset
 
     tp0 = MagicMock()
     tp0.partition = 0
-    tp0.offset = OFFSET_INVALID  # no committed offset
+    tp0.offset = OFFSET_INVALID
     meta_mock = MagicMock()
     meta_mock.topics = {"binance.price.ticks": MagicMock(partitions={0: MagicMock()})}
     mock_consumer.list_topics.return_value = meta_mock
     mock_consumer.committed.return_value = [tp0]
-    mock_consumer.get_watermark_offsets.return_value = (0, 42)  # low=0, high=42
+    mock_consumer.get_watermark_offsets.return_value = (0, 42)
 
     ts0 = datetime(2026, 5, 4, 10, 0, 0)
     msg0 = MagicMock()
@@ -1071,7 +970,6 @@ def test_peek_reference_ts_falls_back_to_high_watermark_when_no_committed_offset
         result = peek_reference_ts(_MOCK_BROKERS, _MOCK_GROUP)
 
     assert result == ts0
-    # Should have seeked to high watermark - 1 = 41
     mock_consumer.seek.assert_called_once()
     seek_tp = mock_consumer.seek.call_args[0][0]
     assert seek_tp.offset == 41
@@ -1090,7 +988,7 @@ def test_peek_reference_ts_returns_none_when_no_messages():
     meta_mock.topics = {"binance.price.ticks": MagicMock(partitions={0: MagicMock()})}
     mock_consumer.list_topics.return_value = meta_mock
     mock_consumer.committed.return_value = [tp0]
-    mock_consumer.poll.return_value = None  # timeout, no message
+    mock_consumer.poll.return_value = None
 
     with patch(f"{_MOD}.Consumer", return_value=mock_consumer):
         result = peek_reference_ts(_MOCK_BROKERS, _MOCK_GROUP)
@@ -1112,10 +1010,8 @@ def test_recompute_and_verify_uses_reference_ts_in_sql():
         _recompute_and_verify("analytics.strategy_pnl_1min_prod_v2", AnchorState(), reference_ts=ref_ts)
 
     assert len(captured_sqls) == 2
-    # Seed query: ts < reference_ts - 3 days = 2026-04-28 12:00:00
     assert "2026-04-28" in captured_sqls[0]
     assert "< now()" not in captured_sqls[0]
-    # Window query: ts >= reference_ts - 3 days AND ts <= reference_ts
     assert "2026-04-28" in captured_sqls[1]
     assert "2026-05-01" in captured_sqls[1]
     assert ">= now()" not in captured_sqls[1]

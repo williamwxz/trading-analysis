@@ -49,7 +49,10 @@ class SinkConfig:
         )
 
 
-FLUSH_EVERY = 10
+# Row count threshold across all batches before flushing to ClickHouse.
+# With ~695 strategies per candle, set well above one candle's worth so we
+# actually batch multiple candles before writing.
+FLUSH_EVERY = 1000
 TOPIC = "binance.price.ticks"
 _DEFAULT_GROUP_ID = "flink-pnl-consumer"
 
@@ -188,28 +191,28 @@ def process_candle(
         )
 
     def _compute_pnl_with_lazy_seed(
-        state: AnchorState, strategy_table_name: str, close_price: float, position: float
+        state: AnchorState, strategy_table_name: str, price: float, position: float
     ) -> float | None:
-        """Compute PnL; lazy-seed anchor from ClickHouse if missing. Returns None to skip."""
+        """Compute PnL; lazy-seed from ClickHouse if strategy is missing. Returns None to skip."""
         try:
-            return state.compute_pnl(strategy_table_name, close_price, position)
+            return state.compute_pnl(strategy_table_name, price, position)
         except RuntimeError:
             anchor = fetch_anchor_for_strategy(strategy_table_name)
             if anchor is None:
                 logger.warning(
-                    "No anchor found for strategy '%s' — skipping PnL row for ts=%s",
+                    "No state found for strategy '%s' — skipping PnL row for ts=%s",
                     strategy_table_name,
                     candle.ts,
                 )
                 return None
             logger.info(
-                "Lazy-seeded anchor for strategy '%s' from ClickHouse (pnl=%.4f, price=%.2f)",
+                "Lazy-seeded state for strategy '%s' from ClickHouse (pnl=%.4f, price=%.2f)",
                 strategy_table_name,
-                anchor.anchor_pnl,
-                anchor.anchor_price,
+                anchor.pnl,
+                anchor.price,
             )
-            state.update(strategy_table_name, anchor)
-            return state.compute_pnl(strategy_table_name, close_price, position)
+            state.set(strategy_table_name, anchor)
+            return state.compute_pnl(strategy_table_name, price, position)
 
     # --- prod ---
     if cfg.prod:
@@ -259,7 +262,7 @@ def process_candle(
                 active_revisions[rev.strategy_table_name] = rev  # last one wins (ASC order)
 
         # Carry forward strategies that had no bar in this candle's lookback window.
-        # This prevents the "Strategy Count Over Time" from dropping when strategy_output_history_v2
+        # This prevents the strategy count from dropping when strategy_output_history_v2
         # has a gap — the last known position continues to hold.
         if last_real_trade_revisions is not None:
             for stn, prev_rev in last_real_trade_revisions.items():
@@ -346,12 +349,12 @@ def _recompute_and_verify(
 ) -> int:
     """Re-walk the last _COLD_START_DAYS of PnL rows and verify they match ClickHouse.
 
-    For each strategy, fetches the anchor row just before the 3-day window, then walks
-    every stored minute in chronological order re-applying the anchor-chain formula.
-    Crashes if any recomputed value deviates from the stored value by more than
-    _PNL_TOLERANCE — this catches silent drift between the consumer and a manual backfill.
+    For each strategy, fetches the last row just before the 3-day window as the
+    starting point, then walks every stored minute in chronological order
+    re-applying the PnL formula. Crashes if any recomputed value deviates from
+    the stored value by more than _PNL_TOLERANCE.
 
-    Returns the number of strategies seeded.
+    Returns the number of strategies seeded into state.
     """
     if reference_ts is not None:
         window_start = reference_ts - timedelta(days=_COLD_START_DAYS)
@@ -363,14 +366,12 @@ def _recompute_and_verify(
         seed_clause = f"ts < now() - INTERVAL {_COLD_START_DAYS} DAY"
         window_clause = f"ts >= now() - INTERVAL {_COLD_START_DAYS} DAY"
 
-    # Fetch the per-strategy anchor at the start of the 3-day window (latest row before it).
     seed_sql = f"""\
 SELECT
     strategy_table_name,
-    cumulative_pnl  AS anchor_pnl,
-    price           AS anchor_price,
-    position        AS anchor_position,
-    ts              AS anchor_ts
+    cumulative_pnl  AS pnl,
+    price,
+    position
 FROM {table} FINAL
 WHERE {seed_clause}
 ORDER BY strategy_table_name, ts DESC, updated_at DESC
@@ -379,13 +380,11 @@ LIMIT 1 BY strategy_table_name
     seeds: dict[str, AnchorRecord] = {}
     for row in query_dicts(seed_sql):
         seeds[row["strategy_table_name"]] = AnchorRecord(
-            anchor_pnl=row["anchor_pnl"],
-            anchor_price=row["anchor_price"],
-            anchor_position=row["anchor_position"],
-            anchor_ts=row["anchor_ts"],
+            pnl=row["pnl"],
+            price=row["price"],
+            position=row["position"],
         )
 
-    # Fetch all rows in the 3-day window, ordered chronologically per strategy.
     window_sql = f"""\
 SELECT
     strategy_table_name,
@@ -402,9 +401,8 @@ ORDER BY strategy_table_name, ts ASC, updated_at DESC
         logger.warning("Cold-start verify: no rows in 3-day window for %s — skipping", table)
         return 0
 
-    # Re-walk the anchor chain per strategy and compare against stored values.
     mismatches: list[str] = []
-    anchors: dict[str, AnchorRecord] = dict(seeds)
+    prev: dict[str, AnchorRecord] = dict(seeds)
 
     for row in rows:
         stn = row["strategy_table_name"]
@@ -413,21 +411,13 @@ ORDER BY strategy_table_name, ts ASC, updated_at DESC
         position: float = row["position"]
         ts = row["ts"]
 
-        anchor = anchors.get(stn)
-        if anchor is None or anchor.anchor_price == 0.0:
-            # No seed before the window — accept stored value as the chain start.
-            anchors[stn] = AnchorRecord(
-                anchor_pnl=stored_pnl,
-                anchor_price=price,
-                anchor_position=position,
-                anchor_ts=ts,
-            )
+        if stn not in prev:
+            # No row before the window — accept stored value as the chain start.
+            prev[stn] = AnchorRecord(pnl=stored_pnl, price=price, position=position)
             continue
 
-        recomputed = (
-            anchor.anchor_pnl
-            + position * (price - anchor.anchor_price) / anchor.anchor_price
-        )
+        p = prev[stn]
+        recomputed = p.pnl + position * (price - p.price) / p.price
         deviation = abs(recomputed - stored_pnl)
         if deviation > _PNL_TOLERANCE:
             mismatches.append(
@@ -435,13 +425,8 @@ ORDER BY strategy_table_name, ts ASC, updated_at DESC
                 f"delta={deviation:.2e}"
             )
 
-        # Advance anchor regardless — use the stored value to stay in sync with ClickHouse.
-        anchors[stn] = AnchorRecord(
-            anchor_pnl=stored_pnl,
-            anchor_price=price,
-            anchor_position=position,
-            anchor_ts=ts,
-        )
+        # Advance using stored value to stay in sync with ClickHouse.
+        prev[stn] = AnchorRecord(pnl=stored_pnl, price=price, position=position)
 
     if mismatches:
         detail = "\n  ".join(mismatches[:20])
@@ -452,15 +437,13 @@ ORDER BY strategy_table_name, ts ASC, updated_at DESC
             "Run a Dagster backfill to reconcile ClickHouse before restarting."
         )
 
-    # Seed anchors from the last recomputed row per strategy.
     seeded = 0
-    for stn, anchor in anchors.items():
-        if anchor.anchor_ts is not None:
-            state.update_if_newer(stn, anchor)
-            seeded += 1
+    for stn, record in prev.items():
+        state.set(stn, record)
+        seeded += 1
 
     logger.info(
-        "Cold-start verify passed for %s: walked %d row(s), seeded %d strategy anchor(s)",
+        "Cold-start verify passed for %s: walked %d row(s), seeded %d strategy state(s)",
         table,
         len(rows),
         seeded,
@@ -475,12 +458,11 @@ def _bootstrap_anchors(
     cfg: SinkConfig | None = None,
     reference_ts: "datetime | None" = None,
 ) -> None:
-    """On cold start, seed anchor states from ClickHouse for enabled PnL sinks.
+    """On cold start, seed running state from ClickHouse for enabled PnL sinks.
 
-    Fetches the last _COLD_START_DAYS of stored PnL rows relative to reference_ts
-    (defaults to now() when None), re-walks the anchor chain, and crashes if any
-    stored value deviates from the recomputed value — ensuring the consumer never
-    silently diverges from a manual backfill.
+    Re-walks the last _COLD_START_DAYS of stored rows and crashes if any stored
+    value deviates from the recomputed value — ensuring the consumer never starts
+    on top of inconsistent data.
     """
     if cfg is not None and not any([cfg.prod, cfg.real_trade, cfg.bt]):
         logger.info("No PnL sinks enabled — skipping anchor bootstrap")
@@ -496,17 +478,15 @@ def _bootstrap_anchors(
             continue
         _recompute_and_verify(table, state, reference_ts=reference_ts)
 
-    enabled_states = [
-        (state, enabled) for _, state, enabled in candidates if enabled
-    ]
-    if all(len(state) == 0 for state, _ in enabled_states):
+    enabled_states = [state for _, state, enabled in candidates if enabled]
+    if all(len(s) == 0 for s in enabled_states):
         raise RuntimeError(
-            "Bootstrap failed: no anchor rows found in ClickHouse within the last "
+            "Bootstrap failed: no rows found in ClickHouse within the last "
             f"{_COLD_START_DAYS} days. "
             "Cannot start consumer without a valid PnL baseline."
         )
     logger.info(
-        "Bootstrapped %d prod, %d real_trade, %d bt anchor(s) from ClickHouse",
+        "Bootstrapped %d prod, %d real_trade, %d bt strategy state(s) from ClickHouse",
         len(state_prod),
         len(state_real_trade),
         len(state_bt),
@@ -576,27 +556,6 @@ def _flush(
             raise
 
 
-def _flush_and_reseed(
-    consumer: Consumer,
-    price_batch: list[list],
-    pnl_prod_batch: list[list],
-    pnl_real_trade_batch: list[list],
-    pnl_bt_batch: list[list],
-    state_prod: AnchorState,
-    state_real_trade: AnchorState,
-    state_bt: AnchorState,
-    cfg: SinkConfig | None = None,
-) -> None:
-    """Flush batches then re-seed anchor state from ClickHouse.
-
-    Re-seeding after every flush means a manual backfill that overwrites
-    ClickHouse rows is picked up within one flush cycle (~10 candles) rather
-    than requiring a consumer restart.
-    """
-    _flush(consumer, price_batch, pnl_prod_batch, pnl_real_trade_batch, pnl_bt_batch)
-    _bootstrap_anchors(state_prod, state_real_trade, state_bt, cfg)
-
-
 def run() -> None:
     logging.basicConfig(level=logging.INFO)
 
@@ -655,7 +614,6 @@ def run() -> None:
             logger.exception("Error during shutdown flush")
         consumer.close()
         sys.exit(0)
-
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
@@ -729,16 +687,12 @@ def run() -> None:
                 n_prod = len(pnl_prod_batch)
                 n_rt = len(pnl_real_trade_batch)
                 n_bt = len(pnl_bt_batch)
-                _flush_and_reseed(
+                _flush(
                     consumer,
                     price_batch,
                     pnl_prod_batch,
                     pnl_real_trade_batch,
                     pnl_bt_batch,
-                    state_prod,
-                    state_real_trade,
-                    state_bt,
-                    sink_cfg,
                 )
                 emit_candle_lag(candle.ts, cw_client, sink_label)
                 logger.info(

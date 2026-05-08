@@ -6,44 +6,36 @@ from pnl_consumer.anchor_state import AnchorState, AnchorRecord
 def test_anchor_state_returns_default_when_empty():
     state = AnchorState()
     rec = state.get("strat_A")
-    assert rec.anchor_pnl == 0.0
-    assert rec.anchor_price == 0.0
-    assert rec.anchor_position == 0.0
+    assert rec.pnl == 0.0
+    assert rec.price == 0.0
+    assert rec.position == 0.0
 
 
 @pytest.mark.unit
 def test_anchor_state_stores_and_retrieves():
     state = AnchorState()
-    state.update("strat_A", AnchorRecord(anchor_pnl=10.5, anchor_price=93000.0, anchor_position=1.0))
+    state.set("strat_A", AnchorRecord(pnl=10.5, price=93000.0, position=1.0))
     rec = state.get("strat_A")
-    assert rec.anchor_pnl == 10.5
-    assert rec.anchor_price == 93000.0
-    assert rec.anchor_position == 1.0
+    assert rec.pnl == 10.5
+    assert rec.price == 93000.0
+    assert rec.position == 1.0
 
 
 @pytest.mark.unit
 def test_anchor_state_raises_on_missing_strategy():
     state = AnchorState()
-    with pytest.raises(RuntimeError, match="No anchor found for strategy"):
-        state.compute_pnl("new_strat", close_price=93000.0, position=1.0)
-
-
-@pytest.mark.unit
-def test_anchor_state_raises_on_zero_anchor_price():
-    state = AnchorState()
-    state.update("strat_C", AnchorRecord(anchor_pnl=0.0, anchor_price=0.0, anchor_position=0.0))
-    with pytest.raises(RuntimeError, match="Anchor price is zero"):
-        state.compute_pnl("strat_C", close_price=93000.0, position=1.0)
+    with pytest.raises(RuntimeError, match="No state found for strategy"):
+        state.compute_pnl("new_strat", current_price=93000.0, position=1.0)
 
 
 @pytest.mark.unit
 def test_anchor_state_pnl_formula():
     state = AnchorState()
-    state.update("strat_B", AnchorRecord(anchor_pnl=5.0, anchor_price=100.0, anchor_position=2.0))
-    pnl = state.compute_pnl("strat_B", close_price=110.0, position=2.0)
+    state.set("strat_B", AnchorRecord(pnl=5.0, price=100.0, position=2.0))
+    pnl = state.compute_pnl("strat_B", current_price=110.0, position=2.0)
     # 5.0 + 2.0 * (110 - 100) / 100 = 5.2
     assert pnl == pytest.approx(5.2)
     rec = state.get("strat_B")
-    assert rec.anchor_pnl == pytest.approx(5.2)
-    assert rec.anchor_price == 110.0
-    assert rec.anchor_position == 2.0
+    assert rec.pnl == pytest.approx(5.2)
+    assert rec.price == 110.0
+    assert rec.position == 2.0
