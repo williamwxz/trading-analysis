@@ -12,9 +12,11 @@ from confluent_kafka import Consumer, KafkaError, KafkaException, OFFSET_INVALID
 
 from pnl_consumer.anchor_state import AnchorRecord, AnchorState
 from pnl_consumer.ch_lookup import (
+    StrategyBar,
     StrategyRevision,
     fetch_anchor_for_strategy,
     fetch_bt_strategies_for_candle,
+    fetch_last_active_revisions,
     fetch_real_trade_revisions_for_candle,
     fetch_strategies_for_candle,
 )
@@ -246,38 +248,32 @@ def process_candle(
 
     # --- real_trade ---
     if cfg.real_trade:
-        # Revisions are ordered by revision_ts ASC. We find the latest revision whose
-        # execution_ts <= candle.ts — that is the currently-active position for this minute.
-        # Revisions arriving in the future (execution_ts > candle.ts) are not yet active.
         real_trade_revisions = fetch_real_trade_revisions_for_candle(
             candle.instrument, candle.ts
         )
-        # Group by strategy, pick the latest revision that is already active.
-        active_revisions: dict[str, StrategyRevision] = {}
+        # Pick the latest active revision per strategy (revisions are ASC by revision_ts).
+        # A revision is active when execution_ts <= candle.ts.
+        active_revisions: dict[str, tuple[StrategyRevision, datetime]] = {}
         for rev in real_trade_revisions:
             execution_ts = (rev.revision_ts + timedelta(seconds=59)).replace(
                 second=0, microsecond=0
             )
             if execution_ts <= candle.ts:
-                active_revisions[rev.strategy_table_name] = rev  # last one wins (ASC order)
+                active_revisions[rev.strategy_table_name] = (rev, execution_ts)
 
-        # Carry forward strategies that had no bar in this candle's lookback window.
-        # This prevents the strategy count from dropping when strategy_output_history_v2
-        # has a gap — the last known position continues to hold.
+        # Carry forward strategies with no active revision yet (gap in history or
+        # revision not yet fired). Use wall-clock candle.ts as execution_ts placeholder.
         if last_real_trade_revisions is not None:
             for stn, prev_rev in last_real_trade_revisions.items():
                 if stn not in active_revisions:
-                    active_revisions[stn] = prev_rev
+                    active_revisions[stn] = (prev_rev, candle.ts)
 
-        for stn, rev in active_revisions.items():
+        for stn, (rev, execution_ts) in active_revisions.items():
             pnl = _compute_pnl_with_lazy_seed(
                 state_real_trade, stn, candle.open, rev.position
             )
             if pnl is None:
                 continue
-            execution_ts = (rev.revision_ts + timedelta(seconds=59)).replace(
-                second=0, microsecond=0
-            )
             rows.append(
                 {
                     "_sink": "pnl_real_trade",
@@ -303,7 +299,7 @@ def process_candle(
 
         # Update carry-forward state with this candle's active revisions.
         if last_real_trade_revisions is not None:
-            last_real_trade_revisions.update(active_revisions)
+            last_real_trade_revisions.update({stn: rev for stn, (rev, _) in active_revisions.items()})
 
     # --- bt ---
     if cfg.bt:
@@ -579,6 +575,14 @@ def run() -> None:
     state_bt = AnchorState()
     _bootstrap_anchors(state_prod, state_real_trade, state_bt, sink_cfg, reference_ts)
 
+    last_real_trade_revisions: dict[str, StrategyRevision] = {}
+    if sink_cfg.real_trade:
+        last_real_trade_revisions = fetch_last_active_revisions()
+        logger.info(
+            "Seeded last_real_trade_revisions with %d strategies from ClickHouse",
+            len(last_real_trade_revisions),
+        )
+
     cw_client = boto3.client("cloudwatch", region_name=os.environ.get("AWS_REGION", "ap-northeast-1"))
 
     group_id = resolve_group_id()
@@ -598,7 +602,6 @@ def run() -> None:
     pnl_prod_batch: list[list] = []
     pnl_real_trade_batch: list[list] = []
     pnl_bt_batch: list[list] = []
-    last_real_trade_revisions: dict[str, StrategyRevision] = {}
 
     def _shutdown(signum, frame):
         logger.info("Shutdown signal received, flushing and closing")

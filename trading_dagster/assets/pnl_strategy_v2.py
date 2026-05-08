@@ -1,7 +1,7 @@
 """
-PnL Strategy v2 Assets — Daily Backfills
+PnL Strategy v2 Assets — Full Recomputes
 
-Partitioned daily assets for historical PnL backfills (prod, bt, real_trade).
+Unpartitioned assets for full historical PnL recomputes (prod, bt, real_trade).
 Real-time PnL is handled by the pnl_consumer (Kafka → ClickHouse).
 """
 
@@ -32,13 +32,9 @@ from ..utils.pnl_compute import (
     PROD_REAL_TRADE_START_DATE,
     REAL_TRADE_INSERT_COLUMNS,
     TIMEFRAME_MAP,
-    assert_anchors_present,
     compute_bt_pnl,
     compute_real_trade_pnl,
     fetch_anchors,
-    fetch_new_bars_bt,
-    fetch_new_bars_real_trade,
-    fetch_prices,
     fetch_prices_multi,
     iter_compute_prod_pnl,
 )
@@ -691,7 +687,7 @@ def _recompute_pnl_recent(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. Prod PnL (Full Recompute — unpartitioned, sequential anchor chain)
+# 1. Prod PnL (Full Recompute — unpartitioned, sequential anchor chain)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -716,7 +712,7 @@ def pnl_prod_v2_full_asset(context: AssetExecutionContext) -> MaterializeResult:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. Real Trade PnL (Full Recompute — unpartitioned, sequential anchor chain)
+# 2. Real Trade PnL (Full Recompute — unpartitioned, sequential anchor chain)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -744,7 +740,7 @@ def pnl_real_trade_v2_full_asset(context: AssetExecutionContext) -> MaterializeR
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. Backtest PnL (Full Recompute — unpartitioned, sequential anchor chain)
+# 3. Backtest PnL (Full Recompute — unpartitioned, sequential anchor chain)
 # ─────────────────────────────────────────────────────────────────────────────
 
 

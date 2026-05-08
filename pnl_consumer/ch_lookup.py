@@ -6,6 +6,20 @@ from trading_dagster.utils.clickhouse_client import query_dicts
 
 _LOOKBACK = "1 DAY"
 
+# ClickHouse multiIf expression mapping config_timeframe → bar width in minutes.
+_TF_MINUTES_EXPR = """\
+multiIf(
+        h.config_timeframe = '1m',  1,
+        h.config_timeframe = '3m',  3,
+        h.config_timeframe = '5m',  5,
+        h.config_timeframe = '15m', 15,
+        h.config_timeframe = '30m', 30,
+        h.config_timeframe = '1h',  60,
+        h.config_timeframe = '4h',  240,
+        h.config_timeframe = '1d',  1440,
+        5
+    )"""
+
 
 @dataclass
 class StrategyBar:
@@ -35,30 +49,43 @@ class StrategyRevision:
     closing_ts: datetime
 
 
-@dataclass
-class BtStrategyBar:
-    strategy_table_name: str
-    strategy_id: int
-    strategy_name: str
-    underlying: str
-    config_timeframe: str
-    weighting: float
-    position: float
-    final_signal: float
-    benchmark: float
-    cumulative_pnl: float
+def _parse_strategy_bar(row: dict) -> StrategyBar:
+    rj = json.loads(row["row_json"])
+    return StrategyBar(
+        strategy_table_name=row["strategy_table_name"],
+        strategy_id=row["strategy_id"],
+        strategy_name=row["strategy_name"],
+        underlying=row["underlying"],
+        config_timeframe=row["config_timeframe"],
+        weighting=row["weighting"],
+        position=float(rj.get("position", 0.0)),
+        final_signal=float(rj.get("final_signal", 0.0)),
+        benchmark=float(rj.get("benchmark", 0.0)),
+    )
+
+
+def _parse_revision(row: dict) -> StrategyRevision:
+    rj = json.loads(row["row_json"])
+    return StrategyRevision(
+        strategy_table_name=row["strategy_table_name"],
+        strategy_id=row["strategy_id"],
+        strategy_name=row["strategy_name"],
+        underlying=row["underlying"],
+        config_timeframe=row["config_timeframe"],
+        weighting=row["weighting"],
+        position=float(rj.get("position", 0.0)),
+        final_signal=float(rj.get("final_signal", 0.0)),
+        benchmark=float(rj.get("benchmark", 0.0)),
+        revision_ts=row["revision_ts"],
+        closing_ts=row["closing_ts"],
+    )
 
 
 def fetch_strategies_for_candle(
     instrument: str,
     candle_ts: datetime,
 ) -> list[StrategyBar]:
-    """Return latest strategy bar per strategy for instrument at candle_ts.
-
-    Uses LIMIT 1 BY to get the most recent bar per strategy without FINAL.
-    Looks back up to _LOOKBACK to handle gaps in strategy data.
-    """
-    # strategy_output_history_v2 uses short names (BTC, ETH) not BTCUSDT
+    """Return latest strategy bar per strategy for instrument at candle_ts."""
     underlying = instrument.removesuffix("USDT")
     ts_str = candle_ts.strftime("%Y-%m-%d %H:%M:%S")
     sql = f"""\
@@ -81,35 +108,14 @@ GROUP BY
 ORDER BY strategy_table_name, latest_ts DESC
 LIMIT 1 BY strategy_table_name
 """
-    rows = query_dicts(sql)
-    result = []
-    for row in rows:
-        rj = json.loads(row["row_json"])
-        result.append(
-            StrategyBar(
-                strategy_table_name=row["strategy_table_name"],
-                strategy_id=row["strategy_id"],
-                strategy_name=row["strategy_name"],
-                underlying=row["underlying"],
-                config_timeframe=row["config_timeframe"],
-                weighting=row["weighting"],
-                position=float(rj.get("position", 0.0)),
-                final_signal=float(rj.get("final_signal", 0.0)),
-                benchmark=float(rj.get("benchmark", 0.0)),
-            )
-        )
-    return result
+    return [_parse_strategy_bar(r) for r in query_dicts(sql)]
 
 
 def fetch_bt_strategies_for_candle(
     instrument: str,
     candle_ts: datetime,
-) -> list[BtStrategyBar]:
-    """Return latest bt strategy bar per strategy for instrument at candle_ts.
-
-    cumulative_pnl is extracted from row_json — no anchor-chain computation needed.
-    Falls back to the most recent bar within _LOOKBACK when the strategy service lags.
-    """
+) -> list[StrategyBar]:
+    """Return latest bt strategy bar per strategy for instrument at candle_ts."""
     underlying = instrument.removesuffix("USDT")
     ts_str = candle_ts.strftime("%Y-%m-%d %H:%M:%S")
     sql = f"""\
@@ -132,25 +138,7 @@ GROUP BY
 ORDER BY strategy_table_name, latest_ts DESC
 LIMIT 1 BY strategy_table_name
 """
-    rows = query_dicts(sql)
-    result = []
-    for row in rows:
-        rj = json.loads(row["row_json"])
-        result.append(
-            BtStrategyBar(
-                strategy_table_name=row["strategy_table_name"],
-                strategy_id=row["strategy_id"],
-                strategy_name=row["strategy_name"],
-                underlying=row["underlying"],
-                config_timeframe=row["config_timeframe"],
-                weighting=row["weighting"],
-                position=float(rj.get("position", 0.0)),
-                final_signal=float(rj.get("final_signal", 0.0)),
-                benchmark=float(rj.get("benchmark", 0.0)),
-                cumulative_pnl=float(rj.get("cumulative_pnl", 0.0)),
-            )
-        )
-    return result
+    return [_parse_strategy_bar(r) for r in query_dicts(sql)]
 
 
 def fetch_anchor_for_strategy(strategy_table_name: str) -> "AnchorRecord | None":
@@ -167,10 +155,7 @@ def fetch_anchor_for_strategy(strategy_table_name: str) -> "AnchorRecord | None"
         "analytics.strategy_pnl_1min_bt_v2",
     ):
         sql = f"""\
-SELECT
-    cumulative_pnl  AS anchor_pnl,
-    price           AS anchor_price,
-    position        AS anchor_position
+SELECT cumulative_pnl AS pnl, price, position
 FROM {table}
 WHERE strategy_table_name = '{strategy_table_name}'
   AND ts >= now() - INTERVAL 48 HOUR
@@ -180,12 +165,52 @@ LIMIT 1
         rows = query_dicts(sql)
         if rows:
             r = rows[0]
-            return AnchorRecord(
-                pnl=r["anchor_pnl"],
-                price=r["anchor_price"],
-                position=r["anchor_position"],
-            )
+            return AnchorRecord(pnl=r["pnl"], price=r["price"], position=r["position"])
     return None
+
+
+def fetch_last_active_revisions() -> "dict[str, StrategyRevision]":
+    """Return the last active revision per strategy as of now, across all underlyings.
+
+    Used at cold-start to seed last_real_trade_revisions so carry-forward works
+    from the first candle — strategies whose revision hasn't fired yet still hold
+    their previous bar's position.
+    """
+    sql = f"""\
+WITH latest AS (
+    SELECT
+        strategy_table_name,
+        config_timeframe,
+        max(ts) AS latest_ts
+    FROM analytics.strategy_output_history_v2
+    WHERE ts <= now()
+      AND ts >= now() - INTERVAL {_LOOKBACK}
+    GROUP BY strategy_table_name, config_timeframe
+)
+SELECT
+    h.strategy_table_name,
+    h.strategy_id,
+    h.strategy_name,
+    h.underlying,
+    h.config_timeframe,
+    h.weighting,
+    h.revision_ts,
+    h.ts + toIntervalMinute({_TF_MINUTES_EXPR}) AS closing_ts,
+    h.row_json
+FROM analytics.strategy_output_history_v2 h
+JOIN latest l
+  ON h.strategy_table_name = l.strategy_table_name
+ AND h.config_timeframe = l.config_timeframe
+ AND h.ts = l.latest_ts
+WHERE toStartOfMinute(h.revision_ts + INTERVAL 59 SECOND) <= now()
+ORDER BY h.strategy_table_name, h.revision_ts
+LIMIT 1 BY h.strategy_table_name, h.config_timeframe, h.revision_ts
+"""
+    result: dict[str, StrategyRevision] = {}
+    for row in query_dicts(sql):
+        # last one wins (rows ordered ASC by revision_ts — last is most recent active)
+        result[row["strategy_table_name"]] = _parse_revision(row)
+    return result
 
 
 def fetch_real_trade_revisions_for_candle(
@@ -194,11 +219,8 @@ def fetch_real_trade_revisions_for_candle(
 ) -> list[StrategyRevision]:
     """Return all revisions for the most recent real_trade bar per strategy at or before candle_ts.
 
-    Falls back to the most recent bar within _LOOKBACK when the strategy service lags.
-    All revisions for the latest bar are returned — no acceptance filtering here.
-    The caller (process_candle) filters by execution_ts <= candle_ts to determine
-    which revisions are active for the current minute.
-    Revisions are ordered by revision_ts ASC (earliest position update first).
+    All revisions for the latest bar are returned ordered by revision_ts ASC.
+    The caller filters by execution_ts <= candle_ts to find the active revision.
     """
     underlying = instrument.removesuffix("USDT")
     ts_str = candle_ts.strftime("%Y-%m-%d %H:%M:%S")
@@ -222,17 +244,7 @@ SELECT
     h.config_timeframe,
     h.weighting,
     h.revision_ts,
-    h.ts + toIntervalMinute(multiIf(
-        h.config_timeframe = '1m',  1,
-        h.config_timeframe = '3m',  3,
-        h.config_timeframe = '5m',  5,
-        h.config_timeframe = '15m', 15,
-        h.config_timeframe = '30m', 30,
-        h.config_timeframe = '1h',  60,
-        h.config_timeframe = '4h',  240,
-        h.config_timeframe = '1d',  1440,
-        5
-    )) AS closing_ts,
+    h.ts + toIntervalMinute({_TF_MINUTES_EXPR}) AS closing_ts,
     h.row_json
 FROM analytics.strategy_output_history_v2 h
 JOIN latest l
@@ -243,23 +255,4 @@ WHERE h.underlying = '{underlying}'
 ORDER BY h.strategy_table_name, h.revision_ts
 LIMIT 1 BY h.strategy_table_name, h.config_timeframe, h.revision_ts
 """
-    rows = query_dicts(sql)
-    result = []
-    for row in rows:
-        rj = json.loads(row["row_json"])
-        result.append(
-            StrategyRevision(
-                strategy_table_name=row["strategy_table_name"],
-                strategy_id=row["strategy_id"],
-                strategy_name=row["strategy_name"],
-                underlying=row["underlying"],
-                config_timeframe=row["config_timeframe"],
-                weighting=row["weighting"],
-                position=float(rj.get("position", 0.0)),
-                final_signal=float(rj.get("final_signal", 0.0)),
-                benchmark=float(rj.get("benchmark", 0.0)),
-                revision_ts=row["revision_ts"],
-                closing_ts=row["closing_ts"],
-            )
-        )
-    return result
+    return [_parse_revision(r) for r in query_dicts(sql)]

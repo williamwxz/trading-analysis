@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from pnl_consumer.anchor_state import AnchorRecord, AnchorState
-from pnl_consumer.ch_lookup import BtStrategyBar, StrategyBar, StrategyRevision
+from pnl_consumer.ch_lookup import StrategyBar, StrategyRevision
 from pnl_consumer.pnl_consumer import (
     _bootstrap_anchors,
     _flush,
@@ -157,8 +157,8 @@ def _make_revision(
     )
 
 
-def _make_bt_bar(cumulative_pnl=0.05) -> BtStrategyBar:
-    return BtStrategyBar(
+def _make_bt_bar() -> StrategyBar:
+    return StrategyBar(
         strategy_table_name="strat_bt_1",
         strategy_id=2,
         strategy_name="bt_momentum",
@@ -168,7 +168,6 @@ def _make_bt_bar(cumulative_pnl=0.05) -> BtStrategyBar:
         position=1.0,
         final_signal=1.0,
         benchmark=0.0,
-        cumulative_pnl=cumulative_pnl,
     )
 
 
@@ -320,13 +319,13 @@ def test_process_candle_two_revisions_both_active_last_wins():
 
 @pytest.mark.unit
 def test_process_candle_produces_pnl_bt_rows():
-    """BT rows are chained via state_bt, not raw cumulative_pnl from bar."""
+    """BT rows are chained via state_bt — raw cumulative_pnl from row_json is not used."""
     state_prod = AnchorState()
     state_real_trade = AnchorState()
     state_bt = AnchorState()
     state_bt.set("strat_bt_1", AnchorRecord(pnl=0.05, price=93100.0, position=1.0))
     candle = _make_candle(open=93200.0)
-    bt_bar = _make_bt_bar(cumulative_pnl=99.0)  # raw value must be ignored
+    bt_bar = _make_bt_bar()
 
     with (
         patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[]),
@@ -349,7 +348,7 @@ def test_process_candle_bt_lazy_seeds_anchor_when_missing():
     """bt row is skipped when no state exists and lazy-seed also fails."""
     state_bt = AnchorState()
     candle = _make_candle(open=93200.0)
-    bt_bar = _make_bt_bar(cumulative_pnl=0.05)
+    bt_bar = _make_bt_bar()
 
     with (
         patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[]),
@@ -885,6 +884,126 @@ def test_resolve_group_id_returns_default_when_env_not_set():
 def test_resolve_group_id_uses_os_environ_by_default(monkeypatch):
     monkeypatch.setenv("KAFKA_GROUP_ID", "env-group")
     assert resolve_group_id() == "env-group"
+
+
+# --- fetch_last_active_revisions tests ---
+
+
+@pytest.mark.unit
+def test_fetch_last_active_revisions_returns_dict_keyed_by_strategy():
+    """Returns one StrategyRevision per strategy_table_name, last revision wins."""
+    from pnl_consumer.ch_lookup import fetch_last_active_revisions
+
+    rows = [
+        {
+            "strategy_table_name": "strat_rt_1",
+            "strategy_id": 1,
+            "strategy_name": "momentum",
+            "underlying": "BTC",
+            "config_timeframe": "1h",
+            "weighting": 1.0,
+            "revision_ts": datetime(2026, 4, 26, 2, 5, 30),
+            "closing_ts": datetime(2026, 4, 26, 2, 0, 0),
+            "row_json": json.dumps({"position": 1.0, "final_signal": 1.0, "benchmark": 0.0}),
+        },
+        {
+            "strategy_table_name": "strat_rt_2",
+            "strategy_id": 2,
+            "strategy_name": "mean_rev",
+            "underlying": "ETH",
+            "config_timeframe": "1h",
+            "weighting": 0.5,
+            "revision_ts": datetime(2026, 4, 26, 3, 10, 0),
+            "closing_ts": datetime(2026, 4, 26, 3, 0, 0),
+            "row_json": json.dumps({"position": -1.0, "final_signal": -1.0, "benchmark": 0.0}),
+        },
+    ]
+
+    with patch("pnl_consumer.ch_lookup.query_dicts", return_value=rows):
+        result = fetch_last_active_revisions()
+
+    assert set(result.keys()) == {"strat_rt_1", "strat_rt_2"}
+    assert result["strat_rt_1"].position == 1.0
+    assert result["strat_rt_2"].position == -1.0
+    assert result["strat_rt_1"].revision_ts == datetime(2026, 4, 26, 2, 5, 30)
+
+
+@pytest.mark.unit
+def test_fetch_last_active_revisions_last_revision_wins_for_same_strategy():
+    """When the same strategy appears twice (two revisions), the last one wins."""
+    from pnl_consumer.ch_lookup import fetch_last_active_revisions
+
+    rows = [
+        {
+            "strategy_table_name": "strat_rt_1",
+            "strategy_id": 1,
+            "strategy_name": "momentum",
+            "underlying": "BTC",
+            "config_timeframe": "1h",
+            "weighting": 1.0,
+            "revision_ts": datetime(2026, 4, 26, 2, 5, 0),
+            "closing_ts": datetime(2026, 4, 26, 2, 0, 0),
+            "row_json": json.dumps({"position": 1.0, "final_signal": 1.0, "benchmark": 0.0}),
+        },
+        {
+            "strategy_table_name": "strat_rt_1",
+            "strategy_id": 1,
+            "strategy_name": "momentum",
+            "underlying": "BTC",
+            "config_timeframe": "1h",
+            "weighting": 1.0,
+            "revision_ts": datetime(2026, 4, 26, 2, 32, 0),
+            "closing_ts": datetime(2026, 4, 26, 2, 0, 0),
+            "row_json": json.dumps({"position": 0.0, "final_signal": 0.0, "benchmark": 0.0}),
+        },
+    ]
+
+    with patch("pnl_consumer.ch_lookup.query_dicts", return_value=rows):
+        result = fetch_last_active_revisions()
+
+    assert result["strat_rt_1"].position == 0.0  # last revision wins
+
+
+@pytest.mark.unit
+def test_process_candle_uses_seeded_carry_forward_before_first_revision_fires():
+    """Strategies seeded in last_real_trade_revisions are carried forward even when
+    no revision has fired yet at the current candle — preventing a gap in PnL rows.
+
+    Scenario: bar 01:00 closes at 02:00, revision arrives at 02:05:30 (exec=02:06).
+    At candle.ts=02:00, no revision is active yet. But last_real_trade_revisions
+    holds the previous bar's revision (position=1.0) so a row is still emitted.
+    """
+    state_real_trade = AnchorState()
+    state_real_trade.set(
+        "strat_rt_1",
+        AnchorRecord(pnl=0.0, price=93100.0, position=1.0),
+    )
+    candle = _make_candle(open=93200.0, ts=datetime(2026, 4, 26, 2, 0, 0))
+    # Revision hasn't fired yet at 02:00 (exec=02:06)
+    pending_revision = _make_revision(
+        position=1.0,
+        revision_ts=datetime(2026, 4, 26, 2, 5, 30),
+        closing_ts=datetime(2026, 4, 26, 2, 0, 0),
+    )
+    # Seed carry-forward with the previous bar's active revision (position=1.0)
+    prev_revision = _make_revision(
+        position=1.0,
+        revision_ts=datetime(2026, 4, 26, 1, 0, 0),
+        closing_ts=datetime(2026, 4, 26, 1, 0, 0),
+    )
+    last_rt = {"strat_rt_1": prev_revision}
+    cfg = SinkConfig(price=False, prod=False, real_trade=True, bt=False)
+
+    with (
+        patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[]),
+        patch(f"{_MOD}.fetch_real_trade_revisions_for_candle", return_value=[pending_revision]),
+        patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=[]),
+    ):
+        rows = process_candle(candle, AnchorState(), state_real_trade, AnchorState(), cfg, last_rt)
+
+    rt_rows = [r for r in rows if r.get("_sink") == "pnl_real_trade"]
+    assert len(rt_rows) == 1
+    assert rt_rows[0]["position"] == 1.0  # carried forward from prev_revision
 
 
 # --- peek_reference_ts tests ---
