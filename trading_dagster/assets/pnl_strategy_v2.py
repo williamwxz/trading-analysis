@@ -15,7 +15,6 @@ import boto3
 
 from dagster import (
     AssetExecutionContext,
-    DailyPartitionsDefinition,
     MaterializeResult,
     asset,
 )
@@ -29,7 +28,6 @@ from ..utils.clickhouse_client import (
     query_scalar,
 )
 from ..utils.pnl_compute import (
-    BT_START_DATE,
     PROD_INSERT_COLUMNS,
     PROD_REAL_TRADE_START_DATE,
     REAL_TRADE_INSERT_COLUMNS,
@@ -44,9 +42,6 @@ from ..utils.pnl_compute import (
     fetch_prices_multi,
     iter_compute_prod_pnl,
 )
-
-daily_partitions = DailyPartitionsDefinition(start_date=PROD_REAL_TRADE_START_DATE)
-bt_daily_partitions = DailyPartitionsDefinition(start_date=BT_START_DATE)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Watermark + discovery helpers
@@ -696,68 +691,6 @@ def _recompute_pnl_recent(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. Production PnL (Daily Backfill)
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-@asset(
-    name="pnl_prod_v2_daily",
-    group_name="strategy_pnl",
-    deps=["binance_futures_backfill"],
-    partitions_def=daily_partitions,
-    compute_kind="clickhouse",
-    op_tags={"dagster/timeout": 300, "dagster/concurrency_limit": "pnl_prod_v2_daily"},
-)
-def pnl_prod_v2_daily_asset(context: AssetExecutionContext) -> MaterializeResult:
-    """Daily partitioned production PnL backfill. Run partitions sequentially — each day reads
-    the previous day's anchor from the target table, so concurrent partition runs will corrupt
-    the chain. Use max_partitions_per_run=1 when triggering a full backfill."""
-    return _refresh_pnl_partitioned(
-        context, "strategy_pnl_1min_prod_v2", "strategy_output_history_v2", "production"
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. Backtest PnL (Daily Backfill)
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-@asset(
-    name="pnl_bt_v2_daily",
-    group_name="strategy_pnl",
-    deps=["binance_futures_backfill"],
-    partitions_def=bt_daily_partitions,
-    compute_kind="clickhouse",
-    op_tags={"dagster/timeout": 300, "dagster/concurrency_limit": "pnl_bt_v2_daily"},
-)
-def pnl_bt_v2_daily_asset(context: AssetExecutionContext) -> MaterializeResult:
-    """Daily partitioned backtest PnL backfill. Anchors chain across day boundaries via
-    fetch_anchors — run partitions sequentially (max_partitions_per_run=1)."""
-    return _refresh_pnl_bt(context)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. Real Trade PnL (Daily Backfill)
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-@asset(
-    name="pnl_real_trade_v2_daily",
-    group_name="strategy_pnl",
-    deps=["binance_futures_backfill"],
-    partitions_def=daily_partitions,
-    compute_kind="clickhouse",
-    op_tags={
-        "dagster/timeout": 300,
-        "dagster/concurrency_limit": "pnl_real_trade_v2_daily",
-    },
-)
-def pnl_real_trade_v2_daily_asset(context: AssetExecutionContext) -> MaterializeResult:
-    """Daily partitioned real trade PnL backfill."""
-    return _refresh_pnl_real_trade(context)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # 4. Prod PnL (Full Recompute — unpartitioned, sequential anchor chain)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -833,186 +766,4 @@ def pnl_bt_v2_full_asset(context: AssetExecutionContext) -> MaterializeResult:
         mode="bt",
         ecs_service="trading-analysis-pnl-consumer-bt",
         ecs_resume_count=0,
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Refresh Logic
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def _refresh_pnl_partitioned(
-    context, target_table: str, source_table: str, label: str
-) -> MaterializeResult:
-    date_str = context.partition_key
-    start_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=UTC)
-    end_dt = start_dt + timedelta(days=1)
-
-    start_ts = start_dt.strftime("%Y-%m-%d %H:%M:%S")
-    end_ts = end_dt.strftime("%Y-%m-%d %H:%M:%S")
-
-    client = get_client()
-    context.log.info(f"Backfilling {label} PnL for {date_str}")
-
-    # Idempotency: Clean partition
-    # Wrap ts in toDateTime() on both sides to handle rows that may have been
-    # inserted with ts as String (type mismatch causes NO_COMMON_TYPE otherwise).
-    execute(
-        f"DELETE FROM analytics.{target_table} WHERE toDateTime(ts) >= toDateTime('{start_ts}') AND toDateTime(ts) < toDateTime('{end_ts}') AND source='{label}'",
-        client,
-    )
-
-    underlyings = _get_underlyings(source_table)
-
-    # Fetch all price data in a single query to avoid N separate scans on
-    # futures_price_1min (one per underlying). extend_minutes=0 because end_ts
-    # is already the exclusive partition boundary — no extra window needed.
-    # (The default extend_minutes=1440 is for the live path where ts_max is the
-    # last bar's open time and we need prices for its full expansion window.)
-    all_prices = fetch_prices_multi(
-        underlyings, start_ts, end_ts, client, extend_minutes=0
-    )
-
-    total_rows = 0
-    for underlying in underlyings:
-        # Fetch bars specifically for this date window
-        sql = f"""\
-        SELECT
-            strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe,
-            argMin(weighting, revision_ts) AS weighting, toString(ts) AS ts_str,
-            JSONExtractFloat(argMin(row_json, revision_ts), 'position') AS position,
-            JSONExtractFloat(argMin(row_json, revision_ts), 'price') AS bar_price,
-            JSONExtractFloat(argMin(row_json, revision_ts), 'final_signal') AS final_signal,
-            JSONExtractFloat(argMin(row_json, revision_ts), 'benchmark') AS bar_benchmark
-        FROM analytics.{source_table}
-        WHERE underlying = '{underlying}'
-          AND ts >= toDateTime('{start_ts}') AND ts < toDateTime('{end_ts}')
-        GROUP BY strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, ts
-        ORDER BY strategy_table_name, ts
-        """
-        rows_dict = query_dicts(sql, client)
-        if not rows_dict:
-            # Free this underlying's price slice even if there are no bars.
-            all_prices.pop(underlying, None)
-            continue
-        # Rename ts_str → ts so downstream compute functions find the expected key
-        for r in rows_dict:
-            r["ts"] = r.pop("ts_str")
-
-        # We still need anchors from the end of the previous day
-        anchors = fetch_anchors(target_table, underlying)
-        assert_anchors_present(anchors, rows_dict, source_table=source_table)
-        # Pop (not get) so this underlying's price dict is freed immediately after
-        # use rather than being held in all_prices for the rest of the loop.
-        prices = all_prices.pop(underlying, {})
-
-        # Insert per-strategy so each strategy's expanded rows are freed after
-        # insert rather than accumulating all strategies in memory at once.
-        for _stn, strategy_rows in iter_compute_prod_pnl(
-            rows_dict, anchors, prices, source_label=label
-        ):
-            _prepare_rows_for_clickhouse(strategy_rows)
-            total_rows += insert_rows(
-                f"analytics.{target_table}", PROD_INSERT_COLUMNS, strategy_rows, client
-            )
-
-        # Explicitly release bars for this underlying before loading the next one.
-        del rows_dict, prices
-
-    return MaterializeResult(
-        metadata={"partition": date_str, "rows_inserted": total_rows}
-    )
-
-
-def _refresh_pnl_bt(context) -> MaterializeResult:
-    target_table = "strategy_pnl_1min_bt_v2"
-    source_table = "strategy_output_history_bt_v2"
-
-    date_str = context.partition_key
-    start_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=UTC)
-    end_dt = start_dt + timedelta(days=1)
-    start_ts = start_dt.strftime("%Y-%m-%d %H:%M:%S")
-    end_ts = end_dt.strftime("%Y-%m-%d %H:%M:%S")
-
-    client = get_client()
-    context.log.info(f"Backfilling backtest PnL for {date_str}")
-
-    execute(
-        f"DELETE FROM analytics.{target_table} "
-        f"WHERE toDateTime(ts) >= toDateTime('{start_ts}') AND toDateTime(ts) < toDateTime('{end_ts}') "
-        f"AND source='backtest'",
-        client,
-    )
-
-    underlyings = _get_underlyings(source_table)
-
-    all_prices = fetch_prices_multi(
-        underlyings, start_ts, end_ts, client, extend_minutes=0
-    )
-
-    total_rows = 0
-    for underlying in underlyings:
-        bars = fetch_new_bars_bt(source_table, underlying, start_ts, ts_end=end_ts)
-        if not bars:
-            all_prices.pop(underlying, None)
-            continue
-
-        anchors = fetch_anchors(target_table, underlying)
-        assert_anchors_present(
-            anchors, bars, source_table=source_table, bar_ts_key="execution_ts"
-        )
-        prices = all_prices.pop(underlying, {})
-        rows = compute_bt_pnl(bars, prices, anchors=anchors)
-        _prepare_rows_for_clickhouse(rows)
-        total_rows += insert_rows(
-            f"analytics.{target_table}", PROD_INSERT_COLUMNS, rows, client
-        )
-        del bars, prices
-
-    return MaterializeResult(
-        metadata={"partition": date_str, "rows_inserted": total_rows}
-    )
-
-
-def _refresh_pnl_real_trade(context) -> MaterializeResult:
-    source_table = "strategy_output_history_v2"
-    target_table = "strategy_pnl_1min_real_trade_v2"
-
-    date_str = context.partition_key
-    start_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=UTC)
-    end_dt = start_dt + timedelta(days=1)
-    start_ts = start_dt.strftime("%Y-%m-%d %H:%M:%S")
-    end_ts = end_dt.strftime("%Y-%m-%d %H:%M:%S")
-
-    client = get_client()
-    execute(
-        f"DELETE FROM analytics.{target_table} "
-        f"WHERE toDateTime(ts) >= toDateTime('{start_ts}') AND toDateTime(ts) < toDateTime('{end_ts}') "
-        f"AND source='real_trade'",
-        client,
-    )
-
-    underlyings = _get_underlyings(source_table)
-    total_rows = 0
-    for underlying in underlyings:
-        bars = fetch_new_bars_real_trade(
-            source_table, underlying, start_ts, ts_end=end_ts
-        )
-        if not bars:
-            continue
-        ts_min = min(b["execution_ts"] for b in bars)
-        ts_max = max(b["execution_ts"] for b in bars)
-        prices = fetch_prices(underlying, ts_min, ts_max, client)
-        anchors = fetch_anchors(target_table, underlying)
-        assert_anchors_present(
-            anchors, bars, source_table=source_table, bar_ts_key="execution_ts"
-        )
-        rows = compute_real_trade_pnl(bars, anchors, prices)
-        _prepare_rows_for_clickhouse(rows)
-        total_rows += insert_rows(
-            f"analytics.{target_table}", REAL_TRADE_INSERT_COLUMNS, rows, client
-        )
-
-    return MaterializeResult(
-        metadata={"partition": date_str, "rows_inserted": total_rows}
     )
