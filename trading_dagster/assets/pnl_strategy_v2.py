@@ -627,16 +627,27 @@ def _recompute_pnl_recent(
 ) -> MaterializeResult:
     """Delete last 3 days from target and recompute, seeded from anchors before the window.
 
+    If the target table is empty (e.g. after a DROP + recreate), expands the window all
+    the way back to PROD_REAL_TRADE_START_DATE so the full history is recomputed.
+
     Pauses the named ECS consumer service before any writes and resumes it in a finally
     block so it always restarts even if the recompute fails.
 
     Pass ecs_resume_count=0 for services that must stay stopped (e.g. pnl-consumer-bt).
     """
-    window_start = (
-        datetime.now(tz=UTC).replace(hour=0, minute=0, second=0, microsecond=0)
-        - timedelta(days=3)
-    )
     end_dt = datetime.now(tz=UTC)
+
+    row_count = query_scalar(f"SELECT count() FROM analytics.{target_table}")
+    if int(row_count or 0) == 0:
+        context.log.info(
+            f"Target table {target_table} is empty — expanding window to {PROD_REAL_TRADE_START_DATE}"
+        )
+        window_start = datetime.strptime(PROD_REAL_TRADE_START_DATE, "%Y-%m-%d").replace(tzinfo=UTC)
+    else:
+        window_start = (
+            datetime.now(tz=UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+            - timedelta(days=3)
+        )
 
     underlyings = _get_underlyings(source_table)
     context.log.info(

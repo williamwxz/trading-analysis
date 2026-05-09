@@ -142,10 +142,12 @@ LIMIT 1 BY strategy_table_name
 
 
 def fetch_anchor_for_strategy(strategy_table_name: str) -> "AnchorRecord | None":
-    """One-shot anchor lookup for a single strategy, searching up to 48 hours back.
+    """One-shot anchor lookup for a single strategy, searching all of history.
 
-    Returns None when no rows exist (brand-new or long-inactive strategy).
-    Used by process_candle to lazy-seed a missing anchor without crashing.
+    Returns None only when the strategy has never appeared in any pnl table —
+    i.e. it is truly brand-new. Long-inactive strategies (last row > 48h ago)
+    are also handled: the most recent row ever is returned so the PnL chain
+    resumes from the correct baseline rather than restarting from zero.
     """
     from pnl_consumer.anchor_state import AnchorRecord
 
@@ -158,7 +160,6 @@ def fetch_anchor_for_strategy(strategy_table_name: str) -> "AnchorRecord | None"
 SELECT cumulative_pnl AS pnl, price, position
 FROM {table}
 WHERE strategy_table_name = '{strategy_table_name}'
-  AND ts >= now() - INTERVAL 48 HOUR
 ORDER BY ts DESC, updated_at DESC
 LIMIT 1
 """

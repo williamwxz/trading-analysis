@@ -201,18 +201,20 @@ def process_candle(
         except RuntimeError:
             anchor = fetch_anchor_for_strategy(strategy_table_name)
             if anchor is None:
-                logger.warning(
-                    "No state found for strategy '%s' — skipping PnL row for ts=%s",
+                anchor = AnchorRecord(pnl=0.0, price=price, position=0.0)
+                logger.info(
+                    "New strategy '%s' — seeding from zero at price=%.4f ts=%s",
                     strategy_table_name,
+                    price,
                     candle.ts,
                 )
-                return None
-            logger.info(
-                "Lazy-seeded state for strategy '%s' from ClickHouse (pnl=%.4f, price=%.2f)",
-                strategy_table_name,
-                anchor.pnl,
-                anchor.price,
-            )
+            else:
+                logger.info(
+                    "Lazy-seeded state for strategy '%s' from ClickHouse (pnl=%.4f, price=%.2f)",
+                    strategy_table_name,
+                    anchor.pnl,
+                    anchor.price,
+                )
             state.set(strategy_table_name, anchor)
             return state.compute_pnl(strategy_table_name, price, position)
 
