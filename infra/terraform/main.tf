@@ -984,6 +984,8 @@ resource "aws_iam_role_policy" "ecs_task_policy" {
           "ecs:StopTask",
           "ecs:DescribeTasks",
           "ecs:ListTasks",
+          "ecs:DescribeServices",
+          "ecs:UpdateService",
         ]
         Resource = "*"
       },
