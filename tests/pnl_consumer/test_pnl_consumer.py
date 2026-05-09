@@ -345,7 +345,7 @@ def test_process_candle_produces_pnl_bt_rows():
 
 @pytest.mark.unit
 def test_process_candle_bt_lazy_seeds_anchor_when_missing():
-    """bt row is skipped when no state exists and lazy-seed also fails."""
+    """bt row is emitted from zero when no state exists and strategy has no history."""
     state_bt = AnchorState()
     candle = _make_candle(open=93200.0)
     bt_bar = _make_bt_bar()
@@ -359,7 +359,9 @@ def test_process_candle_bt_lazy_seeds_anchor_when_missing():
         rows = process_candle(candle, AnchorState(), AnchorState(), state_bt)
 
     bt_rows = [r for r in rows if r.get("_sink") == "pnl_bt"]
-    assert bt_rows == []  # skipped — no state, lazy-seed returned None
+    # Truly new strategy: seeded from zero at candle price, so first minute PnL = 0.
+    assert len(bt_rows) == 1
+    assert bt_rows[0]["cumulative_pnl"] == pytest.approx(0.0)
 
 
 @pytest.mark.unit
@@ -384,8 +386,8 @@ def test_process_candle_lazy_seeds_anchor_when_missing():
 
 
 @pytest.mark.unit
-def test_process_candle_skips_pnl_when_lazy_seed_also_fails():
-    """When fetch_anchor_for_strategy returns None, the PnL row is skipped but price row still emits."""
+def test_process_candle_seeds_from_zero_when_truly_new():
+    """When fetch_anchor_for_strategy returns None, a truly new strategy seeds from zero and emits a row."""
     candle = _make_candle(open=93200.0)
     strategies = [_make_strategy(position=1.0)]
 
@@ -398,7 +400,9 @@ def test_process_candle_skips_pnl_when_lazy_seed_also_fails():
         rows = process_candle(candle, AnchorState(), AnchorState(), AnchorState())
 
     pnl_rows = [r for r in rows if r.get("_sink") == "pnl_prod"]
-    assert pnl_rows == []
+    # New strategy seeded from zero: anchor price = candle price, so first minute PnL = 0.
+    assert len(pnl_rows) == 1
+    assert pnl_rows[0]["cumulative_pnl"] == pytest.approx(0.0)
     price_rows = [r for r in rows if r.get("_sink") == "price"]
     assert len(price_rows) == 1
 
