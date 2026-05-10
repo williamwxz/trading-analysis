@@ -183,3 +183,45 @@ def test_fetch_bt_strategies_parses_position_from_row_json():
         )
     assert bars[0].position == 0.0
     assert bars[0].final_signal == 0.0
+
+
+@pytest.mark.unit
+def test_fetch_strategies_uses_closing_ts_filter():
+    """Prod/bt positions activate at closing_ts (ts + tf_minutes), not ts.
+
+    Verifies the SQL filters on ts + toIntervalMinute(...) <= candle_ts rather than
+    ts <= candle_ts, so a bar opened at T is not used until its bar has closed.
+    """
+    captured_sql = []
+
+    def capture(sql):
+        captured_sql.append(sql)
+        return []
+
+    with patch("pnl_consumer.ch_lookup.query_dicts", side_effect=capture):
+        fetch_strategies_for_candle(
+            instrument="BTCUSDT",
+            candle_ts=datetime(2026, 5, 10, 18, 5, 0),
+        )
+    sql = captured_sql[0]
+    assert "ts + toIntervalMinute" in sql, "must filter on closing_ts, not raw ts"
+    assert "<= '2026-05-10 18:05:00'" in sql
+
+
+@pytest.mark.unit
+def test_fetch_bt_strategies_uses_closing_ts_filter():
+    """Same closing_ts activation invariant for bt candle lookup."""
+    captured_sql = []
+
+    def capture(sql):
+        captured_sql.append(sql)
+        return []
+
+    with patch("pnl_consumer.ch_lookup.query_dicts", side_effect=capture):
+        fetch_bt_strategies_for_candle(
+            instrument="BTCUSDT",
+            candle_ts=datetime(2026, 5, 10, 18, 5, 0),
+        )
+    sql = captured_sql[0]
+    assert "ts + toIntervalMinute" in sql, "must filter on closing_ts, not raw ts"
+    assert "<= '2026-05-10 18:05:00'" in sql

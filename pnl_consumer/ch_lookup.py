@@ -6,7 +6,9 @@ from trading_dagster.utils.clickhouse_client import query_dicts
 
 _LOOKBACK = "1 DAY"
 
-# ClickHouse multiIf expression mapping config_timeframe → bar width in minutes.
+# ClickHouse multiIf expressions mapping config_timeframe → bar width in minutes.
+# _TF_MINUTES_EXPR uses the 'h' alias (for queries with a JOIN on an 'h' table alias).
+# _TF_MINUTES_EXPR_NO_ALIAS uses bare column name (for single-table queries without an alias).
 _TF_MINUTES_EXPR = """\
 multiIf(
         h.config_timeframe = '1m',  1,
@@ -17,6 +19,19 @@ multiIf(
         h.config_timeframe = '1h',  60,
         h.config_timeframe = '4h',  240,
         h.config_timeframe = '1d',  1440,
+        5
+    )"""
+
+_TF_MINUTES_EXPR_NO_ALIAS = """\
+multiIf(
+        config_timeframe = '1m',  1,
+        config_timeframe = '3m',  3,
+        config_timeframe = '5m',  5,
+        config_timeframe = '15m', 15,
+        config_timeframe = '30m', 30,
+        config_timeframe = '1h',  60,
+        config_timeframe = '4h',  240,
+        config_timeframe = '1d',  1440,
         5
     )"""
 
@@ -85,7 +100,12 @@ def fetch_strategies_for_candle(
     instrument: str,
     candle_ts: datetime,
 ) -> list[StrategyBar]:
-    """Return latest strategy bar per strategy for instrument at candle_ts."""
+    """Return latest strategy bar per strategy for instrument at candle_ts.
+
+    A bar's position is active starting at closing_ts (= ts + tf_minutes), matching
+    the Dagster batch path. Filter to bars whose closing_ts <= candle_ts so we never
+    apply a position before the bar has closed.
+    """
     underlying = instrument.removesuffix("USDT")
     ts_str = candle_ts.strftime("%Y-%m-%d %H:%M:%S")
     sql = f"""\
@@ -100,7 +120,7 @@ SELECT
     argMin(row_json, revision_ts) AS row_json
 FROM analytics.strategy_output_history_v2
 WHERE underlying = '{underlying}'
-  AND ts <= '{ts_str}'
+  AND ts + toIntervalMinute({_TF_MINUTES_EXPR_NO_ALIAS}) <= '{ts_str}'
   AND ts >= '{ts_str}'::DateTime - INTERVAL {_LOOKBACK}
 GROUP BY
     strategy_table_name, strategy_id, strategy_name,
@@ -115,7 +135,11 @@ def fetch_bt_strategies_for_candle(
     instrument: str,
     candle_ts: datetime,
 ) -> list[StrategyBar]:
-    """Return latest bt strategy bar per strategy for instrument at candle_ts."""
+    """Return latest bt strategy bar per strategy for instrument at candle_ts.
+
+    Same closing_ts filter as fetch_strategies_for_candle: bt positions activate
+    at ts + tf_minutes, so only include bars whose closing_ts <= candle_ts.
+    """
     underlying = instrument.removesuffix("USDT")
     ts_str = candle_ts.strftime("%Y-%m-%d %H:%M:%S")
     sql = f"""\
@@ -130,7 +154,7 @@ SELECT
     argMin(row_json, revision_ts) AS row_json
 FROM analytics.strategy_output_history_bt_v2
 WHERE underlying = '{underlying}'
-  AND ts <= '{ts_str}'
+  AND ts + toIntervalMinute({_TF_MINUTES_EXPR_NO_ALIAS}) <= '{ts_str}'
   AND ts >= '{ts_str}'::DateTime - INTERVAL {_LOOKBACK}
 GROUP BY
     strategy_table_name, strategy_id, strategy_name,
