@@ -89,7 +89,7 @@
               "mode": 0
             }
           },
-          "hide": true
+          "hide": 2
         },
         {
           "datasource": {
@@ -105,7 +105,7 @@
               "mode": 0
             }
           },
-          "hide": true
+          "hide": 2
         },
         {
           "datasource": {
@@ -115,7 +115,7 @@
           "rawSql": "SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(cumulative_pnl * weighting) WHEN '${mode}' = 'equal' THEN avg(cumulative_pnl) ELSE sum(cumulative_pnl * weighting) / nullIf(sum(weighting), 0) END AS `Real Trade PnL` FROM (SELECT strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, source, version, ts, cumulative_pnl, benchmark, position, price, final_signal, weighting, updated_at FROM (SELECT * FROM analytics.strategy_pnl_1min_real_trade_v2 FINAL WHERE ${__from} >= toUnixTimestamp(now() - INTERVAL 6 HOUR) * 1000 UNION ALL SELECT * FROM analytics.strategy_pnl_1hour_real_trade_v2 FINAL WHERE ${__from} < toUnixTimestamp(now() - INTERVAL 6 HOUR) * 1000)) WHERE (empty('${underlying}') OR `underlying` = '${underlying}') AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
           "refId": "C",
           "format": 1,
-          "hide": true
+          "hide": 2
         }
       ],
       "hide": true
@@ -182,7 +182,7 @@
               "mode": 0
             }
           },
-          "hide": true
+          "hide": 2
         },
         {
           "datasource": {
@@ -198,7 +198,7 @@
               "mode": 0
             }
           },
-          "hide": true
+          "hide": 2
         },
         {
           "datasource": {
@@ -208,7 +208,7 @@
           "rawSql": "SELECT toStartOfMinute(ts) AS time, CASE WHEN '${mode}' = 'raw_weighted' THEN sum(p * weighting) WHEN '${mode}' = 'equal' THEN avg(p) ELSE sum(p * weighting) / nullIf(sum(weighting), 0) END AS `Real Trade PnL` FROM (SELECT ts, strategy_table_name, weighting, cumulative_pnl - first_value(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts) AS p FROM (SELECT strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, source, version, ts, cumulative_pnl, benchmark, position, price, final_signal, weighting, updated_at FROM (SELECT * FROM analytics.strategy_pnl_1min_real_trade_v2 FINAL WHERE ${__from} >= toUnixTimestamp(now() - INTERVAL 6 HOUR) * 1000 UNION ALL SELECT * FROM analytics.strategy_pnl_1hour_real_trade_v2 FINAL WHERE ${__from} < toUnixTimestamp(now() - INTERVAL 6 HOUR) * 1000)) WHERE (empty('${underlying}') OR `underlying` = '${underlying}') AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))) AS rt_data GROUP BY time ORDER BY time",
           "refId": "C",
           "format": 1,
-          "hide": true
+          "hide": 2
         }
       ],
       "hide": true
@@ -272,7 +272,7 @@
               "mode": 0
             }
           },
-          "hide": true
+          "hide": 2
         },
         {
           "datasource": {
@@ -288,7 +288,7 @@
               "mode": 0
             }
           },
-          "hide": true
+          "hide": 2
         },
         {
           "datasource": {
@@ -304,7 +304,7 @@
               "mode": 0
             }
           },
-          "hide": true
+          "hide": 2
         }
       ],
       "hide": true
@@ -366,7 +366,7 @@
               "mode": 0
             }
           },
-          "hide": true
+          "hide": 2
         },
         {
           "datasource": {
@@ -382,7 +382,7 @@
               "mode": 0
             }
           },
-          "hide": true
+          "hide": 2
         },
         {
           "datasource": {
@@ -398,7 +398,7 @@
               "mode": 0
             }
           },
-          "hide": true
+          "hide": 2
         }
       ],
       "hide": true
@@ -474,7 +474,7 @@
               "mode": 0
             }
           },
-          "hide": true
+          "hide": 2
         }
       ]
     }
