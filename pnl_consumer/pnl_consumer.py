@@ -265,9 +265,12 @@ def process_candle(
 
         # Carry forward strategies with no active revision yet (gap in history or
         # revision not yet fired). Use wall-clock candle.ts as execution_ts placeholder.
+        # Only carry forward strategies for this candle's underlying to prevent
+        # cross-underlying price contamination (e.g. DOGE strategies computed with SOL price).
+        candle_underlying = candle.instrument.removesuffix("USDT")
         if last_real_trade_revisions is not None:
             for stn, prev_rev in last_real_trade_revisions.items():
-                if stn not in active_revisions:
+                if stn not in active_revisions and prev_rev.underlying == candle_underlying:
                     active_revisions[stn] = (prev_rev, candle.ts)
 
         for stn, (rev, execution_ts) in active_revisions.items():

@@ -1010,6 +1010,112 @@ def test_process_candle_uses_seeded_carry_forward_before_first_revision_fires():
     assert rt_rows[0]["position"] == 1.0  # carried forward from prev_revision
 
 
+@pytest.mark.unit
+def test_carry_forward_does_not_cross_underlying():
+    """Strategies from a different underlying are NOT carried forward into a candle for another underlying.
+
+    Bug scenario: last_real_trade_revisions contains a DOGE strategy (underlying='DOGE').
+    When a SOL candle fires, the DOGE strategy must NOT be carried forward — doing so
+    would compute DOGE PnL using the SOL candle price, causing catastrophic PnL inflation.
+    """
+    # DOGE strategy seeded with DOGE price anchor
+    state_real_trade = AnchorState()
+    state_real_trade.set(
+        "strat_doge_1",
+        AnchorRecord(pnl=0.003, price=0.108, position=1.0),
+    )
+
+    # SOL candle arrives (price ~93)
+    candle = _make_candle(instrument="SOLUSDT", open=93.0, ts=datetime(2026, 5, 10, 2, 2, 0))
+
+    # DOGE strategy in carry-forward (underlying='DOGE')
+    doge_revision = StrategyRevision(
+        strategy_table_name="strat_doge_1",
+        strategy_id=1,
+        strategy_name="doge_strat",
+        underlying="DOGE",
+        config_timeframe="1h",
+        weighting=1.0,
+        position=1.0,
+        final_signal=1.0,
+        benchmark=0.0,
+        revision_ts=datetime(2026, 5, 10, 1, 10, 0),
+        closing_ts=datetime(2026, 5, 10, 2, 0, 0),
+    )
+    last_rt = {"strat_doge_1": doge_revision}
+    cfg = SinkConfig(price=False, prod=False, real_trade=True, bt=False)
+
+    with (
+        patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[]),
+        patch(f"{_MOD}.fetch_real_trade_revisions_for_candle", return_value=[]),
+        patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=[]),
+    ):
+        rows = process_candle(candle, AnchorState(), state_real_trade, AnchorState(), cfg, last_rt)
+
+    rt_rows = [r for r in rows if r.get("_sink") == "pnl_real_trade"]
+    # DOGE strategy must NOT produce a row when a SOL candle fires
+    assert len(rt_rows) == 0, (
+        f"Cross-underlying carry-forward bug: got {len(rt_rows)} rows for DOGE strategy "
+        f"on SOL candle. PnL would be {rt_rows[0]['cumulative_pnl'] if rt_rows else 'N/A'}"
+    )
+
+
+@pytest.mark.unit
+def test_carry_forward_includes_same_underlying():
+    """Strategies matching the candle's underlying ARE still carried forward."""
+    state_real_trade = AnchorState()
+    state_real_trade.set(
+        "strat_sol_1",
+        AnchorRecord(pnl=0.001, price=92.0, position=1.0),
+    )
+
+    # SOL candle — no active revision yet (pending)
+    candle = _make_candle(instrument="SOLUSDT", open=93.0, ts=datetime(2026, 5, 10, 2, 2, 0))
+
+    sol_revision = StrategyRevision(
+        strategy_table_name="strat_sol_1",
+        strategy_id=2,
+        strategy_name="sol_strat",
+        underlying="SOL",
+        config_timeframe="1h",
+        weighting=1.0,
+        position=1.0,
+        final_signal=1.0,
+        benchmark=0.0,
+        revision_ts=datetime(2026, 5, 10, 1, 10, 0),
+        closing_ts=datetime(2026, 5, 10, 2, 0, 0),
+    )
+    last_rt = {"strat_sol_1": sol_revision}
+    cfg = SinkConfig(price=False, prod=False, real_trade=True, bt=False)
+
+    # Pending revision not yet fired (execution_ts > candle.ts)
+    pending = StrategyRevision(
+        strategy_table_name="strat_sol_1",
+        strategy_id=2,
+        strategy_name="sol_strat",
+        underlying="SOL",
+        config_timeframe="1h",
+        weighting=1.0,
+        position=1.0,
+        final_signal=1.0,
+        benchmark=0.0,
+        revision_ts=datetime(2026, 5, 10, 2, 10, 0),
+        closing_ts=datetime(2026, 5, 10, 3, 0, 0),
+    )
+
+    with (
+        patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[]),
+        patch(f"{_MOD}.fetch_real_trade_revisions_for_candle", return_value=[pending]),
+        patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=[]),
+    ):
+        rows = process_candle(candle, AnchorState(), state_real_trade, AnchorState(), cfg, last_rt)
+
+    rt_rows = [r for r in rows if r.get("_sink") == "pnl_real_trade"]
+    assert len(rt_rows) == 1, "SOL strategy should be carried forward for SOL candle"
+    assert rt_rows[0]["strategy_table_name"] == "strat_sol_1"
+    assert rt_rows[0]["price"] == 93.0
+
+
 # --- peek_reference_ts tests ---
 
 from pnl_consumer.pnl_consumer import peek_reference_ts
