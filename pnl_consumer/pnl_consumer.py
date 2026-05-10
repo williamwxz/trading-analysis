@@ -373,7 +373,7 @@ SELECT
     cumulative_pnl  AS pnl,
     price,
     position
-FROM {table} FINAL
+FROM {table}
 WHERE {seed_clause}
 ORDER BY strategy_table_name, ts DESC, updated_at DESC
 LIMIT 1 BY strategy_table_name
@@ -393,9 +393,10 @@ SELECT
     cumulative_pnl,
     price,
     position
-FROM {table} FINAL
+FROM {table}
 WHERE {window_clause}
 ORDER BY strategy_table_name, ts ASC, updated_at DESC
+LIMIT 1 BY strategy_table_name, ts
 """
     rows = query_dicts(window_sql)
     if not rows:
