@@ -685,7 +685,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "dfjc5vjyfcc8wf"
           },
-          "rawSql": "SELECT $__timeInterval(ts) AS time, argMax(close, ts) AS `Price` FROM analytics.futures_price_1min WHERE instrument = '${underlying_derived}' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
+          "rawSql": "SELECT $__timeInterval(ts) AS time, argMax(close, ts) AS `Price` FROM analytics.futures_price_1min WHERE instrument = '${underlying_derived}USDT' AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time ORDER BY time",
           "refId": "A",
           "format": 1,
           "queryType": "sql",
