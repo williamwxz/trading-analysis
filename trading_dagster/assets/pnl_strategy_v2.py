@@ -797,6 +797,7 @@ def pnl_prod_v2_full_asset(context: AssetExecutionContext) -> MaterializeResult:
         insert_columns=PROD_INSERT_COLUMNS,
         mode="prod",
         ecs_service="trading-analysis-pnl-consumer-prod",
+        ecs_resume_count=0,
     )
 
 
@@ -826,6 +827,7 @@ def pnl_real_trade_v2_full_asset(context: AssetExecutionContext) -> MaterializeR
         mode="real_trade",
         ecs_service="trading-analysis-pnl-consumer-real-trade",
         max_workers=1,
+        ecs_resume_count=0,
     )
 
 
