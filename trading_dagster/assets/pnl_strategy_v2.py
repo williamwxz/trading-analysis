@@ -128,6 +128,13 @@ def _refresh_hour_table(
     )
     _emit(f"[1hour] deleted {hour_table} rows >= hour({window_start_ts})")
 
+    real_trade_cols = ""
+    if "real_trade" in min_table:
+        real_trade_cols = """
+    argMax(closing_ts, minute_ts)   AS closing_ts,
+    argMax(execution_ts, minute_ts) AS execution_ts,
+    false                           AS traded,"""
+
     sql = f"""\
 INSERT INTO analytics.{hour_table}
 SELECT
@@ -140,7 +147,7 @@ SELECT
     argMax(price, minute_ts)           AS price,
     argMax(final_signal, minute_ts)    AS final_signal,
     argMax(weighting, minute_ts)       AS weighting,
-    now()                              AS updated_at
+    now()                              AS updated_at{real_trade_cols}
 FROM (
     SELECT *, ts AS minute_ts
     FROM analytics.{min_table} FINAL
