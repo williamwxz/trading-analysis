@@ -356,17 +356,29 @@ def _process_underlying_recent(
     label: str,
     insert_columns: list,
     mode: str,
-    window_start: datetime,
+    default_window_start: datetime,
     end_dt: datetime,
     log_fn=None,
 ) -> int:
-    """Delete the last 3 days and recompute for one underlying. Returns rows inserted.
+    """Delete from resume point and recompute for one underlying. Returns rows inserted.
 
-    Order: load anchors (before window) → DELETE → recompute [window_start, end_dt).
+    Each underlying independently resumes from its own max(ts) in the target table
+    (stepped back one chunk), or from default_window_start if no data exists.
+
+    Order: compute window_start → load anchors (before window) → DELETE → recompute.
     Designed to run in a thread — owns its own ClickHouse client.
     """
     _emit = log_fn or _log.info
     client = get_client()
+
+    resume_dt = _get_underlying_resume_dt(underlying, target_table, client)
+    if resume_dt is not None:
+        window_start = resume_dt
+        _emit(f"[{underlying}] resuming from max(ts) − {_CHUNK_DAYS}d = {window_start.strftime('%Y-%m-%d %H:%M:%S')}")
+    else:
+        window_start = default_window_start
+        _emit(f"[{underlying}] no existing data — starting from {window_start.strftime('%Y-%m-%d %H:%M:%S')}")
+
     window_start_ts = window_start.strftime("%Y-%m-%d %H:%M:%S")
 
     anchors = fetch_anchors(target_table, underlying, before_ts=window_start)
@@ -558,6 +570,7 @@ def _recompute_pnl_full(
     insert_columns: list,
     mode: str,
     start_date: str | None = None,
+    max_workers: int = _MAX_WORKERS,
 ):
     """Recompute PnL for all underlyings from start_date to now.
 
@@ -576,12 +589,12 @@ def _recompute_pnl_full(
     context.log.info(
         f"Full recompute {label}: {len(underlyings)} underlyings, "
         f"{start_date} → {end_dt.strftime('%Y-%m-%d %H:%M:%S')}, "
-        f"chunk_days={_CHUNK_DAYS}, max_workers={_MAX_WORKERS}"
+        f"chunk_days={_CHUNK_DAYS}, max_workers={max_workers}"
     )
 
     total_rows = 0
 
-    with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
             pool.submit(
                 _process_underlying,
@@ -624,6 +637,7 @@ def _recompute_pnl_recent(
     mode: str,
     ecs_service: str,
     ecs_resume_count: int = 1,
+    max_workers: int = _MAX_WORKERS,
 ) -> MaterializeResult:
     """Delete last 3 days from target and recompute, seeded from anchors before the window.
 
@@ -636,24 +650,15 @@ def _recompute_pnl_recent(
     Pass ecs_resume_count=0 for services that must stay stopped (e.g. pnl-consumer-bt).
     """
     end_dt = datetime.now(tz=UTC)
-
-    row_count = query_scalar(f"SELECT count() FROM analytics.{target_table}")
-    if int(row_count or 0) == 0:
-        context.log.info(
-            f"Target table {target_table} is empty — expanding window to {PROD_REAL_TRADE_START_DATE}"
-        )
-        window_start = datetime.strptime(PROD_REAL_TRADE_START_DATE, "%Y-%m-%d").replace(tzinfo=UTC)
-    else:
-        window_start = (
-            datetime.now(tz=UTC).replace(hour=0, minute=0, second=0, microsecond=0)
-            - timedelta(days=3)
-        )
+    # Each underlying resumes from its own max(ts) via _get_underlying_resume_dt.
+    # default_window_start is used only when an underlying has no data at all.
+    default_window_start = datetime.strptime(PROD_REAL_TRADE_START_DATE, "%Y-%m-%d").replace(tzinfo=UTC)
 
     underlyings = _get_underlyings(source_table)
     context.log.info(
         f"Recent recompute {label}: {len(underlyings)} underlyings, "
-        f"{window_start.strftime('%Y-%m-%d')} → {end_dt.strftime('%Y-%m-%d %H:%M:%S')}, "
-        f"ecs_service={ecs_service}"
+        f"end={end_dt.strftime('%Y-%m-%d %H:%M:%S')}, "
+        f"ecs_service={ecs_service}, max_workers={max_workers}"
     )
 
     ecs = boto3.client("ecs", region_name=_ECS_REGION)
@@ -661,7 +666,7 @@ def _recompute_pnl_recent(
     try:
         _pause_ecs_service(ecs_service, _ECS_CLUSTER, ecs)
         context.log.info(f"Paused ECS service {ecs_service}")
-        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {
                 pool.submit(
                     _process_underlying_recent,
@@ -671,7 +676,7 @@ def _recompute_pnl_recent(
                     label,
                     insert_columns,
                     mode,
-                    window_start,
+                    default_window_start,
                     end_dt,
                     context.log.info,
                 ): underlying
@@ -692,7 +697,7 @@ def _recompute_pnl_recent(
     context.log.info(f"Recent recompute {label} complete: {total_rows:,} total rows inserted")
     return MaterializeResult(metadata={
         "rows_inserted": total_rows,
-        "window_start": window_start.strftime("%Y-%m-%d %H:%M:%S"),
+        "default_window_start": default_window_start.strftime("%Y-%m-%d %H:%M:%S"),
         "end_ts": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
     })
 
@@ -747,6 +752,7 @@ def pnl_real_trade_v2_full_asset(context: AssetExecutionContext) -> MaterializeR
         insert_columns=REAL_TRADE_INSERT_COLUMNS,
         mode="real_trade",
         ecs_service="trading-analysis-pnl-consumer-real-trade",
+        max_workers=1,
     )
 
 

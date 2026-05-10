@@ -1215,7 +1215,7 @@ locals {
       enable_real_trade = "false"
       enable_bt         = "true"
       group_id          = "pnl-consumer-bt"
-      desired_count     = 0
+      desired_count     = 1
     }
   }
 }
