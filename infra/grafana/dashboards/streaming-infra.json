@@ -1,0 +1,1061 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "refresh": "1m",
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 100,
+      "title": "Streaming Throughput",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10
+          },
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "id": 1,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "alias": "published",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {},
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "MessagesPublished",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "A",
+          "region": "ap-northeast-1",
+          "statistic": "Sum"
+        }
+      ],
+      "title": "Messages Published / min (ws-consumer \u2192 Redpanda)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10
+          },
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "id": 2,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "alias": "received",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {},
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "MessagesReceived",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "A",
+          "region": "ap-northeast-1",
+          "statistic": "Sum"
+        }
+      ],
+      "title": "Messages Received / min (Redpanda \u2192 pnl-consumer)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10
+          },
+          "min": 0,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "id": 3,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "alias": "price",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "Sink": "price"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "CandleLagSeconds",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "A",
+          "region": "ap-northeast-1",
+          "statistic": "Maximum"
+        },
+        {
+          "alias": "prod",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "Sink": "prod"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "CandleLagSeconds",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "B",
+          "region": "ap-northeast-1",
+          "statistic": "Maximum"
+        },
+        {
+          "alias": "real_trade",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "Sink": "real-trade"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "CandleLagSeconds",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "C",
+          "region": "ap-northeast-1",
+          "statistic": "Maximum"
+        },
+        {
+          "alias": "bt",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "Sink": "bt"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "CandleLagSeconds",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "D",
+          "region": "ap-northeast-1",
+          "statistic": "Maximum"
+        }
+      ],
+      "title": "Candle Lag by Sink (seconds)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10
+          },
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "alias": "prod",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {},
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "ClickHouseSinkProd",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "A",
+          "region": "ap-northeast-1",
+          "statistic": "Sum"
+        },
+        {
+          "alias": "real_trade",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {},
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "ClickHouseSinkRealTrade",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "B",
+          "region": "ap-northeast-1",
+          "statistic": "Sum"
+        },
+        {
+          "alias": "bt",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {},
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "ClickHouseSinkBt",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "C",
+          "region": "ap-northeast-1",
+          "statistic": "Sum"
+        }
+      ],
+      "title": "ClickHouse Rows Flushed / min by Sink",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      },
+      "id": 101,
+      "title": "ECS Health \u2014 CPU & Memory",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10
+          },
+          "min": 0,
+          "max": 100,
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "alias": "dagster",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-dagster"
+          },
+          "metricName": "CpuUtilized",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "A",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        },
+        {
+          "alias": "redpanda",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-redpanda"
+          },
+          "metricName": "CpuUtilized",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "B",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        },
+        {
+          "alias": "ws-consumer",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-ws-consumer"
+          },
+          "metricName": "CpuUtilized",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "C",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        },
+        {
+          "alias": "pnl-consumer-price",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-pnl-consumer-price"
+          },
+          "metricName": "CpuUtilized",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "D",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        },
+        {
+          "alias": "pnl-consumer-prod",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-pnl-consumer-prod"
+          },
+          "metricName": "CpuUtilized",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "E",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        },
+        {
+          "alias": "pnl-consumer-real-trade",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-pnl-consumer-real-trade"
+          },
+          "metricName": "CpuUtilized",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "F",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        },
+        {
+          "alias": "pnl-consumer-bt",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-pnl-consumer-bt"
+          },
+          "metricName": "CpuUtilized",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "G",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        }
+      ],
+      "title": "CPU Utilization by Service (vCPU units)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10
+          },
+          "min": 0,
+          "unit": "decmbytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "id": 11,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "alias": "dagster",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-dagster"
+          },
+          "metricName": "MemoryUtilized",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "A",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        },
+        {
+          "alias": "redpanda",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-redpanda"
+          },
+          "metricName": "MemoryUtilized",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "B",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        },
+        {
+          "alias": "ws-consumer",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-ws-consumer"
+          },
+          "metricName": "MemoryUtilized",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "C",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        },
+        {
+          "alias": "pnl-consumer-price",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-pnl-consumer-price"
+          },
+          "metricName": "MemoryUtilized",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "D",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        },
+        {
+          "alias": "pnl-consumer-prod",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-pnl-consumer-prod"
+          },
+          "metricName": "MemoryUtilized",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "E",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        },
+        {
+          "alias": "pnl-consumer-real-trade",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-pnl-consumer-real-trade"
+          },
+          "metricName": "MemoryUtilized",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "F",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        },
+        {
+          "alias": "pnl-consumer-bt",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-pnl-consumer-bt"
+          },
+          "metricName": "MemoryUtilized",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "G",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        }
+      ],
+      "title": "Memory Utilized by Service (MiB)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10
+          },
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 23
+      },
+      "id": 12,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "min"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "alias": "dagster",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-dagster"
+          },
+          "metricName": "RunningTaskCount",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "A",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        },
+        {
+          "alias": "redpanda",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-redpanda"
+          },
+          "metricName": "RunningTaskCount",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "B",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        },
+        {
+          "alias": "ws-consumer",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-ws-consumer"
+          },
+          "metricName": "RunningTaskCount",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "C",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        },
+        {
+          "alias": "pnl-consumer-price",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-pnl-consumer-price"
+          },
+          "metricName": "RunningTaskCount",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "D",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        },
+        {
+          "alias": "pnl-consumer-prod",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-pnl-consumer-prod"
+          },
+          "metricName": "RunningTaskCount",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "E",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        },
+        {
+          "alias": "pnl-consumer-real-trade",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-pnl-consumer-real-trade"
+          },
+          "metricName": "RunningTaskCount",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "F",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        },
+        {
+          "alias": "pnl-consumer-bt",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-pnl-consumer-bt"
+          },
+          "metricName": "RunningTaskCount",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "G",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        }
+      ],
+      "title": "Running Task Count by Service",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10
+          },
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 23
+      },
+      "id": 13,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "alias": "pnl-consumer-price",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-pnl-consumer-price"
+          },
+          "metricName": "StoppedTaskCount",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "A",
+          "region": "ap-northeast-1",
+          "statistic": "Sum"
+        },
+        {
+          "alias": "pnl-consumer-prod",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-pnl-consumer-prod"
+          },
+          "metricName": "StoppedTaskCount",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "B",
+          "region": "ap-northeast-1",
+          "statistic": "Sum"
+        },
+        {
+          "alias": "pnl-consumer-real-trade",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-pnl-consumer-real-trade"
+          },
+          "metricName": "StoppedTaskCount",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "C",
+          "region": "ap-northeast-1",
+          "statistic": "Sum"
+        },
+        {
+          "alias": "pnl-consumer-bt",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-pnl-consumer-bt"
+          },
+          "metricName": "StoppedTaskCount",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "D",
+          "region": "ap-northeast-1",
+          "statistic": "Sum"
+        },
+        {
+          "alias": "dagster",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-dagster"
+          },
+          "metricName": "StoppedTaskCount",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "E",
+          "region": "ap-northeast-1",
+          "statistic": "Sum"
+        },
+        {
+          "alias": "ws-consumer",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-ws-consumer"
+          },
+          "metricName": "StoppedTaskCount",
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "F",
+          "region": "ap-northeast-1",
+          "statistic": "Sum"
+        }
+      ],
+      "title": "Stopped Task Count (crash loops)",
+      "type": "timeseries"
+    }
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-3h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "Streaming Infra",
+  "uid": "streaming-infra",
+  "version": 1
+}
