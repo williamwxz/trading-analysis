@@ -636,10 +636,12 @@ def run() -> None:
 
     last_real_trade_revisions: dict[str, StrategyRevision] = {}
     if sink_cfg.real_trade:
-        last_real_trade_revisions = fetch_last_active_revisions()
+        ref = reference_ts if reference_ts is not None else datetime.now(UTC).replace(tzinfo=None)
+        last_real_trade_revisions = fetch_last_active_revisions(ref)
         logger.info(
-            "Seeded last_real_trade_revisions with %d strategies from ClickHouse",
+            "Seeded last_real_trade_revisions with %d strategies from ClickHouse at reference_ts=%s",
             len(last_real_trade_revisions),
+            ref,
         )
 
     cw_client = boto3.client(

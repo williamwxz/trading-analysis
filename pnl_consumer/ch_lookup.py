@@ -194,13 +194,14 @@ LIMIT 1
     return None
 
 
-def fetch_last_active_revisions() -> "dict[str, StrategyRevision]":
-    """Return the last active revision per strategy as of now, across all underlyings.
+def fetch_last_active_revisions(reference_ts: datetime) -> "dict[str, StrategyRevision]":
+    """Return the last active revision per strategy as of reference_ts, across all underlyings.
 
+    Active means execution_ts (= toStartOfMinute(revision_ts + 59s)) <= reference_ts.
     Used at cold-start to seed last_real_trade_revisions so carry-forward works
-    from the first candle — strategies whose revision hasn't fired yet still hold
-    their previous bar's position.
+    from the first candle.
     """
+    ref_str = reference_ts.strftime("%Y-%m-%d %H:%M:%S")
     sql = f"""\
 WITH latest AS (
     SELECT
@@ -208,8 +209,8 @@ WITH latest AS (
         config_timeframe,
         max(ts) AS latest_ts
     FROM analytics.strategy_output_history_v2
-    WHERE ts <= now()
-      AND ts >= now() - INTERVAL {_LOOKBACK}
+    WHERE ts < '{ref_str}'
+      AND ts >= '{ref_str}'::DateTime - INTERVAL {_LOOKBACK}
     GROUP BY strategy_table_name, config_timeframe
 )
 SELECT
@@ -227,7 +228,7 @@ JOIN latest l
   ON h.strategy_table_name = l.strategy_table_name
  AND h.config_timeframe = l.config_timeframe
  AND h.ts = l.latest_ts
-WHERE toStartOfMinute(h.revision_ts + INTERVAL 59 SECOND) <= now()
+WHERE toStartOfMinute(h.revision_ts + INTERVAL 59 SECOND) <= '{ref_str}'
 ORDER BY h.strategy_table_name, h.revision_ts
 LIMIT 1 BY h.strategy_table_name, h.config_timeframe, h.revision_ts
 """
@@ -236,6 +237,8 @@ LIMIT 1 BY h.strategy_table_name, h.config_timeframe, h.revision_ts
         # last one wins (rows ordered ASC by revision_ts — last is most recent active)
         result[row["strategy_table_name"]] = _parse_revision(row)
     return result
+
+
 
 
 def fetch_real_trade_revisions_for_candle(
