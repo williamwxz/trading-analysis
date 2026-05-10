@@ -293,8 +293,8 @@ resource "aws_ecs_task_definition" "dagster" {
   family                   = "${local.name_prefix}-dagster"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = 4096
-  memory                   = 8192
+  cpu                      = 1024
+  memory                   = 2048
   execution_role_arn       = aws_iam_role.ecs_execution.arn
   task_role_arn            = aws_iam_role.ecs_task.arn
 
@@ -423,7 +423,7 @@ resource "aws_ecs_service" "dagster" {
   desired_count   = 1
 
   capacity_provider_strategy {
-    capacity_provider = "FARGATE"
+    capacity_provider = "FARGATE_SPOT"
     weight            = 1
   }
 
@@ -555,54 +555,8 @@ resource "aws_lb_listener" "dagster_http" {
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Security group for interface endpoints (allow HTTPS from ECS tasks)
-resource "aws_security_group" "vpc_endpoints" {
-  name_prefix = "${local.name_prefix}-vpce-"
-  vpc_id      = aws_vpc.main.id
-
-  ingress {
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = [aws_vpc.main.cidr_block]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = local.common_tags
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-# ECR API endpoint (for Docker auth + manifest fetches)
-resource "aws_vpc_endpoint" "ecr_api" {
-  vpc_id              = aws_vpc.main.id
-  service_name        = "com.amazonaws.${var.aws_region}.ecr.api"
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = [aws_subnet.private.id]
-  security_group_ids  = [aws_security_group.vpc_endpoints.id]
-  private_dns_enabled = true
-  tags                = merge(local.common_tags, { Name = "${local.name_prefix}-ecr-api" })
-}
-
-# ECR DKR endpoint (for image layer pulls)
-resource "aws_vpc_endpoint" "ecr_dkr" {
-  vpc_id              = aws_vpc.main.id
-  service_name        = "com.amazonaws.${var.aws_region}.ecr.dkr"
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = [aws_subnet.private.id]
-  security_group_ids  = [aws_security_group.vpc_endpoints.id]
-  private_dns_enabled = true
-  tags                = merge(local.common_tags, { Name = "${local.name_prefix}-ecr-dkr" })
-}
-
 # S3 gateway endpoint (free — ECR layers are stored in S3)
+# ECR image pulls route through the NAT instance instead of Interface endpoints
 resource "aws_vpc_endpoint" "s3" {
   vpc_id            = aws_vpc.main.id
   service_name      = "com.amazonaws.${var.aws_region}.s3"
