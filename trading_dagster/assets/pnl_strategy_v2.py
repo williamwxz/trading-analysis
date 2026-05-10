@@ -133,18 +133,21 @@ INSERT INTO analytics.{hour_table}
 SELECT
     strategy_table_name, strategy_id, strategy_name, underlying,
     config_timeframe, source, version,
-    toStartOfHour(ts)           AS ts,
-    argMax(cumulative_pnl, ts)  AS cumulative_pnl,
-    argMax(benchmark, ts)       AS benchmark,
-    argMax(position, ts)        AS position,
-    argMax(price, ts)           AS price,
-    argMax(final_signal, ts)    AS final_signal,
-    argMax(weighting, ts)       AS weighting,
-    now()                       AS updated_at
-FROM analytics.{min_table} FINAL
-WHERE ts >= toStartOfHour(toDateTime('{window_start_ts}'))
+    toStartOfHour(minute_ts)           AS ts,
+    argMax(cumulative_pnl, minute_ts)  AS cumulative_pnl,
+    argMax(benchmark, minute_ts)       AS benchmark,
+    argMax(position, minute_ts)        AS position,
+    argMax(price, minute_ts)           AS price,
+    argMax(final_signal, minute_ts)    AS final_signal,
+    argMax(weighting, minute_ts)       AS weighting,
+    now()                              AS updated_at
+FROM (
+    SELECT *, ts AS minute_ts
+    FROM analytics.{min_table} FINAL
+    WHERE ts >= toStartOfHour(toDateTime('{window_start_ts}'))
+)
 GROUP BY strategy_table_name, strategy_id, strategy_name, underlying,
-         config_timeframe, source, version, toStartOfHour(ts)
+         config_timeframe, source, version, toStartOfHour(minute_ts)
 """
     execute(sql, client=client)
     _emit(f"[1hour] re-aggregated {hour_table} from {window_start_ts}")
