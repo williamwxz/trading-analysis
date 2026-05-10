@@ -85,6 +85,13 @@ def _prepare_rows_for_clickhouse(rows: list[list]) -> list[list]:
 _ECS_CLUSTER = "trading-analysis"
 _ECS_REGION = "ap-northeast-1"
 
+# Map from 1min target table → its 1hour rollup table.
+_HOUR_TABLE = {
+    "strategy_pnl_1min_prod_v2": "strategy_pnl_1hour_prod_v2",
+    "strategy_pnl_1min_bt_v2": "strategy_pnl_1hour_bt_v2",
+    "strategy_pnl_1min_real_trade_v2": "strategy_pnl_1hour_real_trade_v2",
+}
+
 
 def _pause_ecs_service(service_name: str, cluster: str, boto_client) -> None:
     boto_client.update_service(cluster=cluster, service=service_name, desiredCount=0)
@@ -94,6 +101,53 @@ def _pause_ecs_service(service_name: str, cluster: str, boto_client) -> None:
 
 def _resume_ecs_service(service_name: str, cluster: str, boto_client, desired_count: int = 1) -> None:
     boto_client.update_service(cluster=cluster, service=service_name, desiredCount=desired_count)
+
+
+def _refresh_hour_table(
+    min_table: str,
+    hour_table: str,
+    window_start_ts: str,
+    log_fn=None,
+) -> None:
+    """Re-aggregate 1hour rollup from the 1min table for the recomputed window.
+
+    The Materialized View only fires on INSERT — it cannot fix 1hour rows that
+    were written before the 1min recompute ran. After a recompute we must DELETE
+    stale 1hour rows for the affected window and re-INSERT from the 1min source
+    so the Grafana UNION query sees a consistent level across the ts boundary.
+
+    Uses FINAL on the 1min source to get deduplicated rows after the recompute.
+    """
+    _emit = log_fn or _log.info
+    client = get_client()
+
+    execute(
+        f"ALTER TABLE analytics.{hour_table} DELETE"
+        f" WHERE ts >= toStartOfHour(toDateTime('{window_start_ts}'))",
+        client=client,
+    )
+    _emit(f"[1hour] deleted {hour_table} rows >= hour({window_start_ts})")
+
+    sql = f"""\
+INSERT INTO analytics.{hour_table}
+SELECT
+    strategy_table_name, strategy_id, strategy_name, underlying,
+    config_timeframe, source, version,
+    toStartOfHour(ts)           AS ts,
+    argMax(cumulative_pnl, ts)  AS cumulative_pnl,
+    argMax(benchmark, ts)       AS benchmark,
+    argMax(position, ts)        AS position,
+    argMax(price, ts)           AS price,
+    argMax(final_signal, ts)    AS final_signal,
+    argMax(weighting, ts)       AS weighting,
+    now()                       AS updated_at
+FROM analytics.{min_table} FINAL
+WHERE ts >= toStartOfHour(toDateTime('{window_start_ts}'))
+GROUP BY strategy_table_name, strategy_id, strategy_name, underlying,
+         config_timeframe, source, version, toStartOfHour(ts)
+"""
+    execute(sql, client=client)
+    _emit(f"[1hour] re-aggregated {hour_table} from {window_start_ts}")
 
 
 _CHUNK_DAYS = 7  # process this many days at a time to cap memory per underlying
@@ -359,8 +413,11 @@ def _process_underlying_recent(
     default_window_start: datetime,
     end_dt: datetime,
     log_fn=None,
-) -> int:
-    """Delete from resume point and recompute for one underlying. Returns rows inserted.
+) -> tuple[int, datetime]:
+    """Delete from resume point and recompute for one underlying.
+
+    Returns (rows_inserted, window_start) so the caller can track the earliest
+    recompute boundary across all underlyings for the 1hour rollup refresh.
 
     Each underlying independently resumes from its own max(ts) in the target table
     (stepped back one chunk), or from default_window_start if no data exists.
@@ -559,7 +616,7 @@ ORDER BY r.strategy_table_name, r.ts, r.revision_ts
         chunk_start = chunk_end
 
     _emit(f"[{underlying}] recent recompute complete: {total_rows:,} rows inserted")
-    return total_rows
+    return total_rows, window_start
 
 
 def _recompute_pnl_full(
@@ -663,6 +720,7 @@ def _recompute_pnl_recent(
 
     ecs = boto3.client("ecs", region_name=_ECS_REGION)
     total_rows = 0
+    earliest_window_start: datetime | None = None
     try:
         _pause_ecs_service(ecs_service, _ECS_CLUSTER, ecs)
         context.log.info(f"Paused ECS service {ecs_service}")
@@ -684,9 +742,24 @@ def _recompute_pnl_recent(
             }
             for future in as_completed(futures):
                 underlying = futures[future]
-                rows = future.result()
+                rows, window_start = future.result()
                 total_rows += rows
                 context.log.info(f"[{underlying}] complete: {rows:,} rows inserted")
+                if window_start is not None:
+                    if earliest_window_start is None or window_start < earliest_window_start:
+                        earliest_window_start = window_start
+
+        # Re-aggregate the 1hour rollup table for the recomputed window.
+        # The MV fires on INSERT but cannot fix pre-existing 1hour rows — we must
+        # DELETE and re-INSERT from the now-correct 1min table to avoid a PnL level
+        # jump at the recompute boundary in the Grafana UNION query.
+        hour_table = _HOUR_TABLE.get(target_table)
+        if hour_table and earliest_window_start is not None:
+            window_start_ts = earliest_window_start.strftime("%Y-%m-%d %H:%M:%S")
+            context.log.info(
+                f"Refreshing {hour_table} from {window_start_ts} (earliest recompute boundary)"
+            )
+            _refresh_hour_table(target_table, hour_table, window_start_ts, context.log.info)
     finally:
         try:
             _resume_ecs_service(ecs_service, _ECS_CLUSTER, ecs, desired_count=ecs_resume_count)
