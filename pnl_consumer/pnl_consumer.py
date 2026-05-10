@@ -8,11 +8,16 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import boto3
-from confluent_kafka import Consumer, KafkaError, KafkaException, OFFSET_INVALID, TopicPartition
+from confluent_kafka import (
+    OFFSET_INVALID,
+    Consumer,
+    KafkaError,
+    KafkaException,
+    TopicPartition,
+)
 
 from pnl_consumer.anchor_state import AnchorRecord, AnchorState
 from pnl_consumer.ch_lookup import (
-    StrategyBar,
     StrategyRevision,
     fetch_anchor_for_strategy,
     fetch_bt_strategies_for_candle,
@@ -41,8 +46,10 @@ class SinkConfig:
     def from_env(cls, env: dict[str, str] | None = None) -> "SinkConfig":
         if env is None:
             env = os.environ
+
         def _flag(key: str, default: bool) -> bool:
             return env.get(key, "true" if default else "false").lower() == "true"
+
         return cls(
             price=_flag("ENABLE_PRICE_SINK", True),
             prod=_flag("ENABLE_PROD_SINK", False),
@@ -78,24 +85,27 @@ def peek_reference_ts(
     high-watermark offset when no committed offset exists (first-ever start).
     Returns None if no messages can be read (empty topic or timeout).
     """
-    consumer = Consumer({
-        "bootstrap.servers": brokers,
-        "group.id": group_id,
-        "enable.auto.commit": False,
-    })
+    consumer = Consumer(
+        {
+            "bootstrap.servers": brokers,
+            "group.id": group_id,
+            "enable.auto.commit": False,
+        }
+    )
     try:
         try:
             meta = consumer.list_topics(topic, timeout=timeout)
             if topic in meta.topics:
                 partitions = [
-                    TopicPartition(topic, p)
-                    for p in meta.topics[topic].partitions
+                    TopicPartition(topic, p) for p in meta.topics[topic].partitions
                 ]
             else:
                 logger.warning("peek_reference_ts: topic %s not found", topic)
                 partitions = []
         except Exception:
-            logger.debug("peek_reference_ts: list_topics failed, proceeding with empty partition list")
+            logger.debug(
+                "peek_reference_ts: list_topics failed, proceeding with empty partition list"
+            )
             partitions = []
         committed = consumer.committed(partitions, timeout=timeout)
 
@@ -126,7 +136,9 @@ def peek_reference_ts(
 
         return min(timestamps) if timestamps else None
     except Exception:
-        logger.warning("peek_reference_ts failed — falling back to now()", exc_info=True)
+        logger.warning(
+            "peek_reference_ts failed — falling back to now()", exc_info=True
+        )
         return None
     finally:
         consumer.close()
@@ -270,7 +282,10 @@ def process_candle(
         candle_underlying = candle.instrument.removesuffix("USDT")
         if last_real_trade_revisions is not None:
             for stn, prev_rev in last_real_trade_revisions.items():
-                if stn not in active_revisions and prev_rev.underlying == candle_underlying:
+                if (
+                    stn not in active_revisions
+                    and prev_rev.underlying == candle_underlying
+                ):
                     active_revisions[stn] = (prev_rev, candle.ts)
 
         for stn, (rev, execution_ts) in active_revisions.items():
@@ -304,7 +319,9 @@ def process_candle(
 
         # Update carry-forward state with this candle's active revisions.
         if last_real_trade_revisions is not None:
-            last_real_trade_revisions.update({stn: rev for stn, (rev, _) in active_revisions.items()})
+            last_real_trade_revisions.update(
+                {stn: rev for stn, (rev, _) in active_revisions.items()}
+            )
 
     # --- bt ---
     if cfg.bt:
@@ -340,7 +357,8 @@ def process_candle(
 
 
 _COLD_START_DAYS = 3
-_PNL_TOLERANCE = 1e-6
+_PNL_TOLERANCE = 1e-6  # warn threshold: above this is logged
+_PNL_CRASH_TOLERANCE = 2e-3  # 0.2% — above this indicates real corruption
 
 
 def _recompute_and_verify(
@@ -352,8 +370,14 @@ def _recompute_and_verify(
 
     For each strategy, fetches the last row just before the 3-day window as the
     starting point, then walks every stored minute in chronological order
-    re-applying the PnL formula. Crashes if any recomputed value deviates from
-    the stored value by more than _PNL_TOLERANCE.
+    re-applying the PnL formula.
+
+    Small deviations (> _PNL_TOLERANCE but <= _PNL_CRASH_TOLERANCE) are logged as
+    warnings — expected when a Dagster backfill overwrote consumer rows using
+    futures_price_1min (REST) prices instead of WebSocket prices.
+
+    Large deviations (> _PNL_CRASH_TOLERANCE) crash the consumer — these indicate
+    real corruption that cannot be explained by REST vs WebSocket price drift.
 
     Returns the number of strategies seeded into state.
     """
@@ -400,10 +424,13 @@ LIMIT 1 BY strategy_table_name, ts
 """
     rows = query_dicts(window_sql)
     if not rows:
-        logger.warning("Cold-start verify: no rows in 3-day window for %s — skipping", table)
+        logger.warning(
+            "Cold-start verify: no rows in 3-day window for %s — skipping", table
+        )
         return 0
 
-    mismatches: list[str] = []
+    soft_mismatches: list[str] = []  # small delta — REST vs WebSocket price drift
+    hard_mismatches: list[str] = []  # large delta — likely real corruption
     prev: dict[str, AnchorRecord] = dict(seeds)
 
     for row in rows:
@@ -421,8 +448,13 @@ LIMIT 1 BY strategy_table_name, ts
         p = prev[stn]
         recomputed = p.pnl + position * (price - p.price) / p.price
         deviation = abs(recomputed - stored_pnl)
-        if deviation > _PNL_TOLERANCE:
-            mismatches.append(
+        if deviation > _PNL_CRASH_TOLERANCE:
+            hard_mismatches.append(
+                f"{stn} ts={ts} stored={stored_pnl:.8f} recomputed={recomputed:.8f} "
+                f"delta={deviation:.2e}"
+            )
+        elif deviation > _PNL_TOLERANCE:
+            soft_mismatches.append(
                 f"{stn} ts={ts} stored={stored_pnl:.8f} recomputed={recomputed:.8f} "
                 f"delta={deviation:.2e}"
             )
@@ -430,11 +462,23 @@ LIMIT 1 BY strategy_table_name, ts
         # Advance using stored value to stay in sync with ClickHouse.
         prev[stn] = AnchorRecord(pnl=stored_pnl, price=price, position=position)
 
-    if mismatches:
-        detail = "\n  ".join(mismatches[:20])
+    if soft_mismatches:
+        detail = "\n  ".join(soft_mismatches[:20])
+        logger.warning(
+            "Cold-start PnL verify: %d small mismatch(es) for %s "
+            "(delta <= %.1e — expected REST vs WebSocket price drift from Dagster backfill, "
+            "seeding from stored values):\n  %s",
+            len(soft_mismatches),
+            table,
+            _PNL_CRASH_TOLERANCE,
+            detail,
+        )
+
+    if hard_mismatches:
+        detail = "\n  ".join(hard_mismatches[:20])
         raise RuntimeError(
             f"Cold-start PnL verification failed for {table} "
-            f"({len(mismatches)} mismatch(es)):\n  {detail}\n"
+            f"({len(hard_mismatches)} mismatch(es) exceeding {_PNL_CRASH_TOLERANCE:.1e}):\n  {detail}\n"
             "Consumer cannot start with inconsistent PnL state. "
             "Run a Dagster backfill to reconcile ClickHouse before restarting."
         )
@@ -472,7 +516,11 @@ def _bootstrap_anchors(
 
     candidates = [
         ("analytics.strategy_pnl_1min_prod_v2", state_prod, cfg.prod if cfg else True),
-        ("analytics.strategy_pnl_1min_real_trade_v2", state_real_trade, cfg.real_trade if cfg else True),
+        (
+            "analytics.strategy_pnl_1min_real_trade_v2",
+            state_real_trade,
+            cfg.real_trade if cfg else True,
+        ),
         ("analytics.strategy_pnl_1min_bt_v2", state_bt, cfg.bt if cfg else True),
     ]
     for table, state, enabled in candidates:
@@ -564,7 +612,10 @@ def run() -> None:
     sink_cfg = SinkConfig.from_env()
     logger.info(
         "Sink config: price=%s prod=%s real_trade=%s bt=%s",
-        sink_cfg.price, sink_cfg.prod, sink_cfg.real_trade, sink_cfg.bt,
+        sink_cfg.price,
+        sink_cfg.prod,
+        sink_cfg.real_trade,
+        sink_cfg.bt,
     )
 
     reference_ts = peek_reference_ts(
@@ -572,7 +623,9 @@ def run() -> None:
         resolve_group_id(),
     )
     if reference_ts is not None:
-        logger.info("Cold-start reference_ts from Redpanda committed offset: %s", reference_ts)
+        logger.info(
+            "Cold-start reference_ts from Redpanda committed offset: %s", reference_ts
+        )
     else:
         logger.info("Cold-start reference_ts: no committed offset found, using now()")
 
@@ -589,7 +642,9 @@ def run() -> None:
             len(last_real_trade_revisions),
         )
 
-    cw_client = boto3.client("cloudwatch", region_name=os.environ.get("AWS_REGION", "ap-northeast-1"))
+    cw_client = boto3.client(
+        "cloudwatch", region_name=os.environ.get("AWS_REGION", "ap-northeast-1")
+    )
 
     group_id = resolve_group_id()
     sink_label = group_id.removeprefix("pnl-consumer-") or group_id
@@ -662,7 +717,14 @@ def run() -> None:
                 FLUSH_EVERY,
             )
 
-            for row in process_candle(candle, state_prod, state_real_trade, state_bt, sink_cfg, last_real_trade_revisions):
+            for row in process_candle(
+                candle,
+                state_prod,
+                state_real_trade,
+                state_bt,
+                sink_cfg,
+                last_real_trade_revisions,
+            ):
                 if row["_sink"] == "price":
                     price_batch.append(
                         [
