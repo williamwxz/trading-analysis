@@ -62,7 +62,7 @@ def _prepare_rows_for_clickhouse(rows: list[list]) -> list[list]:
     """Ensure timestamp strings are converted back to datetime objects for clickhouse-connect.
 
     Mutates rows in-place to avoid doubling peak memory for large strategy batches.
-    Handles both PROD_INSERT_COLUMNS (15 cols) and REAL_TRADE_INSERT_COLUMNS (18 cols).
+    Handles both PROD_INSERT_COLUMNS (16 cols) and REAL_TRADE_INSERT_COLUMNS (19 cols).
     """
     for r in rows:
         # ts=7, updated_at=14 in both column layouts
@@ -233,6 +233,7 @@ def _process_underlying(
             sql = f"""\
 SELECT
     strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe,
+    argMin(strategy_instance_id, revision_ts) AS strategy_instance_id,
     argMin(weighting, revision_ts) AS weighting,
     toString(ts) AS ts,
     JSONExtractFloat(argMin(row_json, revision_ts), 'position') AS position,
@@ -250,6 +251,7 @@ ORDER BY strategy_table_name, ts
             sql = f"""\
 SELECT
     strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe,
+    argMin(strategy_instance_id, revision_ts) AS strategy_instance_id,
     argMin(weighting, revision_ts) AS weighting,
     toString(ts) AS ts,
     JSONExtractFloat(argMin(row_json, revision_ts), 'position') AS position,
@@ -270,6 +272,7 @@ ORDER BY strategy_table_name, ts
 SELECT
     r.strategy_table_name,
     r.strategy_id, r.strategy_name, r.underlying, r.config_timeframe, r.weighting,
+    r.strategy_instance_id,
     toString(r.ts) AS ts,
     toString(r.ts + toIntervalMinute({tf_expr})) AS closing_ts,
     toString(toStartOfMinute(r.revision_ts + INTERVAL 59 SECOND)) AS execution_ts,
@@ -317,6 +320,7 @@ ORDER BY r.strategy_table_name, r.ts, r.revision_ts
                     "underlying": r["underlying"],
                     "config_timeframe": r["config_timeframe"],
                     "weighting": float(r["weighting"]),
+                    "strategy_instance_id": str(r["strategy_instance_id"]),
                     "ts": str(r["ts"]),
                     "closing_ts": str(r["closing_ts"]),
                     "execution_ts": str(r["execution_ts"]),
@@ -472,6 +476,7 @@ def _process_underlying_recent(
             sql = f"""\
 SELECT
     strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe,
+    argMin(strategy_instance_id, revision_ts) AS strategy_instance_id,
     argMin(weighting, revision_ts) AS weighting,
     toString(ts) AS ts,
     JSONExtractFloat(argMin(row_json, revision_ts), 'position') AS position,
@@ -489,6 +494,7 @@ ORDER BY strategy_table_name, ts
             sql = f"""\
 SELECT
     strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe,
+    argMin(strategy_instance_id, revision_ts) AS strategy_instance_id,
     argMin(weighting, revision_ts) AS weighting,
     toString(ts) AS ts,
     JSONExtractFloat(argMin(row_json, revision_ts), 'position') AS position,
@@ -509,6 +515,7 @@ ORDER BY strategy_table_name, ts
 SELECT
     r.strategy_table_name,
     r.strategy_id, r.strategy_name, r.underlying, r.config_timeframe, r.weighting,
+    r.strategy_instance_id,
     toString(r.ts) AS ts,
     toString(r.ts + toIntervalMinute({tf_expr})) AS closing_ts,
     toString(toStartOfMinute(r.revision_ts + INTERVAL 59 SECOND)) AS execution_ts,
@@ -554,6 +561,7 @@ ORDER BY r.strategy_table_name, r.ts, r.revision_ts
                     "underlying": r["underlying"],
                     "config_timeframe": r["config_timeframe"],
                     "weighting": float(r["weighting"]),
+                    "strategy_instance_id": str(r["strategy_instance_id"]),
                     "ts": str(r["ts"]),
                     "closing_ts": str(r["closing_ts"]),
                     "execution_ts": str(r["execution_ts"]),

@@ -456,6 +456,7 @@ PROD_INSERT_COLUMNS = [
     "final_signal",
     "weighting",
     "updated_at",
+    "strategy_instance_id",
 ]
 
 REAL_TRADE_INSERT_COLUMNS = [
@@ -476,6 +477,7 @@ REAL_TRADE_INSERT_COLUMNS = [
     "updated_at",
     "closing_ts",
     "execution_ts",
+    "strategy_instance_id",
 ]
 
 
@@ -588,6 +590,7 @@ def iter_compute_prod_pnl(
                         bar["final_signal"],
                         bar["weighting"],
                         now_str,
+                        bar.get("strategy_instance_id", ""),
                     ]
                 )
 
@@ -710,6 +713,7 @@ def compute_real_trade_pnl(
                         now_str,
                         rev["closing_ts"],
                         rev["execution_ts"],
+                        rev.get("strategy_instance_id", ""),
                     ]
                 )
 
@@ -821,6 +825,7 @@ def compute_bt_pnl(
                         bar["final_signal"],
                         bar["weighting"],
                         now_str,
+                        bar.get("strategy_instance_id", ""),
                     ]
                 )
 

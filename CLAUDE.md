@@ -171,6 +171,27 @@ Each bar's position is held from its `closing_ts` (= `ts + tf_minutes`) until th
 
 Prod/bt use `argMin(row_json, revision_ts)` (first revision only) and `iter_compute_prod_pnl` / `compute_bt_pnl`. BT additionally extracts `cumulative_pnl` from `row_json` as a cold-start seed when no prior anchor exists in the target table.
 
+### Streaming PnL Consumer Logic (pnl_consumer/)
+
+Full detail in `docs/pnl_consumer_logic.md`. Key points for working with this code:
+
+**Cold-start bootstrap (prod and bt):**
+1. `peek_reference_ts()` reads the Kafka committed offset → `reference_ts` (candle ts the consumer will replay from)
+2. `start_ts = reference_ts - 3 days`
+3. **Seed anchor**: per `strategy_instance_id`, load `(cumulative_pnl)` from `strategy_pnl_1min_prod/bt_v2` at latest minute `< start_ts`, `price` from `futures_price_1min` at that same minute, `position` from `strategy_output_history_*` (latest bar `ts <= start_ts`, first revision only)
+4. **Walk `[start_ts, reference_ts)`**: replay stored rows, recomputing PnL with formula to verify consistency; crash if deviation `> 0.2%`; seed `AnchorState` from final walked values
+
+**Live loop (prod and bt):**
+- Re-query `strategy_output_history_v2` / `_bt_v2` every candle (covers late-arriving bars)
+- Dedup: `(strategy_instance_id, bar_ts)` seen-set prevents re-applying the same bar's position; set is populated during bootstrap walk and persists into live loop
+- First revision only: `argMin(row_json, revision_ts)` in SQL + seen-set in consumer
+- Lazy-seed: brand-new strategies not in bootstrap get seeded on first appearance
+
+**Critical data-source rules:**
+- `position` always from `strategy_output_history_*` — never from the PnL table
+- `price` always from `futures_price_1min` (bootstrap/walk) or Redpanda candle `open` (live) — never from the PnL table's `price` column
+- All bars arrive late (e.g. `ts=01:00`, `closing_ts=01:10` appears at `01:13`) — this is expected; queries use `ts <= cutoff` not `revision_ts <= cutoff`
+
 ### ClickHouse Patterns
 
 - **All queries through** `trading_dagster/utils/clickhouse_client.py`: `get_client()`, `query_rows()`, `query_dicts()`, `query_scalar()`, `execute()`, `insert_rows()`

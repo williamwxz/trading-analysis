@@ -79,21 +79,22 @@ ORDER BY (exchange, instrument, ts);
 
 CREATE TABLE IF NOT EXISTS analytics.strategy_pnl_1min_prod_v2
 (
-    strategy_table_name String,
-    strategy_id         Int32,
-    strategy_name       String,
-    underlying          String,
-    config_timeframe    String,
-    source              String,
-    version             String,
-    ts                  DateTime,
-    cumulative_pnl      Nullable(Float64),
-    benchmark           Float64,
-    position            Float64,
-    price               Float64,
-    final_signal        Float64,
-    weighting           Float64,
-    updated_at          DateTime DEFAULT now()
+    strategy_table_name  String,
+    strategy_id          Int32,
+    strategy_name        String,
+    underlying           String,
+    config_timeframe     String,
+    source               String,
+    version              String,
+    ts                   DateTime,
+    cumulative_pnl       Nullable(Float64),
+    benchmark            Float64,
+    position             Float64,
+    price                Float64,
+    final_signal         Float64,
+    weighting            Float64,
+    updated_at           DateTime DEFAULT now(),
+    strategy_instance_id String   DEFAULT ''
 )
 ENGINE = ReplacingMergeTree(updated_at)
 PARTITION BY toYYYYMM(ts)
@@ -101,21 +102,22 @@ ORDER BY (strategy_table_name, ts);
 
 CREATE TABLE IF NOT EXISTS analytics.strategy_pnl_1min_bt_v2
 (
-    strategy_table_name String,
-    strategy_id         Int32,
-    strategy_name       String,
-    underlying          String,
-    config_timeframe    String,
-    source              String,
-    version             String,
-    ts                  DateTime,
-    cumulative_pnl      Nullable(Float64),
-    benchmark           Float64,
-    position            Float64,
-    price               Float64,
-    final_signal        Float64,
-    weighting           Float64,
-    updated_at          DateTime DEFAULT now()
+    strategy_table_name  String,
+    strategy_id          Int32,
+    strategy_name        String,
+    underlying           String,
+    config_timeframe     String,
+    source               String,
+    version              String,
+    ts                   DateTime,
+    cumulative_pnl       Nullable(Float64),
+    benchmark            Float64,
+    position             Float64,
+    price                Float64,
+    final_signal         Float64,
+    weighting            Float64,
+    updated_at           DateTime DEFAULT now(),
+    strategy_instance_id String   DEFAULT ''
 )
 ENGINE = ReplacingMergeTree(updated_at)
 PARTITION BY toYYYYMM(ts)
@@ -123,24 +125,25 @@ ORDER BY (strategy_table_name, ts);
 
 CREATE TABLE IF NOT EXISTS analytics.strategy_pnl_1min_real_trade_v2
 (
-    strategy_table_name String,
-    strategy_id         Int32,
-    strategy_name       String,
-    underlying          String,
-    config_timeframe    String,
-    source              String,
-    version             String,
-    ts                  DateTime,
-    cumulative_pnl      Nullable(Float64),
-    benchmark           Float64,
-    position            Float64,
-    price               Float64,
-    final_signal        Float64,
-    weighting           Float64,
-    updated_at          DateTime DEFAULT now(),
-    closing_ts          DateTime,
-    execution_ts        DateTime,
-    traded              Bool     DEFAULT false
+    strategy_table_name  String,
+    strategy_id          Int32,
+    strategy_name        String,
+    underlying           String,
+    config_timeframe     String,
+    source               String,
+    version              String,
+    ts                   DateTime,
+    cumulative_pnl       Nullable(Float64),
+    benchmark            Float64,
+    position             Float64,
+    price                Float64,
+    final_signal         Float64,
+    weighting            Float64,
+    updated_at           DateTime DEFAULT now(),
+    closing_ts           DateTime,
+    execution_ts         DateTime,
+    traded               Bool     DEFAULT false,
+    strategy_instance_id String   DEFAULT ''
 )
 ENGINE = ReplacingMergeTree(updated_at)
 PARTITION BY toYYYYMM(ts)
@@ -169,21 +172,22 @@ ORDER BY (strategy_table_name, ts);
 
 CREATE TABLE IF NOT EXISTS analytics.strategy_pnl_1hour_prod_v2
 (
-    strategy_table_name String,
-    strategy_id         Int32,
-    strategy_name       String,
-    underlying          String,
-    config_timeframe    String,
-    source              String,
-    version             String,
-    ts                  DateTime,
-    cumulative_pnl      Nullable(Float64),
-    benchmark           Float64,
-    position            Float64,
-    price               Float64,
-    final_signal        Float64,
-    weighting           Float64,
-    updated_at          DateTime DEFAULT now()
+    strategy_table_name  String,
+    strategy_id          Int32,
+    strategy_name        String,
+    underlying           String,
+    config_timeframe     String,
+    source               String,
+    version              String,
+    ts                   DateTime,
+    cumulative_pnl       Nullable(Float64),
+    benchmark            Float64,
+    position             Float64,
+    price                Float64,
+    final_signal         Float64,
+    weighting            Float64,
+    updated_at           DateTime DEFAULT now(),
+    strategy_instance_id String   DEFAULT ''
 )
 ENGINE = ReplacingMergeTree(updated_at)
 PARTITION BY toYYYYMM(ts)
@@ -201,7 +205,8 @@ ORDER BY (strategy_table_name, ts);
 --       argMax(price, src_ts)           AS price,
 --       argMax(final_signal, src_ts)    AS final_signal,
 --       argMax(weighting, src_ts)       AS weighting,
---       now()                           AS updated_at
+--       now()                           AS updated_at,
+--       any(strategy_instance_id)       AS strategy_instance_id
 --   FROM (SELECT *, ts AS src_ts FROM analytics.strategy_pnl_1min_prod_v2 FINAL)
 --   GROUP BY strategy_table_name, strategy_id, strategy_name, underlying,
 --            config_timeframe, source, version, toStartOfHour(src_ts);
@@ -223,7 +228,8 @@ SELECT
     argMax(price, src_ts)           AS price,
     argMax(final_signal, src_ts)    AS final_signal,
     argMax(weighting, src_ts)       AS weighting,
-    now()                           AS updated_at
+    now()                           AS updated_at,
+    any(strategy_instance_id)       AS strategy_instance_id
 FROM (SELECT *, ts AS src_ts FROM analytics.strategy_pnl_1min_prod_v2)
 GROUP BY
     strategy_table_name, strategy_id, strategy_name, underlying,
@@ -233,21 +239,22 @@ GROUP BY
 
 CREATE TABLE IF NOT EXISTS analytics.strategy_pnl_1hour_bt_v2
 (
-    strategy_table_name String,
-    strategy_id         Int32,
-    strategy_name       String,
-    underlying          String,
-    config_timeframe    String,
-    source              String,
-    version             String,
-    ts                  DateTime,
-    cumulative_pnl      Nullable(Float64),
-    benchmark           Float64,
-    position            Float64,
-    price               Float64,
-    final_signal        Float64,
-    weighting           Float64,
-    updated_at          DateTime DEFAULT now()
+    strategy_table_name  String,
+    strategy_id          Int32,
+    strategy_name        String,
+    underlying           String,
+    config_timeframe     String,
+    source               String,
+    version              String,
+    ts                   DateTime,
+    cumulative_pnl       Nullable(Float64),
+    benchmark            Float64,
+    position             Float64,
+    price                Float64,
+    final_signal         Float64,
+    weighting            Float64,
+    updated_at           DateTime DEFAULT now(),
+    strategy_instance_id String   DEFAULT ''
 )
 ENGINE = ReplacingMergeTree(updated_at)
 PARTITION BY toYYYYMM(ts)
@@ -265,7 +272,8 @@ ORDER BY (strategy_table_name, ts);
 --       argMax(price, src_ts)           AS price,
 --       argMax(final_signal, src_ts)    AS final_signal,
 --       argMax(weighting, src_ts)       AS weighting,
---       now()                           AS updated_at
+--       now()                           AS updated_at,
+--       any(strategy_instance_id)       AS strategy_instance_id
 --   FROM (SELECT *, ts AS src_ts FROM analytics.strategy_pnl_1min_bt_v2 FINAL)
 --   GROUP BY strategy_table_name, strategy_id, strategy_name, underlying,
 --            config_timeframe, source, version, toStartOfHour(src_ts);
@@ -287,7 +295,8 @@ SELECT
     argMax(price, src_ts)           AS price,
     argMax(final_signal, src_ts)    AS final_signal,
     argMax(weighting, src_ts)       AS weighting,
-    now()                           AS updated_at
+    now()                           AS updated_at,
+    any(strategy_instance_id)       AS strategy_instance_id
 FROM (SELECT *, ts AS src_ts FROM analytics.strategy_pnl_1min_bt_v2)
 GROUP BY
     strategy_table_name, strategy_id, strategy_name, underlying,
@@ -297,24 +306,25 @@ GROUP BY
 
 CREATE TABLE IF NOT EXISTS analytics.strategy_pnl_1hour_real_trade_v2
 (
-    strategy_table_name String,
-    strategy_id         Int32,
-    strategy_name       String,
-    underlying          String,
-    config_timeframe    String,
-    source              String,
-    version             String,
-    ts                  DateTime,
-    cumulative_pnl      Nullable(Float64),
-    benchmark           Float64,
-    position            Float64,
-    price               Float64,
-    final_signal        Float64,
-    weighting           Float64,
-    updated_at          DateTime DEFAULT now(),
-    closing_ts          DateTime,
-    execution_ts        DateTime,
-    traded              Bool     DEFAULT false
+    strategy_table_name  String,
+    strategy_id          Int32,
+    strategy_name        String,
+    underlying           String,
+    config_timeframe     String,
+    source               String,
+    version              String,
+    ts                   DateTime,
+    cumulative_pnl       Nullable(Float64),
+    benchmark            Float64,
+    position             Float64,
+    price                Float64,
+    final_signal         Float64,
+    weighting            Float64,
+    updated_at           DateTime DEFAULT now(),
+    closing_ts           DateTime,
+    execution_ts         DateTime,
+    traded               Bool     DEFAULT false,
+    strategy_instance_id String   DEFAULT ''
 )
 ENGINE = ReplacingMergeTree(updated_at)
 PARTITION BY toYYYYMM(ts)
@@ -335,7 +345,8 @@ ORDER BY (strategy_table_name, ts);
 --       now()                             AS updated_at,
 --       argMax(closing_ts, src_ts)        AS closing_ts,
 --       argMax(execution_ts, src_ts)      AS execution_ts,
---       any(traded)                       AS traded
+--       any(traded)                       AS traded,
+--       any(strategy_instance_id)         AS strategy_instance_id
 --   FROM (SELECT *, ts AS src_ts FROM analytics.strategy_pnl_1min_real_trade_v2 FINAL)
 --   GROUP BY strategy_table_name, strategy_id, strategy_name, underlying,
 --            config_timeframe, source, version, toStartOfHour(src_ts);
@@ -360,7 +371,8 @@ SELECT
     now()                             AS updated_at,
     argMax(closing_ts, src_ts)        AS closing_ts,
     argMax(execution_ts, src_ts)      AS execution_ts,
-    any(traded)                       AS traded
+    any(traded)                       AS traded,
+    any(strategy_instance_id)         AS strategy_instance_id
 FROM (SELECT *, ts AS src_ts FROM analytics.strategy_pnl_1min_real_trade_v2)
 GROUP BY
     strategy_table_name, strategy_id, strategy_name, underlying,
