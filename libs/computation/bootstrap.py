@@ -98,7 +98,12 @@ FROM (
     ORDER BY strategy_table_name, ts DESC, updated_at DESC
     LIMIT 1 BY strategy_table_name
 ) p
-LEFT JOIN analytics.futures_price_1min fp
+LEFT JOIN (
+    SELECT instrument, ts, open
+    FROM analytics.futures_price_1min
+    WHERE ts < '{start_str}'
+      AND ts >= '{start_str}'::DateTime - INTERVAL 7 DAY
+) fp
   ON fp.instrument = p.underlying || 'USDT'
  AND fp.ts = p.ts
 """
@@ -252,7 +257,12 @@ FROM (
     ORDER BY strategy_table_name, ts ASC, updated_at DESC
     LIMIT 1 BY strategy_table_name, ts
 ) p
-LEFT JOIN analytics.futures_price_1min fp
+LEFT JOIN (
+    SELECT instrument, ts, open
+    FROM analytics.futures_price_1min
+    WHERE ts >= '{start_str}'
+      AND ts < '{ref_str}'
+) fp
   ON fp.instrument = p.underlying || 'USDT'
  AND fp.ts = p.ts
 ORDER BY p.strategy_table_name, p.ts
