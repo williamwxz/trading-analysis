@@ -122,21 +122,36 @@ V1 used a SQL anchor CTE which fails when multiple bars arrive in a single INSER
 
 PnL formula: `cumulative_pnl = anchor_pnl + position * (live_price - anchor_price) / anchor_price`
 
+### Shared Computation Library (`libs/computation/`)
+
+All PnL logic lives here — both `pnl_consumer` (streaming) and `trading_dagster` (batch) import from this library. Neither service contains computation code directly.
+
+| Module | Purpose |
+|--------|---------|
+| `anchor_state.py` | `AnchorRecord` + `AnchorState`: per-strategy running (pnl, price, position, bar_ts, revision_ts). `compute_pnl()` advances the chain; `should_apply_revision()` is the real_trade revision guard |
+| `pnl_formula.py` | `INSERT_COLUMNS` (16 cols, ts=7, updated_at=14, strategy_instance_id=15), `TIMEFRAME_MAP`, `compute_prod_pnl`, `compute_bt_pnl`, `compute_real_trade_pnl`, `iter_compute_prod_pnl`, `extract_row_anchor` |
+| `fetch_bars.py` | Dagster batch: `fetch_anchors`, `fetch_new_bars_prod`, `fetch_new_bars_bt`, `fetch_new_bars_real_trade` |
+| `fetch_prices.py` | Dagster batch: `fetch_prices_multi` — reads `analytics.futures_price_1min` for multiple underlyings |
+| `candle_lookup.py` | pnl_consumer live loop: `fetch_strategies_for_candle`, `fetch_bt_strategies_for_candle`, `fetch_real_trade_for_candle` — re-queried every candle |
+| `bootstrap.py` | pnl_consumer cold-start: `fetch_bootstrap_seeds`, `fetch_walk_rows` |
+
+`libs/clickhouse_client.py` is a standalone ClickHouse client (no Dagster dependency) used by all `libs/computation/` modules. `trading_dagster/utils/clickhouse_client.py` is the Dagster-side copy with the same interface; `trading_dagster/utils/pnl_compute.py` is a thin re-export shim for backward compatibility.
+
 ### PnL Calculation Per Mode
 
-All three modes share the same formula and anchor-chaining loop. Differences are in bar sourcing, execution timestamp, and cold-start seeding. Code lives in `trading_dagster/utils/pnl_compute.py`.
+All three modes share the same formula and anchor-chaining loop. Differences are in bar sourcing, execution timestamp, and cold-start seeding. Code lives in `libs/computation/pnl_formula.py`.
 
 **Prod** (`source_label="production"`, `compute_prod_pnl` / `iter_compute_prod_pnl`):
 - Source: `strategy_output_history_v2`, `argMin(row_json, revision_ts)` — only the *first* revision per bar is used.
 - Execution starts at `closing_ts = ts + tf_minutes` (bar close). Position holds from closing_ts until next bar's closing_ts.
-- Anchor seed: always from previous day's tail in `strategy_pnl_1min_prod_v2` via `fetch_anchors()`. Cold-start (zero anchor) only allowed on a strategy's very first bar (verified by `assert_anchors_present`).
-- Output columns: `PROD_INSERT_COLUMNS` (15 cols, ts at index 7, updated_at at index 14).
+- Anchor seed: always from previous day's tail in `strategy_pnl_1min_prod_v2` via `fetch_anchors()`. Cold-start (zero anchor) only on a strategy's very first bar.
+- Output columns: `INSERT_COLUMNS` (16 cols, ts at index 7, updated_at at index 14, strategy_instance_id at index 15).
 
 **Backtest** (`source_label="backtest"`, `compute_bt_pnl`):
 - Source: `strategy_output_history_bt_v2`, same `argMin` first-revision logic. Also extracts `cumulative_pnl` from `row_json`.
 - Execution starts at `execution_ts = ts + tf_minutes` (same as prod closing_ts). Position holds until next bar's execution_ts.
-- Anchor seed priority: (1) previous day's tail from `strategy_pnl_1min_bt_v2`; (2) `bar["cumulative_pnl"]` from source JSON **only** as cold-start when no prior anchor exists — never used once rows exist in the target table. `running_anchor_pnl = None` triggers this path.
-- Output columns: same `PROD_INSERT_COLUMNS` (15 cols).
+- Anchor seed priority: (1) previous day's tail from `strategy_pnl_1min_bt_v2`; (2) `bar["cumulative_pnl"]` from source JSON **only** as cold-start when no prior anchor exists — never used once rows exist in the target table.
+- Output columns: same `INSERT_COLUMNS` (16 cols).
 
 **Real-trade** (`source_label="real_trade"`, `compute_real_trade_pnl`):
 - Source: `strategy_output_history_v2`, ALL revisions per bar fetched and filtered.
@@ -144,7 +159,7 @@ All three modes share the same formula and anchor-chaining loop. Differences are
 - Execution starts at `execution_ts = toStartOfMinute(revision_ts + 59s)` — the minute the position *actually* took effect (not bar close). `closing_ts` (= `ts + tf_minutes`) is stored separately on each output row.
 - Accepted revisions expand 1-min from their `execution_ts` until the next accepted revision's `execution_ts`. The last accepted revision holds for `tf_minutes` past its `closing_ts`.
 - Anchor seed: always from previous day's tail in `strategy_pnl_1min_real_trade_v2`. No cold-start seeding from source JSON.
-- Output columns: `REAL_TRADE_INSERT_COLUMNS` (18 cols = PROD + `closing_ts` at 15, `execution_ts` at 16).
+- Output columns: same `INSERT_COLUMNS` (16 cols) — `closing_ts` and `execution_ts` are inputs to computation, not stored as separate output columns.
 
 **Price fallback** (all modes): if `prices[ts_str]` is missing and an anchor price exists, the last known anchor price is reused. If no anchor price exists yet, the minute is skipped until the first price arrives.
 

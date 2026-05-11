@@ -4,12 +4,12 @@ import pytest
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
-from trading_dagster.utils.pnl_compute import fetch_anchors
+from libs.computation.fetch_bars import fetch_anchors
 
 
 class TestFetchAnchorsBeforeTs:
 
-    @patch("trading_dagster.utils.pnl_compute.query_dicts")
+    @patch("libs.computation.fetch_bars.query_dicts")
     def test_no_before_ts_omits_time_filter(self, mock_qd):
         """Without before_ts, no ts filter is added to the SQL."""
         mock_qd.return_value = []
@@ -17,7 +17,7 @@ class TestFetchAnchorsBeforeTs:
         sql = mock_qd.call_args[0][0]
         assert "ts <" not in sql
 
-    @patch("trading_dagster.utils.pnl_compute.query_dicts")
+    @patch("libs.computation.fetch_bars.query_dicts")
     def test_before_ts_adds_time_filter(self, mock_qd):
         """With before_ts, SQL must contain AND ts < toDateTime('...')."""
         mock_qd.return_value = []
@@ -26,7 +26,7 @@ class TestFetchAnchorsBeforeTs:
         sql = mock_qd.call_args[0][0]
         assert "ts < toDateTime('2026-05-03 00:00:00')" in sql
 
-    @patch("trading_dagster.utils.pnl_compute.query_dicts")
+    @patch("libs.computation.fetch_bars.query_dicts")
     def test_before_ts_returns_correct_anchors(self, mock_qd):
         """Rows returned by the filtered query are parsed into the anchor tuple."""
         mock_qd.return_value = [
@@ -111,11 +111,12 @@ class TestProcessUnderlyingRecent:
             "bar_price": 100.0,
             "final_signal": 1.0,
             "bar_benchmark": 100.0,
+            "strategy_instance_id": f"{stn}__1",
         }
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("libs.computation.fetch_bars.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2.execute")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlying_resume_dt", return_value=None)
@@ -124,7 +125,6 @@ class TestProcessUnderlyingRecent:
         """fetch_anchors must be called before the DELETE execute call."""
         from datetime import datetime, UTC
         from trading_dagster.assets.pnl_strategy_v2 import _process_underlying_recent
-        from trading_dagster.utils.pnl_compute import PROD_INSERT_COLUMNS
 
         call_order = []
         mock_fa.side_effect = lambda *a, **kw: call_order.append("anchor") or {}
@@ -137,13 +137,13 @@ class TestProcessUnderlyingRecent:
         end_dt = datetime(2026, 5, 6, 0, 0, 0, tzinfo=UTC)
         _process_underlying_recent(
             "btc", "strategy_pnl_1min_prod_v2", "strategy_output_history_v2",
-            "production", PROD_INSERT_COLUMNS, "prod", default_window_start, end_dt,
+            "production", "prod", default_window_start, end_dt,
         )
         assert call_order.index("anchor") < call_order.index("delete")
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("libs.computation.fetch_bars.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2.execute")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlying_resume_dt", return_value=None)
@@ -152,7 +152,6 @@ class TestProcessUnderlyingRecent:
         """DELETE statement must reference the target table and window_start."""
         from datetime import datetime, UTC
         from trading_dagster.assets.pnl_strategy_v2 import _process_underlying_recent
-        from trading_dagster.utils.pnl_compute import PROD_INSERT_COLUMNS
 
         mock_fa.return_value = {}
         mock_qd.return_value = []
@@ -163,7 +162,7 @@ class TestProcessUnderlyingRecent:
         end_dt = datetime(2026, 5, 6, 0, 0, 0, tzinfo=UTC)
         _process_underlying_recent(
             "btc", "strategy_pnl_1min_prod_v2", "strategy_output_history_v2",
-            "production", PROD_INSERT_COLUMNS, "prod", default_window_start, end_dt,
+            "production", "prod", default_window_start, end_dt,
         )
         delete_sql = mock_exec.call_args[0][0]
         assert "strategy_pnl_1min_prod_v2" in delete_sql
@@ -172,7 +171,7 @@ class TestProcessUnderlyingRecent:
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("libs.computation.fetch_bars.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2.execute")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlying_resume_dt", return_value=None)
@@ -181,7 +180,6 @@ class TestProcessUnderlyingRecent:
         """Bars query must be scoped to [window_start, end_dt), not full history."""
         from datetime import datetime, UTC
         from trading_dagster.assets.pnl_strategy_v2 import _process_underlying_recent
-        from trading_dagster.utils.pnl_compute import PROD_INSERT_COLUMNS
 
         mock_fa.return_value = {}
         mock_qd.return_value = [self._make_bar()]
@@ -192,7 +190,7 @@ class TestProcessUnderlyingRecent:
         end_dt = datetime(2026, 5, 6, 0, 0, 0, tzinfo=UTC)
         _process_underlying_recent(
             "btc", "strategy_pnl_1min_prod_v2", "strategy_output_history_v2",
-            "production", PROD_INSERT_COLUMNS, "prod", default_window_start, end_dt,
+            "production", "prod", default_window_start, end_dt,
         )
         first_bar_sql = mock_qd.call_args_list[0][0][0]
         assert "2026-05-03 00:00:00" in first_bar_sql
@@ -200,7 +198,7 @@ class TestProcessUnderlyingRecent:
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("libs.computation.fetch_bars.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2.execute")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlying_resume_dt", return_value=None)
@@ -209,7 +207,6 @@ class TestProcessUnderlyingRecent:
         """bt mode SQL must include cumulative_pnl column (absent from prod SQL)."""
         from datetime import datetime, UTC
         from trading_dagster.assets.pnl_strategy_v2 import _process_underlying_recent
-        from trading_dagster.utils.pnl_compute import PROD_INSERT_COLUMNS
 
         mock_fa.return_value = {}
         mock_qd.return_value = []
@@ -220,7 +217,7 @@ class TestProcessUnderlyingRecent:
         end_dt = datetime(2026, 5, 6, 0, 0, 0, tzinfo=UTC)
         _process_underlying_recent(
             "btc", "strategy_pnl_1min_bt_v2", "strategy_output_history_bt_v2",
-            "backtest", PROD_INSERT_COLUMNS, "bt", default_window_start, end_dt,
+            "backtest", "bt", default_window_start, end_dt,
         )
         bt_sql = mock_qd.call_args_list[0][0][0]
         assert "cumulative_pnl" in bt_sql
@@ -228,7 +225,7 @@ class TestProcessUnderlyingRecent:
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("libs.computation.fetch_bars.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2.execute")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlying_resume_dt", return_value=None)
@@ -237,7 +234,6 @@ class TestProcessUnderlyingRecent:
         """real_trade mode SQL must include revision_ts column (absent from prod/bt SQL)."""
         from datetime import datetime, UTC
         from trading_dagster.assets.pnl_strategy_v2 import _process_underlying_recent
-        from trading_dagster.utils.pnl_compute import REAL_TRADE_INSERT_COLUMNS
 
         mock_fa.return_value = {}
         mock_qd.return_value = []
@@ -248,7 +244,7 @@ class TestProcessUnderlyingRecent:
         end_dt = datetime(2026, 5, 6, 0, 0, 0, tzinfo=UTC)
         _process_underlying_recent(
             "btc", "strategy_pnl_1min_real_trade_v2", "strategy_output_history_v2",
-            "real_trade", REAL_TRADE_INSERT_COLUMNS, "real_trade", default_window_start, end_dt,
+            "real_trade", "real_trade", default_window_start, end_dt,
         )
         rt_sql = mock_qd.call_args_list[0][0][0]
         assert "revision_ts" in rt_sql
@@ -256,7 +252,7 @@ class TestProcessUnderlyingRecent:
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("libs.computation.fetch_bars.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2.execute")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
@@ -264,7 +260,6 @@ class TestProcessUnderlyingRecent:
         """When _get_underlying_resume_dt returns a datetime, window_start uses it (not default)."""
         from datetime import datetime, UTC
         from trading_dagster.assets.pnl_strategy_v2 import _process_underlying_recent
-        from trading_dagster.utils.pnl_compute import PROD_INSERT_COLUMNS
 
         resume_dt = datetime(2026, 5, 8, 0, 0, 0, tzinfo=UTC)
         mock_fa.return_value = {}
@@ -278,7 +273,7 @@ class TestProcessUnderlyingRecent:
         with patch("trading_dagster.assets.pnl_strategy_v2._get_underlying_resume_dt", return_value=resume_dt):
             _process_underlying_recent(
                 "btc", "strategy_pnl_1min_prod_v2", "strategy_output_history_v2",
-                "production", PROD_INSERT_COLUMNS, "prod", default_window_start, end_dt,
+                "production", "prod", default_window_start, end_dt,
             )
 
         delete_sql = mock_exec.call_args[0][0]
@@ -287,7 +282,7 @@ class TestProcessUnderlyingRecent:
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("libs.computation.fetch_bars.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2.execute")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlying_resume_dt", return_value=None)
@@ -296,7 +291,6 @@ class TestProcessUnderlyingRecent:
         """When _get_underlying_resume_dt returns None, window_start falls back to default."""
         from datetime import datetime, UTC
         from trading_dagster.assets.pnl_strategy_v2 import _process_underlying_recent
-        from trading_dagster.utils.pnl_compute import PROD_INSERT_COLUMNS
 
         mock_fa.return_value = {}
         mock_qd.return_value = []
@@ -307,7 +301,7 @@ class TestProcessUnderlyingRecent:
         end_dt = datetime(2026, 5, 11, 0, 0, 0, tzinfo=UTC)
         _process_underlying_recent(
             "btc", "strategy_pnl_1min_prod_v2", "strategy_output_history_v2",
-            "production", PROD_INSERT_COLUMNS, "prod", default_window_start, end_dt,
+            "production", "prod", default_window_start, end_dt,
         )
         delete_sql = mock_exec.call_args[0][0]
         assert "2026-02-27 00:00:00" in delete_sql
@@ -328,6 +322,7 @@ class TestRecomputePnlRecent:
             "bar_price": 100.0,
             "final_signal": 1.0,
             "bar_benchmark": 100.0,
+            "strategy_instance_id": f"{stn}__1",
         }
 
     def _make_context(self):
@@ -339,7 +334,7 @@ class TestRecomputePnlRecent:
     @patch("trading_dagster.assets.pnl_strategy_v2.boto3")
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("libs.computation.fetch_bars.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2.execute")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlying_resume_dt", return_value=None)
@@ -350,7 +345,6 @@ class TestRecomputePnlRecent:
     ):
         """ECS update_service(desiredCount=0) must be called before any DELETE or INSERT."""
         from trading_dagster.assets.pnl_strategy_v2 import _recompute_pnl_recent
-        from trading_dagster.utils.pnl_compute import PROD_INSERT_COLUMNS
 
         call_order = []
         mock_ecs = MagicMock()
@@ -369,7 +363,6 @@ class TestRecomputePnlRecent:
             target_table="strategy_pnl_1min_prod_v2",
             source_table="strategy_output_history_v2",
             label="production",
-            insert_columns=PROD_INSERT_COLUMNS,
             mode="prod",
             ecs_service="trading-analysis-pnl-consumer-prod",
         )
@@ -381,7 +374,7 @@ class TestRecomputePnlRecent:
     @patch("trading_dagster.assets.pnl_strategy_v2.boto3")
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("libs.computation.fetch_bars.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2.execute")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlying_resume_dt", return_value=None)
@@ -392,7 +385,6 @@ class TestRecomputePnlRecent:
     ):
         """ECS update_service(desiredCount=1) must be called even when recompute raises."""
         from trading_dagster.assets.pnl_strategy_v2 import _recompute_pnl_recent
-        from trading_dagster.utils.pnl_compute import PROD_INSERT_COLUMNS
 
         mock_ecs = MagicMock()
         mock_ecs.get_waiter.return_value = MagicMock()
@@ -410,7 +402,6 @@ class TestRecomputePnlRecent:
                 target_table="strategy_pnl_1min_prod_v2",
                 source_table="strategy_output_history_v2",
                 label="production",
-                insert_columns=PROD_INSERT_COLUMNS,
                 mode="prod",
                 ecs_service="trading-analysis-pnl-consumer-prod",
             )
@@ -421,7 +412,7 @@ class TestRecomputePnlRecent:
     @patch("trading_dagster.assets.pnl_strategy_v2.boto3")
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("libs.computation.fetch_bars.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2.execute")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlying_resume_dt", return_value=None)
@@ -432,7 +423,6 @@ class TestRecomputePnlRecent:
     ):
         """bt asset must restore ECS desiredCount=0 so the bt consumer stays stopped."""
         from trading_dagster.assets.pnl_strategy_v2 import _recompute_pnl_recent
-        from trading_dagster.utils.pnl_compute import PROD_INSERT_COLUMNS
 
         mock_ecs = MagicMock()
         mock_ecs.get_waiter.return_value = MagicMock()
@@ -448,7 +438,6 @@ class TestRecomputePnlRecent:
             target_table="strategy_pnl_1min_bt_v2",
             source_table="strategy_output_history_bt_v2",
             label="backtest",
-            insert_columns=PROD_INSERT_COLUMNS,
             mode="bt",
             ecs_service="trading-analysis-pnl-consumer-bt",
             ecs_resume_count=0,
@@ -468,7 +457,6 @@ class TestRecomputePnlRecent:
     ):
         """ECS update_service(desiredCount=1) must be called even when the pause waiter raises."""
         from trading_dagster.assets.pnl_strategy_v2 import _recompute_pnl_recent
-        from trading_dagster.utils.pnl_compute import PROD_INSERT_COLUMNS
 
         mock_ecs = MagicMock()
         waiter = MagicMock()
@@ -483,7 +471,6 @@ class TestRecomputePnlRecent:
                 target_table="strategy_pnl_1min_prod_v2",
                 source_table="strategy_output_history_v2",
                 label="production",
-                insert_columns=PROD_INSERT_COLUMNS,
                 mode="prod",
                 ecs_service="trading-analysis-pnl-consumer-prod",
             )
@@ -494,7 +481,7 @@ class TestRecomputePnlRecent:
     @patch("trading_dagster.assets.pnl_strategy_v2.boto3")
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("libs.computation.fetch_bars.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2.execute")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlying_resume_dt", return_value=None)
@@ -504,9 +491,7 @@ class TestRecomputePnlRecent:
         self, mock_gc, mock_get_und, mock_resume, mock_fa, mock_exec, mock_qd, mock_prices, mock_insert, mock_boto3
     ):
         """When underlying has no existing data, window_start falls back to PROD_REAL_TRADE_START_DATE."""
-        from datetime import UTC
-        from trading_dagster.assets.pnl_strategy_v2 import _recompute_pnl_recent
-        from trading_dagster.utils.pnl_compute import PROD_INSERT_COLUMNS, PROD_REAL_TRADE_START_DATE
+        from trading_dagster.assets.pnl_strategy_v2 import _recompute_pnl_recent, PROD_REAL_TRADE_START_DATE
 
         mock_ecs = MagicMock()
         mock_ecs.get_waiter.return_value = MagicMock()
@@ -522,7 +507,6 @@ class TestRecomputePnlRecent:
             target_table="strategy_pnl_1min_prod_v2",
             source_table="strategy_output_history_v2",
             label="production",
-            insert_columns=PROD_INSERT_COLUMNS,
             mode="prod",
             ecs_service="trading-analysis-pnl-consumer-prod",
         )

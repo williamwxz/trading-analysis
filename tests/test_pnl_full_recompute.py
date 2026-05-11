@@ -15,15 +15,11 @@ import pytest
 from datetime import date
 from unittest.mock import MagicMock, patch
 
-# Import will fail until Task 2 adds the function — that's expected.
 from trading_dagster.assets.pnl_strategy_v2 import (
     _recompute_pnl_full,
-)
-from trading_dagster.utils.pnl_compute import (
-    PROD_INSERT_COLUMNS,
     PROD_REAL_TRADE_START_DATE,
-    REAL_TRADE_INSERT_COLUMNS,
 )
+from libs.computation import PROD_INSERT_COLUMNS, REAL_TRADE_INSERT_COLUMNS
 
 
 def _make_context():
@@ -46,6 +42,7 @@ def _make_bar(stn="strat_a", ts="2026-02-27 00:00:00", tf="5m", pos=1.0):
         "bar_price": 100.0,
         "final_signal": 1.0,
         "bar_benchmark": 100.0,
+        "strategy_instance_id": f"{stn}__1",
     }
 
 
@@ -63,7 +60,7 @@ class TestRecomputePnlFull:
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("libs.computation.fetch_bars.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_scalar", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
@@ -82,7 +79,6 @@ class TestRecomputePnlFull:
             target_table="strategy_pnl_1min_prod_v2",
             source_table="strategy_output_history_v2",
             label="production",
-            insert_columns=PROD_INSERT_COLUMNS,
             mode="prod",
         )
 
@@ -95,14 +91,14 @@ class TestRecomputePnlFull:
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("libs.computation.fetch_bars.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_scalar", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
     def test_prod_inserts_to_correct_table(
         self, mock_client, mock_qs, mock_get_und, mock_qd, mock_prices, mock_insert
     ):
-        """Rows must be inserted into the target table with PROD_INSERT_COLUMNS."""
+        """Rows must be inserted into the target table with INSERT_COLUMNS."""
         mock_get_und.return_value = ["btc"]
         mock_qd.return_value = [_make_bar()]
         mock_prices.return_value = {"btc": {"2026-02-27 00:00:00": 100.0}}
@@ -114,7 +110,6 @@ class TestRecomputePnlFull:
             target_table="strategy_pnl_1min_prod_v2",
             source_table="strategy_output_history_v2",
             label="production",
-            insert_columns=PROD_INSERT_COLUMNS,
             mode="prod",
         )
 
@@ -126,7 +121,7 @@ class TestRecomputePnlFull:
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("libs.computation.fetch_bars.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_scalar", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
@@ -145,7 +140,6 @@ class TestRecomputePnlFull:
             target_table="strategy_pnl_1min_prod_v2",
             source_table="strategy_output_history_v2",
             label="production",
-            insert_columns=PROD_INSERT_COLUMNS,
             mode="prod",
         )
 
@@ -154,7 +148,7 @@ class TestRecomputePnlFull:
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("libs.computation.fetch_bars.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_scalar", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
@@ -173,7 +167,6 @@ class TestRecomputePnlFull:
             target_table="strategy_pnl_1min_real_trade_v2",
             source_table="strategy_output_history_v2",
             label="real_trade",
-            insert_columns=REAL_TRADE_INSERT_COLUMNS,
             mode="real_trade",
         )
 
@@ -184,7 +177,7 @@ class TestRecomputePnlFull:
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("libs.computation.fetch_bars.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_scalar", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
@@ -206,7 +199,6 @@ class TestRecomputePnlFull:
             target_table="strategy_pnl_1min_prod_v2",
             source_table="strategy_output_history_v2",
             label="production",
-            insert_columns=PROD_INSERT_COLUMNS,
             mode="prod",
         )
 
@@ -218,7 +210,7 @@ class TestRecomputePnlFullRealTradeAcceptance:
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("libs.computation.fetch_bars.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_scalar", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
@@ -245,7 +237,6 @@ class TestRecomputePnlFullRealTradeAcceptance:
             target_table="strategy_pnl_1min_real_trade_v2",
             source_table="strategy_output_history_v2",
             label="real_trade",
-            insert_columns=REAL_TRADE_INSERT_COLUMNS,
             mode="real_trade",
         )
 
@@ -253,7 +244,7 @@ class TestRecomputePnlFullRealTradeAcceptance:
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("libs.computation.fetch_bars.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_scalar", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
@@ -281,7 +272,6 @@ class TestRecomputePnlFullRealTradeAcceptance:
             target_table="strategy_pnl_1min_real_trade_v2",
             source_table="strategy_output_history_v2",
             label="real_trade",
-            insert_columns=REAL_TRADE_INSERT_COLUMNS,
             mode="real_trade",
         )
 
@@ -292,7 +282,7 @@ class TestRecomputePnlFullRealTradeAcceptance:
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("libs.computation.fetch_bars.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_scalar", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
@@ -326,7 +316,6 @@ class TestRecomputePnlFullRealTradeAcceptance:
             target_table="strategy_pnl_1min_real_trade_v2",
             source_table="strategy_output_history_v2",
             label="real_trade",
-            insert_columns=REAL_TRADE_INSERT_COLUMNS,
             mode="real_trade",
         )
 
@@ -338,7 +327,7 @@ class TestRecomputePnlFullRealTradeAcceptance:
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("libs.computation.fetch_bars.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_scalar", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
@@ -364,7 +353,6 @@ class TestRecomputePnlFullRealTradeAcceptance:
             target_table="strategy_pnl_1min_real_trade_v2",
             source_table="strategy_output_history_v2",
             label="real_trade",
-            insert_columns=REAL_TRADE_INSERT_COLUMNS,
             mode="real_trade",
         )
 
@@ -375,7 +363,7 @@ class TestRecomputePnlFullParallel:
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("libs.computation.fetch_bars.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_scalar", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
@@ -394,7 +382,6 @@ class TestRecomputePnlFullParallel:
             target_table="strategy_pnl_1min_prod_v2",
             source_table="strategy_output_history_v2",
             label="production",
-            insert_columns=PROD_INSERT_COLUMNS,
             mode="prod",
         )
 
@@ -405,7 +392,7 @@ class TestRecomputePnlFullParallel:
 
     @patch("trading_dagster.assets.pnl_strategy_v2.insert_rows")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_prices_multi")
-    @patch("trading_dagster.assets.pnl_strategy_v2.query_dicts")
+    @patch("libs.computation.fetch_bars.query_dicts")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
     @patch("trading_dagster.assets.pnl_strategy_v2.query_scalar", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
@@ -423,6 +410,5 @@ class TestRecomputePnlFullParallel:
                 target_table="strategy_pnl_1min_prod_v2",
                 source_table="strategy_output_history_v2",
                 label="production",
-                insert_columns=PROD_INSERT_COLUMNS,
                 mode="prod",
             )
