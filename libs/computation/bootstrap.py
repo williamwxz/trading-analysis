@@ -174,6 +174,27 @@ LIMIT 1 BY strategy_table_name
                 revision_ts=pos_info.get("revision_ts", _DATETIME_MIN),
             )
         )
+
+    # ── Completeness check ────────────────────────────────────────────────────
+    # Strategies that have history bars before start_ts must appear in seeds —
+    # they should have pnl rows in the walk window. If they don't, the pnl table
+    # has a gap and the consumer would silently drop them. Crash instead.
+    # Brand-new strategies (first bar after start_ts) are excluded: they have no
+    # prior pnl rows and will be lazy-seeded on first appearance in the live loop.
+    expected_sql = f"""\
+SELECT count(DISTINCT strategy_table_name) AS cnt
+FROM {history_table}
+WHERE ts < '{start_str}'
+"""
+    expected_count = int((query_dicts(expected_sql) or [{"cnt": 0}])[0]["cnt"])
+    seed_count = len(seeds)
+    if seed_count < expected_count:
+        raise RuntimeError(
+            f"Bootstrap completeness check failed: {seed_count} seeds < "
+            f"{expected_count} strategies with history before {start_str} in {history_table}. "
+            "Some strategies have no pnl rows in the walk window — cannot safely resume."
+        )
+
     return seeds
 
 
