@@ -206,11 +206,9 @@ def _bootstrap_state(
         stn = wr.strategy_table_name
         pp = prev_price.get(stn, 0.0)
         pp_pnl = prev_pnl.get(stn, 0.0)
-        position = wr.position
-        price = wr.price
 
         if pp != 0.0:
-            recomputed = pp_pnl + position * (price - pp) / pp
+            recomputed = pp_pnl + wr.position * (wr.price - pp) / pp
             deviation = abs(recomputed - wr.cumulative_pnl)
             if deviation > _PNL_CRASH_TOLERANCE:
                 raise RuntimeError(
@@ -225,16 +223,14 @@ def _bootstrap_state(
                 )
 
         prev_pnl[stn] = wr.cumulative_pnl
-        prev_price[stn] = price
-
+        prev_price[stn] = wr.price
         state.set(stn, AnchorRecord(
             pnl=wr.cumulative_pnl,
-            price=price,
-            position=position,
+            price=wr.price,
+            position=wr.position,
             bar_ts=wr.bar_ts,
             revision_ts=wr.revision_ts,
         ))
-
         if not cfg["real_trade"]:
             seen.add((wr.strategy_instance_id, wr.bar_ts))
 
@@ -254,13 +250,12 @@ def _compute_pnl_row(
     now: datetime,
     bar_ts: "datetime | None" = None,
     revision_ts: "datetime | None" = None,
-) -> "list | None":
+) -> list:
     """Compute one PnL row. Lazy-seeds from zero if strategy not yet in state."""
     if not state.has(strategy_table_name):
         logger.info("New strategy '%s' — seeding from zero at price=%.4f ts=%s",
                     strategy_table_name, candle.open, candle.ts)
         state.set(strategy_table_name, AnchorRecord(pnl=0.0, price=candle.open, position=0.0))
-
     pnl = state.compute_pnl(
         strategy_table_name,
         candle.open,
@@ -320,9 +315,9 @@ def process_candle(
             if key in seen_prod:
                 continue
             seen_prod.add(key)
-            row = _compute_pnl_row(state_prod, bar.strategy_table_name, candle, bar, "production", now)
-            if row:
-                rows.append({"_sink": "pnl_prod", "_row": row})
+            rows.append({"_sink": "pnl_prod", "_row": _compute_pnl_row(
+                state_prod, bar.strategy_table_name, candle, bar, "production", now,
+            )})
 
     if cfg.bt:
         for bar in fetch_bt_strategies_for_candle(candle.instrument, candle.ts):
@@ -330,9 +325,9 @@ def process_candle(
             if key in seen_bt:
                 continue
             seen_bt.add(key)
-            row = _compute_pnl_row(state_bt, bar.strategy_table_name, candle, bar, "backtest", now)
-            if row:
-                rows.append({"_sink": "pnl_bt", "_row": row})
+            rows.append({"_sink": "pnl_bt", "_row": _compute_pnl_row(
+                state_bt, bar.strategy_table_name, candle, bar, "backtest", now,
+            )})
 
     if cfg.real_trade:
         for rev in fetch_real_trade_for_candle(candle.instrument, candle.ts):
@@ -340,12 +335,10 @@ def process_candle(
                 rev.strategy_table_name, rev.bar_ts, rev.revision_ts
             ):
                 continue
-            row = _compute_pnl_row(
+            rows.append({"_sink": "pnl_real_trade", "_row": _compute_pnl_row(
                 state_real_trade, rev.strategy_table_name, candle, rev,
                 "real_trade", now, rev.bar_ts, rev.revision_ts,
-            )
-            if row:
-                rows.append({"_sink": "pnl_real_trade", "_row": row})
+            )})
 
     return rows
 

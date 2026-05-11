@@ -1,5 +1,5 @@
 import pytest
-from pnl_consumer.anchor_state import AnchorState, AnchorRecord
+from libs.computation.anchor_state import AnchorState, AnchorRecord
 
 
 @pytest.mark.unit
@@ -24,7 +24,7 @@ def test_anchor_state_stores_and_retrieves():
 @pytest.mark.unit
 def test_anchor_state_raises_on_missing_strategy():
     state = AnchorState()
-    with pytest.raises(RuntimeError, match="No state found for strategy"):
+    with pytest.raises(RuntimeError, match="No anchor state for"):
         state.compute_pnl("new_strat", current_price=93000.0, position=1.0)
 
 

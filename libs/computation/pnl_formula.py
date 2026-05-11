@@ -314,3 +314,12 @@ def compute_real_trade_pnl(
                 ts_cur += timedelta(minutes=1)
 
     return output
+
+
+def extract_row_anchor(row: list) -> Tuple[float, float, float]:
+    """Extract (cumulative_pnl, price, position) from a completed INSERT_COLUMNS row.
+
+    Used by Dagster's chunk loop to seed the next chunk's anchor from the last row
+    of the previous chunk. Indices: cumulative_pnl=8, price=11, position=10.
+    """
+    return (float(row[8]), float(row[11]), float(row[10]))

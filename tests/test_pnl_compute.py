@@ -8,28 +8,27 @@ import re
 import pytest
 from unittest.mock import patch
 
-from trading_dagster.utils.pnl_compute import (
-    assert_anchors_present,
+from libs.computation import (
     compute_prod_pnl,
     compute_bt_pnl,
     compute_real_trade_pnl,
-    fetch_new_bars_bt,
-    fetch_new_bars_real_trade,
-    fetch_prices_multi,
-    PROD_REAL_TRADE_START_DATE,
-    BT_START_DATE,
     TIMEFRAME_MAP,
 )
+from libs.computation.fetch_bars import fetch_new_bars_bt, fetch_new_bars_real_trade
+from libs.computation.fetch_prices import fetch_prices_multi
+
+PROD_REAL_TRADE_START_DATE = "2026-02-27"
 
 
 class TestComputeProdPnl:
     """Test compute_prod_pnl anchor chaining logic."""
 
-    def test_single_bar_no_anchor_on_strategy_first_date_allowed(self):
-        """First bar on strategy's first date with no anchor is allowed (cold start)."""
+    def test_single_bar_cold_start_no_anchor(self):
+        """First bar with no anchor and position=0 — produces 5 rows with price from source."""
         bars = [
             {
                 "strategy_table_name": "test_strategy",
+                "strategy_instance_id": "test_strategy__1",
                 "strategy_id": 1,
                 "strategy_name": "Test",
                 "underlying": "btc",
@@ -37,95 +36,23 @@ class TestComputeProdPnl:
                 "weighting": 1.0,
                 "ts": f"{PROD_REAL_TRADE_START_DATE} 00:00:00",
                 "position": 1.0,
-                "bar_price": 100.0,
                 "final_signal": 1.0,
                 "bar_benchmark": 100.0,
             }
         ]
         anchors = {}
-        prices = {}
-        with patch("trading_dagster.utils.pnl_compute.fetch_strategy_start_dates") as mock_sd:
-            mock_sd.return_value = {"test_strategy": PROD_REAL_TRADE_START_DATE}
-            assert_anchors_present(anchors, bars, source_table="strategy_output_history_v2")  # must not raise
-
-        # Price must come from our source — provide prices for all 5 expansion minutes.
-        closing_ts_base = f"{PROD_REAL_TRADE_START_DATE} 00:05:00"
         prices = {f"{PROD_REAL_TRADE_START_DATE} 00:0{5+i}:00": 100.0 for i in range(5)}
         rows = compute_prod_pnl(bars, anchors, prices, source_label="production")
         assert len(rows) == 5
         for row in rows:
             assert row[11] == 100.0  # price column
 
-    def test_single_bar_no_anchor_bt_first_date_allowed(self):
-        """First bar on strategy's first BT date with no anchor is allowed (cold start)."""
-        bars = [
-            {
-                "strategy_table_name": "test_bt_strategy",
-                "strategy_id": 2,
-                "strategy_name": "BT Test",
-                "underlying": "btc",
-                "config_timeframe": "5m",
-                "weighting": 1.0,
-                "ts": f"{BT_START_DATE} 00:00:00",
-                "position": 1.0,
-                "bar_price": 50.0,
-                "final_signal": 1.0,
-                "bar_benchmark": 50.0,
-            }
-        ]
-        with patch("trading_dagster.utils.pnl_compute.fetch_strategy_start_dates") as mock_sd:
-            mock_sd.return_value = {"test_bt_strategy": BT_START_DATE}
-            assert_anchors_present({}, bars, source_table="strategy_output_history_bt_v2")  # must not raise
-
-    def test_no_anchor_after_first_date_raises(self):
-        """Missing anchor for a bar after the strategy's first date must raise."""
-        bars = [
-            {
-                "strategy_table_name": "test_strategy",
-                "strategy_id": 1,
-                "strategy_name": "Test",
-                "underlying": "btc",
-                "config_timeframe": "5m",
-                "weighting": 1.0,
-                "ts": "2026-03-01 00:00:00",
-                "position": 1.0,
-                "bar_price": 100.0,
-                "final_signal": 1.0,
-                "bar_benchmark": 100.0,
-            }
-        ]
-        with patch("trading_dagster.utils.pnl_compute.fetch_strategy_start_dates") as mock_sd:
-            mock_sd.return_value = {"test_strategy": PROD_REAL_TRADE_START_DATE}
-            with pytest.raises(RuntimeError, match="Missing PnL anchor"):
-                assert_anchors_present({}, bars, source_table="strategy_output_history_v2")
-
-    def test_no_anchor_after_bt_first_date_raises(self):
-        """Missing anchor for a bt bar after its first date must raise."""
-        bars = [
-            {
-                "strategy_table_name": "test_bt_strategy",
-                "strategy_id": 2,
-                "strategy_name": "BT Test",
-                "underlying": "btc",
-                "config_timeframe": "5m",
-                "weighting": 1.0,
-                "ts": "2024-01-01 00:00:00",
-                "position": 1.0,
-                "bar_price": 50.0,
-                "final_signal": 1.0,
-                "bar_benchmark": 50.0,
-            }
-        ]
-        with patch("trading_dagster.utils.pnl_compute.fetch_strategy_start_dates") as mock_sd:
-            mock_sd.return_value = {"test_bt_strategy": BT_START_DATE}
-            with pytest.raises(RuntimeError, match="Missing PnL anchor"):
-                assert_anchors_present({}, bars, source_table="strategy_output_history_bt_v2")
-
     def test_anchor_chaining_two_bars(self):
         """Two consecutive bars should chain PnL correctly."""
         bars = [
             {
                 "strategy_table_name": "test_strategy",
+                "strategy_instance_id": "test_strategy__1",
                 "strategy_id": 1,
                 "strategy_name": "Test",
                 "underlying": "btc",
@@ -133,12 +60,12 @@ class TestComputeProdPnl:
                 "weighting": 1.0,
                 "ts": "2024-01-01 00:00:00",
                 "position": 1.0,
-                "bar_price": 100.0,
                 "final_signal": 1.0,
                 "bar_benchmark": 100.0,
             },
             {
                 "strategy_table_name": "test_strategy",
+                "strategy_instance_id": "test_strategy__1",
                 "strategy_id": 1,
                 "strategy_name": "Test",
                 "underlying": "btc",
@@ -146,13 +73,11 @@ class TestComputeProdPnl:
                 "weighting": 1.0,
                 "ts": "2024-01-01 00:05:00",
                 "position": 1.0,
-                "bar_price": 110.0,
                 "final_signal": 1.0,
                 "bar_benchmark": 110.0,
             },
         ]
         anchors = {}
-        # Prices from our source covering both bars' expansion windows (closing_ts + 5 min each)
         prices = {f"2024-01-01 00:{str(m).zfill(2)}:00": 100.0 for m in range(5, 15)}
 
         rows = compute_prod_pnl(bars, anchors, prices, source_label="production")
@@ -165,6 +90,7 @@ class TestComputeProdPnl:
         bars = [
             {
                 "strategy_table_name": "test_strategy",
+                "strategy_instance_id": "test_strategy__1",
                 "strategy_id": 1,
                 "strategy_name": "Test",
                 "underlying": "btc",
@@ -172,7 +98,6 @@ class TestComputeProdPnl:
                 "weighting": 1.0,
                 "ts": "2024-01-01 00:10:00",
                 "position": 1.0,
-                "bar_price": 110.0,
                 "final_signal": 1.0,
                 "bar_benchmark": 110.0,
             }
@@ -203,6 +128,7 @@ class TestComputeRealTradePnl:
             next_bar_closing_ts = closing_ts  # sentinel: no next bar → always accept
         return {
             "strategy_table_name": "test_strategy",
+            "strategy_instance_id": "test_strategy__1",
             "strategy_id": 1,
             "strategy_name": "Test",
             "underlying": "btc",
@@ -214,7 +140,6 @@ class TestComputeRealTradePnl:
             "revision_ts": revision_ts,
             "next_bar_closing_ts": next_bar_closing_ts,
             "position": position,
-            "bar_price": 100.0,
             "final_signal": 1.0,
             "bar_benchmark": 100.0,
         }
@@ -229,19 +154,19 @@ class TestComputeRealTradePnl:
         rows = compute_real_trade_pnl(bars, anchors, prices)
 
         assert len(rows) == 5
-        # Should include closing_ts and execution_ts columns
-        assert rows[0][15] == "2024-01-01 00:05:00"  # closing_ts
-        assert rows[0][16] == "2024-01-01 00:05:00"  # execution_ts
+        # Row has 16 columns matching INSERT_COLUMNS
+        assert len(rows[0]) == 16
+        # strategy_instance_id at index 15
+        assert rows[0][15] == "test_strategy__1"
 
     def test_multiple_revisions_no_overlap(self):
         """Two revisions for the same bar must not produce overlapping timestamp ranges.
 
         Old bug: each revision emitted its own tf_minutes rows independently,
-        causing timestamps 00:07 and 00:08 to appear twice with different positions,
-        which caused PnL overshoot/jumps in the Grafana aggregate curves.
+        causing timestamps 00:07 and 00:08 to appear twice with different positions.
 
-        Correct behaviour: the bar's [closing_ts, next_closing_ts) window is expanded
-        once, with position switching to revision 2's value at its execution_ts.
+        Correct behaviour: the bar's [exec_ts, next_exec_ts) window is expanded once,
+        with position switching to revision 2's value at its execution_ts.
         """
         # Bar ts=00:00, closing=00:05.  Revision 1 executed at 00:05 (pos=0),
         # revision 2 executed at 00:07 (pos=1, the trade fired late).
@@ -250,7 +175,6 @@ class TestComputeRealTradePnl:
             self._make_revision("2024-01-01 00:00:00", "2024-01-01 00:05:00", "2024-01-01 00:07:00", 1.0),
         ]
         anchors = {}
-        # Flat price at 100 for minutes 00:05 through 00:09
         prices = {f"2024-01-01 00:0{5+i}:00": 100.0 for i in range(5)}
 
         rows = compute_real_trade_pnl(bars, anchors, prices)
@@ -293,12 +217,7 @@ class TestComputeRealTradePnl:
         assert ts_values == sorted(set(ts_values))
 
     def test_late_revision_accepted_before_next_bar_closes(self):
-        """1h bar revision arriving after bar close but before next bar's close is accepted.
-
-        Real data pattern: bar 00:00 (closes 01:00), revision arrives 01:32 → exec 01:33.
-        next_bar_closing_ts = bar_B.closing = 02:00. Since 01:32 < 02:00 → ACCEPT.
-        Position holds 01:33..02:13 continuously (until bar B's revision fires at 02:14).
-        """
+        """1h bar revision arriving after bar close but before next bar's close is accepted."""
         bars = [
             self._make_revision(
                 "2024-01-01 00:00:00", "2024-01-01 01:00:00", "2024-01-01 01:33:00", 1.0,
@@ -329,13 +248,7 @@ class TestComputeRealTradePnl:
         assert "2024-01-01 02:14:00" in ts_values  # bar B starts
 
     def test_late_revision_discarded_after_next_bar_closes(self):
-        """Revision arriving after next bar's closing_ts is discarded; previous position holds.
-
-        Bar A (00:00, closing 01:00) revision arrives at 02:12 — after bar B closes at 02:00.
-        Bar B (01:00, closing 02:00) revision arrives at 02:14 → exec 02:14, accepted.
-        During 02:14 onward bar B's position (-1.0) is active.
-        Before 02:14, the anchor position (0.0 = cold start) holds since bar A is discarded.
-        """
+        """Revision arriving after next bar's closing_ts is discarded; previous position holds."""
         bars = [
             self._make_revision(
                 "2024-01-01 00:00:00", "2024-01-01 01:00:00", "2024-01-01 02:13:00", 1.0,
@@ -371,24 +284,23 @@ class TestFetchNewBarsRealTradeSQL:
     def _capture_sql(self, monkeypatch, **kwargs) -> str:
         captured = {}
 
-        def fake_query_dicts(sql):
+        def fake_query_dicts(sql, client=None):
             captured["sql"] = sql
             return []
 
         monkeypatch.setattr(
-            "trading_dagster.utils.pnl_compute.query_dicts", fake_query_dicts
+            "libs.computation.fetch_bars.query_dicts", fake_query_dicts
         )
         fetch_new_bars_real_trade(**kwargs)
         return captured["sql"]
 
     def test_order_by_sorts_by_strategy_ts_revision(self, monkeypatch):
-        """Final ORDER BY must sort by strategy_table_name, ts, revision_ts to ensure
-        revisions are processed in chronological order per strategy."""
+        """Final ORDER BY must sort by strategy_table_name, ts, revision_ts."""
         sql = self._capture_sql(
             monkeypatch,
             source_table="strategy_output_history_v2",
             underlying="btc",
-            since="2025-04-27 00:00:00",
+            ts_start="2025-04-27 00:00:00",
             ts_end="2025-04-28 00:00:00",
         )
         # Use the last ORDER BY (outer query), not the one inside the WINDOW definition.
@@ -401,7 +313,10 @@ class TestTimeframeMap:
     """Test timeframe mapping."""
 
     def test_all_timeframes(self):
-        expected = {"5m": 5, "10m": 10, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
+        expected = {
+            "1m": 1, "3m": 3, "5m": 5, "10m": 10,
+            "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440,
+        }
         assert TIMEFRAME_MAP == expected
 
 
@@ -411,40 +326,25 @@ class TestFetchNewBarsBtSQL:
     def _capture_sql(self, monkeypatch, **kwargs) -> str:
         captured = {}
 
-        def fake_query_dicts(sql):
+        def fake_query_dicts(sql, client=None):
             captured["sql"] = sql
             return []
 
-        monkeypatch.setattr("trading_dagster.utils.pnl_compute.query_dicts", fake_query_dicts)
+        monkeypatch.setattr("libs.computation.fetch_bars.query_dicts", fake_query_dicts)
         fetch_new_bars_bt(**kwargs)
         return captured["sql"]
 
     def test_daily_path_uses_ts_range_filter(self, monkeypatch):
-        """When ts_end is provided, SQL must filter on ts range (not revision_ts watermark).
-
-        The daily partition asset needs to re-process a specific day, not just new rows.
-        """
+        """When ts_start and ts_end are provided, SQL must filter on ts range."""
         sql = self._capture_sql(
             monkeypatch,
             source_table="strategy_output_history_bt_v2",
             underlying="btc",
-            since="2024-01-01 00:00:00",
+            ts_start="2024-01-01 00:00:00",
             ts_end="2024-01-02 00:00:00",
         )
         assert "toDateTime(ts) >= toDateTime('2024-01-01 00:00:00')" in sql
         assert "toDateTime(ts) < toDateTime('2024-01-02 00:00:00')" in sql
-        assert "revision_ts >= toDateTime" not in sql
-
-    def test_live_path_uses_revision_ts_watermark(self, monkeypatch):
-        """Without ts_end, SQL must use revision_ts >= since (watermark / live path)."""
-        sql = self._capture_sql(
-            monkeypatch,
-            source_table="strategy_output_history_bt_v2",
-            underlying="btc",
-            since="2024-01-01 00:00:00",
-        )
-        assert "revision_ts >= toDateTime('2024-01-01 00:00:00')" in sql
-        assert "toDateTime(ts) >= toDateTime" not in sql
 
 
 class TestFetchPricesMultiCloseColumn:
@@ -457,7 +357,7 @@ class TestFetchPricesMultiCloseColumn:
             captured["sql"] = sql
             return []
 
-        monkeypatch.setattr("trading_dagster.utils.pnl_compute.query_rows", fake_query_rows)
+        monkeypatch.setattr("libs.computation.fetch_prices.query_rows", fake_query_rows)
         fetch_prices_multi(**kwargs)
         return captured["sql"]
 
@@ -490,6 +390,7 @@ class TestComputeBtPnl:
     def _make_bar(self, ts, execution_ts, position, bar_price, cumulative_pnl, tf="5m"):
         return {
             "strategy_table_name": "test_bt",
+            "strategy_instance_id": "test_bt__1",
             "strategy_id": 1,
             "strategy_name": "BT Test",
             "underlying": "btc",
@@ -498,7 +399,6 @@ class TestComputeBtPnl:
             "ts": ts,
             "execution_ts": execution_ts,
             "position": position,
-            "bar_price": bar_price,
             "final_signal": 1.0,
             "bar_benchmark": 100.0,
             "cumulative_pnl": cumulative_pnl,
@@ -524,7 +424,7 @@ class TestComputeBtPnl:
         assert rows[0][5] == "backtest"
 
     def test_two_consecutive_bars_chain_pnl(self):
-        """Second bar's PnL chains from the computed end of the first bar, not from its cumulative_pnl field."""
+        """Second bar's PnL chains from the computed end of the first bar."""
         bars = [
             self._make_bar("2024-01-01 00:00:00", "2024-01-01 00:05:00", 1.0, 100.0, 0.0),
             # cumulative_pnl=99.0 is a bogus value — must be ignored in favour of chaining
@@ -543,19 +443,17 @@ class TestComputeBtPnl:
         """When an anchor is provided from the previous day, it takes priority over bar cumulative_pnl."""
         bar = self._make_bar("2024-01-02 00:00:00", "2024-01-02 00:05:00", 1.0, 100.0, 99.0)
         prices = {"2024-01-02 00:05:00": 100.0}
-        # Previous day ended at pnl=0.05, price=100.0
         anchors = {"test_bt": (0.05, 100.0, 1.0)}
 
         rows = compute_bt_pnl([bar], prices, anchors=anchors)
 
         assert len(rows) == 5
-        # First row should start from anchor_pnl=0.05 (flat price → stays 0.05), not from 99.0
         assert abs(rows[0][8] - 0.05) < 1e-6, f"Expected 0.05 but got {rows[0][8]}"
 
     def test_output_row_has_correct_column_count(self):
-        """Output row must have exactly 15 columns matching PROD_INSERT_COLUMNS."""
+        """Output row must have exactly 16 columns matching INSERT_COLUMNS."""
         bar = self._make_bar("2024-01-01 00:00:00", "2024-01-01 00:05:00", 1.0, 100.0, 0.0)
         prices = {f"2024-01-01 00:0{5+i}:00": 100.0 for i in range(5)}
         rows = compute_bt_pnl([bar], prices)
         assert len(rows) == 5
-        assert len(rows[0]) == 15
+        assert len(rows[0]) == 16

@@ -27,6 +27,7 @@ from libs.computation.pnl_formula import (
     compute_bt_pnl,
     compute_prod_pnl,
     compute_real_trade_pnl,
+    extract_row_anchor,
     iter_compute_prod_pnl,
 )
 
@@ -60,5 +61,6 @@ __all__ = [
     "compute_bt_pnl",
     "compute_prod_pnl",
     "compute_real_trade_pnl",
+    "extract_row_anchor",
     "iter_compute_prod_pnl",
 ]

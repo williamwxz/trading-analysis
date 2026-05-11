@@ -38,6 +38,7 @@ from libs.computation import (
     TIMEFRAME_MAP,
     compute_bt_pnl,
     compute_real_trade_pnl,
+    extract_row_anchor,
     fetch_anchors,
     fetch_new_bars_bt,
     fetch_new_bars_prod,
@@ -194,7 +195,7 @@ def _process_underlying(
                 total_rows += n
                 if strategy_rows:
                     last = strategy_rows[-1]
-                    anchors[stn] = (float(last[8]), float(last[11]), float(last[10]))
+                    anchors[stn] = extract_row_anchor(last)
         elif mode == "bt":
             by_stn: dict[str, list] = defaultdict(list)
             for bar in rows_dict:
@@ -206,7 +207,7 @@ def _process_underlying(
                 total_rows += n
                 if strategy_rows:
                     last = strategy_rows[-1]
-                    anchors[stn] = (float(last[8]), float(last[11]), float(last[10]))
+                    anchors[stn] = extract_row_anchor(last)
         else:
             by_strategy: dict[str, list] = defaultdict(list)
             for bar in rows_dict:
@@ -218,7 +219,7 @@ def _process_underlying(
                 total_rows += n
                 if strategy_rows:
                     last = strategy_rows[-1]
-                    anchors[stn] = (float(last[8]), float(last[11]), float(last[10]))
+                    anchors[stn] = extract_row_anchor(last)
 
         del rows_dict, prices
         if chunks_done % 100 == 0:
@@ -289,7 +290,7 @@ def _process_underlying_recent(
                 total_rows += n
                 if strategy_rows:
                     last = strategy_rows[-1]
-                    anchors[stn] = (float(last[8]), float(last[11]), float(last[10]))
+                    anchors[stn] = extract_row_anchor(last)
         elif mode == "bt":
             by_stn: dict[str, list] = defaultdict(list)
             for bar in rows_dict:
@@ -301,7 +302,7 @@ def _process_underlying_recent(
                 total_rows += n
                 if strategy_rows:
                     last = strategy_rows[-1]
-                    anchors[stn] = (float(last[8]), float(last[11]), float(last[10]))
+                    anchors[stn] = extract_row_anchor(last)
         else:
             by_strategy: dict[str, list] = defaultdict(list)
             for bar in rows_dict:
@@ -313,7 +314,7 @@ def _process_underlying_recent(
                 total_rows += n
                 if strategy_rows:
                     last = strategy_rows[-1]
-                    anchors[stn] = (float(last[8]), float(last[11]), float(last[10]))
+                    anchors[stn] = extract_row_anchor(last)
 
         del rows_dict, prices
         chunk_start = chunk_end

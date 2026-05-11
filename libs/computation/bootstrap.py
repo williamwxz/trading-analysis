@@ -3,6 +3,7 @@
 Provides the data needed to seed AnchorState before the live streaming loop starts:
   1. fetch_bootstrap_seeds()      — per-strategy anchor state at start_ts
   2. fetch_walk_rows()            — stored PnL rows in [start_ts, reference_ts) for verification
+  3. walk_and_verify()            — replay walk rows, update AnchorState, crash on deviation > tolerance
 
 Supports all three modes (prod, bt, real_trade) via the pnl_table / history_table parameters.
 
@@ -14,11 +15,14 @@ Price always comes from futures_price_1min, never from the PnL table's price col
 """
 
 import json
+import logging
 from bisect import bisect_right
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from libs.clickhouse_client import query_dicts
+
+_log = logging.getLogger(__name__)
 
 _DATETIME_MIN = datetime.min
 

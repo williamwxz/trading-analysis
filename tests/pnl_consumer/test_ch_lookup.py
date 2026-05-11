@@ -3,11 +3,11 @@ from unittest.mock import patch
 
 import pytest
 
-from pnl_consumer.ch_lookup import (
+from libs.computation.candle_lookup import (
     StrategyBar,
     StrategyRevision,
     fetch_bt_strategies_for_candle,
-    fetch_real_trade_revisions_for_candle,
+    fetch_real_trade_for_candle,
     fetch_strategies_for_candle,
 )
 
@@ -18,15 +18,17 @@ def test_fetch_strategies_returns_list_of_strategy_bars():
     mock_rows = [
         {
             "strategy_table_name": "strat_prod_1",
+            "strategy_instance_id": "strat_prod_1__1",
             "strategy_id": 1,
             "strategy_name": "momentum",
             "underlying": "BTC",
             "config_timeframe": "5m",
             "weighting": 1.0,
+            "latest_ts": datetime(2026, 4, 26, 0, 0, 0),
             "row_json": '{"position": 0.5, "final_signal": 1.0, "benchmark": 0.0}',
         }
     ]
-    with patch("pnl_consumer.ch_lookup.query_dicts", return_value=mock_rows):
+    with patch("libs.computation.candle_lookup.query_dicts", return_value=mock_rows):
         bars = fetch_strategies_for_candle(
             instrument="BTCUSDT",
             candle_ts=datetime(2026, 4, 26, 0, 0, 0),
@@ -39,7 +41,7 @@ def test_fetch_strategies_returns_list_of_strategy_bars():
 
 @pytest.mark.unit
 def test_fetch_strategies_returns_empty_list_when_no_rows():
-    with patch("pnl_consumer.ch_lookup.query_dicts", return_value=[]):
+    with patch("libs.computation.candle_lookup.query_dicts", return_value=[]):
         bars = fetch_strategies_for_candle(
             instrument="FETUSDT",
             candle_ts=datetime(2026, 4, 26, 0, 0, 0),
@@ -52,15 +54,17 @@ def test_strategy_bar_position_parsed_from_row_json():
     mock_rows = [
         {
             "strategy_table_name": "strat_prod_2",
+            "strategy_instance_id": "strat_prod_2__2",
             "strategy_id": 2,
             "strategy_name": "mean_rev",
             "underlying": "ETH",
             "config_timeframe": "15m",
             "weighting": 0.5,
+            "latest_ts": datetime(2026, 4, 26, 0, 0, 0),
             "row_json": '{"position": -1.0, "final_signal": -1.0, "benchmark": 0.01}',
         }
     ]
-    with patch("pnl_consumer.ch_lookup.query_dicts", return_value=mock_rows):
+    with patch("libs.computation.candle_lookup.query_dicts", return_value=mock_rows):
         bars = fetch_strategies_for_candle(
             instrument="ETHUSDT",
             candle_ts=datetime(2026, 4, 26, 0, 0, 0),
@@ -71,22 +75,23 @@ def test_strategy_bar_position_parsed_from_row_json():
 
 
 @pytest.mark.unit
-def test_fetch_real_trade_revisions_returns_list_of_strategy_revisions():
+def test_fetch_real_trade_returns_list_of_strategy_revisions():
     mock_rows = [
         {
             "strategy_table_name": "strat_rt_1",
+            "strategy_instance_id": "strat_rt_1__1",
             "strategy_id": 1,
             "strategy_name": "momentum",
             "underlying": "BTC",
             "config_timeframe": "5m",
             "weighting": 1.0,
+            "bar_ts": datetime(2026, 4, 26, 0, 0, 0),
             "revision_ts": datetime(2026, 4, 26, 0, 1, 10),
-            "closing_ts": datetime(2026, 4, 26, 0, 5, 59),
             "row_json": '{"position": 0.5, "final_signal": 1.0, "benchmark": 0.0}',
         }
     ]
-    with patch("pnl_consumer.ch_lookup.query_dicts", return_value=mock_rows):
-        revisions = fetch_real_trade_revisions_for_candle(
+    with patch("libs.computation.candle_lookup.query_dicts", return_value=mock_rows):
+        revisions = fetch_real_trade_for_candle(
             instrument="BTCUSDT",
             candle_ts=datetime(2026, 4, 26, 0, 1, 0),
         )
@@ -96,13 +101,13 @@ def test_fetch_real_trade_revisions_returns_list_of_strategy_revisions():
     assert rev.strategy_table_name == "strat_rt_1"
     assert rev.position == 0.5
     assert rev.revision_ts == datetime(2026, 4, 26, 0, 1, 10)
-    assert rev.closing_ts == datetime(2026, 4, 26, 0, 5, 59)
+    assert rev.bar_ts == datetime(2026, 4, 26, 0, 0, 0)
 
 
 @pytest.mark.unit
-def test_fetch_real_trade_revisions_returns_empty_when_no_rows():
-    with patch("pnl_consumer.ch_lookup.query_dicts", return_value=[]):
-        revisions = fetch_real_trade_revisions_for_candle(
+def test_fetch_real_trade_returns_empty_when_no_rows():
+    with patch("libs.computation.candle_lookup.query_dicts", return_value=[]):
+        revisions = fetch_real_trade_for_candle(
             instrument="BTCUSDT",
             candle_ts=datetime(2026, 4, 26, 0, 1, 0),
         )
@@ -110,22 +115,21 @@ def test_fetch_real_trade_revisions_returns_empty_when_no_rows():
 
 
 @pytest.mark.unit
-def test_fetch_real_trade_revisions_filters_by_exact_candle_ts():
-    """Verify the SQL uses ts = candle_ts (not a range)."""
+def test_fetch_real_trade_filters_by_revision_ts():
+    """Verify the SQL uses revision_ts <= candle_ts."""
     captured_sql = []
 
     def capture(sql):
         captured_sql.append(sql)
         return []
 
-    with patch("pnl_consumer.ch_lookup.query_dicts", side_effect=capture):
-        fetch_real_trade_revisions_for_candle(
+    with patch("libs.computation.candle_lookup.query_dicts", side_effect=capture):
+        fetch_real_trade_for_candle(
             instrument="BTCUSDT",
             candle_ts=datetime(2026, 4, 26, 0, 1, 0),
         )
     assert "2026-04-26 00:01:00" in captured_sql[0]
     assert "revision_ts" in captured_sql[0]
-    assert "toIntervalMinute" in captured_sql[0]
 
 
 @pytest.mark.unit
@@ -133,15 +137,17 @@ def test_fetch_bt_strategies_returns_list_of_strategy_bars():
     mock_rows = [
         {
             "strategy_table_name": "strat_bt_1",
+            "strategy_instance_id": "strat_bt_1__2",
             "strategy_id": 2,
             "strategy_name": "bt_momentum",
             "underlying": "BTC",
             "config_timeframe": "5m",
             "weighting": 1.0,
+            "latest_ts": datetime(2026, 4, 26, 0, 1, 0),
             "row_json": '{"position": -1.0, "final_signal": -1.0, "benchmark": 0.01}',
         }
     ]
-    with patch("pnl_consumer.ch_lookup.query_dicts", return_value=mock_rows):
+    with patch("libs.computation.candle_lookup.query_dicts", return_value=mock_rows):
         bars = fetch_bt_strategies_for_candle(
             instrument="BTCUSDT",
             candle_ts=datetime(2026, 4, 26, 0, 1, 0),
@@ -155,7 +161,7 @@ def test_fetch_bt_strategies_returns_list_of_strategy_bars():
 
 @pytest.mark.unit
 def test_fetch_bt_strategies_returns_empty_when_no_rows():
-    with patch("pnl_consumer.ch_lookup.query_dicts", return_value=[]):
+    with patch("libs.computation.candle_lookup.query_dicts", return_value=[]):
         bars = fetch_bt_strategies_for_candle(
             instrument="BTCUSDT",
             candle_ts=datetime(2026, 4, 26, 0, 1, 0),
@@ -168,15 +174,17 @@ def test_fetch_bt_strategies_parses_position_from_row_json():
     mock_rows = [
         {
             "strategy_table_name": "strat_bt_2",
+            "strategy_instance_id": "strat_bt_2__3",
             "strategy_id": 3,
             "strategy_name": "bt_mean_rev",
             "underlying": "ETH",
             "config_timeframe": "15m",
             "weighting": 0.5,
+            "latest_ts": datetime(2026, 4, 26, 0, 1, 0),
             "row_json": '{"position": 0.0, "final_signal": 0.0, "benchmark": 0.0}',
         }
     ]
-    with patch("pnl_consumer.ch_lookup.query_dicts", return_value=mock_rows):
+    with patch("libs.computation.candle_lookup.query_dicts", return_value=mock_rows):
         bars = fetch_bt_strategies_for_candle(
             instrument="ETHUSDT",
             candle_ts=datetime(2026, 4, 26, 0, 1, 0),
@@ -187,18 +195,14 @@ def test_fetch_bt_strategies_parses_position_from_row_json():
 
 @pytest.mark.unit
 def test_fetch_strategies_uses_closing_ts_filter():
-    """Prod/bt positions activate at closing_ts (ts + tf_minutes), not ts.
-
-    Verifies the SQL filters on ts + toIntervalMinute(...) <= candle_ts rather than
-    ts <= candle_ts, so a bar opened at T is not used until its bar has closed.
-    """
+    """Prod/bt positions activate at closing_ts (ts + tf_minutes), not ts."""
     captured_sql = []
 
     def capture(sql):
         captured_sql.append(sql)
         return []
 
-    with patch("pnl_consumer.ch_lookup.query_dicts", side_effect=capture):
+    with patch("libs.computation.candle_lookup.query_dicts", side_effect=capture):
         fetch_strategies_for_candle(
             instrument="BTCUSDT",
             candle_ts=datetime(2026, 5, 10, 18, 5, 0),
@@ -217,7 +221,7 @@ def test_fetch_bt_strategies_uses_closing_ts_filter():
         captured_sql.append(sql)
         return []
 
-    with patch("pnl_consumer.ch_lookup.query_dicts", side_effect=capture):
+    with patch("libs.computation.candle_lookup.query_dicts", side_effect=capture):
         fetch_bt_strategies_for_candle(
             instrument="BTCUSDT",
             candle_ts=datetime(2026, 5, 10, 18, 5, 0),

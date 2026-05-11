@@ -28,8 +28,8 @@ from confluent_kafka import Consumer, Producer
 from streaming.models import CandleEvent
 from streaming.binance_ws_consumer import publish_candle, TOPIC
 from pnl_consumer.pnl_consumer import process_candle
-from pnl_consumer.anchor_state import AnchorState
-from pnl_consumer.ch_lookup import StrategyBar
+from libs.computation.anchor_state import AnchorState
+from libs.computation.candle_lookup import StrategyBar
 
 
 def _fetch_live_candle() -> CandleEvent | None:
