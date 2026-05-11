@@ -516,6 +516,12 @@ def run() -> None:
                 last_bt_fetched = bt_fetched
             if rt_fetched:
                 last_rt_fetched = rt_fetched
+            logger.info(
+                "Candle processed %s ts=%s prod=%d bt=%d rt=%d batch=%d",
+                candle.instrument, candle.ts,
+                prod_fetched, bt_fetched, rt_fetched,
+                len(pnl_prod_batch) + len(pnl_bt_batch) + len(pnl_real_trade_batch),
+            )
 
             for row in rows:
                 sink = row["_sink"]
