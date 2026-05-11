@@ -140,7 +140,8 @@ LIMIT 1 BY strategy_instance_id
 SELECT
     strategy_table_name,
     strategy_instance_id,
-    argMin(row_json, revision_ts) AS row_json
+    argMin(row_json, revision_ts) AS row_json,
+    max(ts) AS ts
 FROM {history_table}
 WHERE ts <= '{start_str}'
 GROUP BY strategy_table_name, strategy_instance_id
