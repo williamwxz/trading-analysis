@@ -380,7 +380,7 @@ def test_fetch_bootstrap_seeds_returns_bootstrap_seed_with_correct_fields():
         }
     ]
     with patch(
-        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, pos_rows]
+        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, pos_rows, [{"cnt": 0}]]
     ):
         seeds = fetch_bootstrap_seeds(
             pnl_table="analytics.strategy_pnl_1min_prod_v2",
@@ -417,7 +417,7 @@ def test_fetch_bootstrap_seeds_bar_ts_revision_ts_are_datetime_min_for_prod():
         }
     ]
     with patch(
-        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, pos_rows]
+        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, pos_rows, [{"cnt": 0}]]
     ):
         seeds = fetch_bootstrap_seeds(
             pnl_table="analytics.strategy_pnl_1min_prod_v2",
@@ -440,7 +440,7 @@ def test_fetch_bootstrap_seeds_position_sql_uses_argmin_revision_ts():
         captured.append(sql)
         return captured_results.pop(0)
 
-    captured_results = [pnl_rows, pos_rows]
+    captured_results = [pnl_rows, pos_rows, [{"cnt": 0}]]
     with patch("libs.computation.bootstrap.query_dicts", side_effect=capture):
         fetch_bootstrap_seeds(
             pnl_table="analytics.strategy_pnl_1min_prod_v2",
@@ -448,8 +448,8 @@ def test_fetch_bootstrap_seeds_position_sql_uses_argmin_revision_ts():
             start_ts=_START_TS,
             real_trade=False,
         )
-    # Second call is the position SQL
-    assert len(captured) == 2
+    # Second call is the position SQL; third is completeness check
+    assert len(captured) == 3
     pos_sql = captured[1]
     assert "argMin(row_json, revision_ts)" in pos_sql
     assert "ts <=" in pos_sql
@@ -467,7 +467,7 @@ def test_fetch_bootstrap_seeds_strategy_in_history_but_not_pnl_gets_zero_pnl_pri
         }
     ]
     with patch(
-        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, pos_rows]
+        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, pos_rows, [{"cnt": 0}]]
     ):
         seeds = fetch_bootstrap_seeds(
             pnl_table="analytics.strategy_pnl_1min_prod_v2",
@@ -495,7 +495,7 @@ def test_fetch_bootstrap_seeds_strategy_in_pnl_but_not_history_gets_zero_positio
     ]
     pos_rows: list = []  # no position data
     with patch(
-        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, pos_rows]
+        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, pos_rows, [{"cnt": 0}]]
     ):
         seeds = fetch_bootstrap_seeds(
             pnl_table="analytics.strategy_pnl_1min_prod_v2",
@@ -529,7 +529,7 @@ def test_fetch_bootstrap_seeds_all_keys_union_of_both_sources():
         }
     ]
     with patch(
-        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, pos_rows]
+        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, pos_rows, [{"cnt": 0}]]
     ):
         seeds = fetch_bootstrap_seeds(
             pnl_table="analytics.strategy_pnl_1min_prod_v2",
@@ -553,7 +553,7 @@ def test_fetch_bootstrap_seeds_real_trade_position_sql_uses_argmax_revision_ts()
     pos_rows: list = []
     captured = []
 
-    captured_results = [pnl_rows, pos_rows]
+    captured_results = [pnl_rows, pos_rows, [{"cnt": 0}]]
 
     def capture(sql):
         captured.append(sql)
@@ -587,7 +587,7 @@ def test_fetch_bootstrap_seeds_real_trade_bar_ts_revision_ts_populated():
         }
     ]
     with patch(
-        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, pos_rows]
+        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, pos_rows, [{"cnt": 0}]]
     ):
         seeds = fetch_bootstrap_seeds(
             pnl_table="analytics.strategy_pnl_1min_real_trade_v2",
@@ -623,7 +623,7 @@ def test_fetch_bootstrap_seeds_real_trade_correct_position():
         }
     ]
     with patch(
-        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, pos_rows]
+        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, pos_rows, [{"cnt": 0}]]
     ):
         seeds = fetch_bootstrap_seeds(
             pnl_table="analytics.strategy_pnl_1min_real_trade_v2",
