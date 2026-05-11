@@ -173,24 +173,29 @@ Prod/bt use `argMin(row_json, revision_ts)` (first revision only) and `iter_comp
 
 ### Streaming PnL Consumer Logic (pnl_consumer/)
 
-Full detail in `docs/pnl_consumer_logic.md`. Key points for working with this code:
+Full detail in `docs/pnl_consumer_logic.md`. Shared query library in `libs/computation/`. Key points:
 
-**Cold-start bootstrap (prod and bt):**
-1. `peek_reference_ts()` reads the Kafka committed offset → `reference_ts` (candle ts the consumer will replay from)
+**Cold-start bootstrap (all three modes):**
+1. `peek_reference_ts()` reads the Kafka committed offset → `reference_ts`
 2. `start_ts = reference_ts - 3 days`
-3. **Seed anchor**: per `strategy_instance_id`, load `(cumulative_pnl)` from `strategy_pnl_1min_prod/bt_v2` at latest minute `< start_ts`, `price` from `futures_price_1min` at that same minute, `position` from `strategy_output_history_*` (latest bar `ts <= start_ts`, first revision only)
-4. **Walk `[start_ts, reference_ts)`**: replay stored rows, recomputing PnL with formula to verify consistency; crash if deviation `> 0.2%`; seed `AnchorState` from final walked values
+3. **Seed anchor**: per `strategy_instance_id`, load `(cumulative_pnl)` from the pnl table at latest minute `< start_ts`, `price` from `futures_price_1min` at that same minute, `position` from `strategy_output_history_*`
+4. **Walk `[start_ts, reference_ts)`**: replay stored rows, recomputing PnL to verify consistency; crash if deviation `> 0.2%`; seed `AnchorState` from final walked values
 
-**Live loop (prod and bt):**
-- Re-query `strategy_output_history_v2` / `_bt_v2` every candle (covers late-arriving bars)
-- Dedup: `(strategy_instance_id, bar_ts)` seen-set prevents re-applying the same bar's position; set is populated during bootstrap walk and persists into live loop
-- First revision only: `argMin(row_json, revision_ts)` in SQL + seen-set in consumer
-- Lazy-seed: brand-new strategies not in bootstrap get seeded on first appearance
+**Live loop — prod and bt:**
+- Re-query `strategy_output_history_v2` / `_bt_v2` every candle; latest bar whose `closing_ts <= candle_ts`, first revision only (`argMin`)
+- Dedup: `(strategy_instance_id, bar_ts)` seen-set populated during walk, persists into live loop
+- Lazy-seed: brand-new strategies seeded on first appearance
+
+**Live loop — real_trade:**
+- Re-query `strategy_output_history_v2` every candle; latest revision whose `revision_ts <= candle_ts` per `strategy_instance_id` (no `closing_ts` gate)
+- **AnchorState revision guard**: apply revision only if `(bar_ts, revision_ts) > (anchor.bar_ts, anchor.revision_ts)` — prevents stale late revisions for an old bar overwriting a newer bar's active position
+- `bar_ts` = `strategy_output_history_v2.ts` (bar open time, not closing_ts or revision_ts)
+- Bootstrap walk resolves position as "latest revision with `revision_ts <= row.ts`" (same guard logic)
 
 **Critical data-source rules:**
 - `position` always from `strategy_output_history_*` — never from the PnL table
 - `price` always from `futures_price_1min` (bootstrap/walk) or Redpanda candle `open` (live) — never from the PnL table's `price` column
-- All bars arrive late (e.g. `ts=01:00`, `closing_ts=01:10` appears at `01:13`) — this is expected; queries use `ts <= cutoff` not `revision_ts <= cutoff`
+- All bars arrive late — queries use `ts <= cutoff`, not `revision_ts <= cutoff`
 
 ### ClickHouse Patterns
 

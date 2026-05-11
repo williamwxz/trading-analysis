@@ -140,9 +140,6 @@ CREATE TABLE IF NOT EXISTS analytics.strategy_pnl_1min_real_trade_v2
     final_signal         Float64,
     weighting            Float64,
     updated_at           DateTime DEFAULT now(),
-    closing_ts           DateTime,
-    execution_ts         DateTime,
-    traded               Bool     DEFAULT false,
     strategy_instance_id String   DEFAULT ''
 )
 ENGINE = ReplacingMergeTree(updated_at)
@@ -321,9 +318,6 @@ CREATE TABLE IF NOT EXISTS analytics.strategy_pnl_1hour_real_trade_v2
     final_signal         Float64,
     weighting            Float64,
     updated_at           DateTime DEFAULT now(),
-    closing_ts           DateTime,
-    execution_ts         DateTime,
-    traded               Bool     DEFAULT false,
     strategy_instance_id String   DEFAULT ''
 )
 ENGINE = ReplacingMergeTree(updated_at)
@@ -335,18 +329,15 @@ ORDER BY (strategy_table_name, ts);
 --   SELECT
 --       strategy_table_name, strategy_id, strategy_name, underlying,
 --       config_timeframe, source, version,
---       toStartOfHour(src_ts)             AS ts,
---       argMax(cumulative_pnl, src_ts)    AS cumulative_pnl,
---       argMax(benchmark, src_ts)         AS benchmark,
---       argMax(position, src_ts)          AS position,
---       argMax(price, src_ts)             AS price,
---       argMax(final_signal, src_ts)      AS final_signal,
---       argMax(weighting, src_ts)         AS weighting,
---       now()                             AS updated_at,
---       argMax(closing_ts, src_ts)        AS closing_ts,
---       argMax(execution_ts, src_ts)      AS execution_ts,
---       any(traded)                       AS traded,
---       any(strategy_instance_id)         AS strategy_instance_id
+--       toStartOfHour(src_ts)           AS ts,
+--       argMax(cumulative_pnl, src_ts)  AS cumulative_pnl,
+--       argMax(benchmark, src_ts)       AS benchmark,
+--       argMax(position, src_ts)        AS position,
+--       argMax(price, src_ts)           AS price,
+--       argMax(final_signal, src_ts)    AS final_signal,
+--       argMax(weighting, src_ts)       AS weighting,
+--       now()                           AS updated_at,
+--       any(strategy_instance_id)       AS strategy_instance_id
 --   FROM (SELECT *, ts AS src_ts FROM analytics.strategy_pnl_1min_real_trade_v2 FINAL)
 --   GROUP BY strategy_table_name, strategy_id, strategy_name, underlying,
 --            config_timeframe, source, version, toStartOfHour(src_ts);
@@ -361,18 +352,15 @@ SELECT
     config_timeframe,
     source,
     version,
-    toStartOfHour(src_ts)             AS ts,
-    argMax(cumulative_pnl, src_ts)    AS cumulative_pnl,
-    argMax(benchmark, src_ts)         AS benchmark,
-    argMax(position, src_ts)          AS position,
-    argMax(price, src_ts)             AS price,
-    argMax(final_signal, src_ts)      AS final_signal,
-    argMax(weighting, src_ts)         AS weighting,
-    now()                             AS updated_at,
-    argMax(closing_ts, src_ts)        AS closing_ts,
-    argMax(execution_ts, src_ts)      AS execution_ts,
-    any(traded)                       AS traded,
-    any(strategy_instance_id)         AS strategy_instance_id
+    toStartOfHour(src_ts)           AS ts,
+    argMax(cumulative_pnl, src_ts)  AS cumulative_pnl,
+    argMax(benchmark, src_ts)       AS benchmark,
+    argMax(position, src_ts)        AS position,
+    argMax(price, src_ts)           AS price,
+    argMax(final_signal, src_ts)    AS final_signal,
+    argMax(weighting, src_ts)       AS weighting,
+    now()                           AS updated_at,
+    any(strategy_instance_id)       AS strategy_instance_id
 FROM (SELECT *, ts AS src_ts FROM analytics.strategy_pnl_1min_real_trade_v2)
 GROUP BY
     strategy_table_name, strategy_id, strategy_name, underlying,

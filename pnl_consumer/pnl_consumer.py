@@ -1,3 +1,15 @@
+"""PnL streaming consumer: Kafka → ClickHouse.
+
+Reads 1-minute closed candles from binance.price.ticks (Redpanda), computes
+cumulative PnL per strategy, and writes results to ClickHouse in real-time.
+
+Three independent sink modes: prod, bt, real_trade.
+All computation logic lives in libs.computation — this file is pure orchestration.
+
+Price source: candle.open from Redpanda (not ClickHouse futures_price_1min).
+Position source: strategy_output_history_* via libs.computation candle lookups.
+"""
+
 import json
 import logging
 import os
@@ -16,23 +28,54 @@ from confluent_kafka import (
     TopicPartition,
 )
 
-from pnl_consumer.anchor_state import AnchorRecord, AnchorState
-from pnl_consumer.ch_lookup import (
-    StrategyRevision,
-    fetch_anchor_for_strategy,
+from libs.clickhouse_client import insert_rows
+from libs.computation import (
+    AnchorRecord,
+    AnchorState,
+    BootstrapSeed,
+    INSERT_COLUMNS,
+    WalkRow,
+    fetch_bootstrap_seeds,
     fetch_bt_strategies_for_candle,
-    fetch_last_active_revisions,
-    fetch_real_trade_revisions_for_candle,
+    fetch_real_trade_for_candle,
     fetch_strategies_for_candle,
+    fetch_walk_rows,
 )
 from streaming.models import CandleEvent
-from trading_dagster.utils.clickhouse_client import insert_rows, query_dicts
-from trading_dagster.utils.pnl_compute import (
-    PROD_INSERT_COLUMNS,
-    REAL_TRADE_INSERT_COLUMNS,
-)
 
 logger = logging.getLogger(__name__)
+
+TOPIC = "binance.price.ticks"
+_DEFAULT_GROUP_ID = "flink-pnl-consumer"
+FLUSH_EVERY = 1000
+
+_COLD_START_DAYS = 3
+_PNL_WARN_TOLERANCE = 1e-6
+_PNL_CRASH_TOLERANCE = 2e-3  # 0.2%
+
+PRICE_COLUMNS = ["exchange", "instrument", "ts", "open", "high", "low", "close", "volume"]
+
+# Table config per mode.
+_MODE_CONFIG = {
+    "prod": {
+        "pnl_table": "analytics.strategy_pnl_1min_prod_v2",
+        "history_table": "analytics.strategy_output_history_v2",
+        "source_label": "production",
+        "real_trade": False,
+    },
+    "bt": {
+        "pnl_table": "analytics.strategy_pnl_1min_bt_v2",
+        "history_table": "analytics.strategy_output_history_bt_v2",
+        "source_label": "backtest",
+        "real_trade": False,
+    },
+    "real_trade": {
+        "pnl_table": "analytics.strategy_pnl_1min_real_trade_v2",
+        "history_table": "analytics.strategy_output_history_v2",
+        "source_label": "real_trade",
+        "real_trade": True,
+    },
+}
 
 
 @dataclass
@@ -58,14 +101,6 @@ class SinkConfig:
         )
 
 
-# Row count threshold across all batches before flushing to ClickHouse.
-# With ~695 strategies per candle, set well above one candle's worth so we
-# actually batch multiple candles before writing.
-FLUSH_EVERY = 1000
-TOPIC = "binance.price.ticks"
-_DEFAULT_GROUP_ID = "flink-pnl-consumer"
-
-
 def resolve_group_id(env: dict[str, str] | None = None) -> str:
     if env is None:
         env = os.environ
@@ -78,49 +113,29 @@ def peek_reference_ts(
     topic: str = TOPIC,
     timeout: float = 5.0,
 ) -> "datetime | None":
-    """Return the min candle ts at this group's committed offsets across all partitions.
-
-    Used on cold start to anchor the ClickHouse verification window to where Kafka
-    will actually replay from, rather than wall-clock now(). Falls back to the
-    high-watermark offset when no committed offset exists (first-ever start).
-    Returns None if no messages can be read (empty topic or timeout).
-    """
-    consumer = Consumer(
-        {
-            "bootstrap.servers": brokers,
-            "group.id": group_id,
-            "enable.auto.commit": False,
-        }
-    )
+    """Return min candle ts at this group's committed offsets. Falls back to latest offset."""
+    consumer = Consumer({
+        "bootstrap.servers": brokers,
+        "group.id": group_id,
+        "enable.auto.commit": False,
+    })
     try:
         try:
             meta = consumer.list_topics(topic, timeout=timeout)
-            if topic in meta.topics:
-                partitions = [
-                    TopicPartition(topic, p) for p in meta.topics[topic].partitions
-                ]
-            else:
-                logger.warning("peek_reference_ts: topic %s not found", topic)
-                partitions = []
+            partitions = [TopicPartition(topic, p) for p in meta.topics[topic].partitions] if topic in meta.topics else []
         except Exception:
-            logger.debug(
-                "peek_reference_ts: list_topics failed, proceeding with empty partition list"
-            )
             partitions = []
-        committed = consumer.committed(partitions, timeout=timeout)
 
+        committed = consumer.committed(partitions, timeout=timeout)
         timestamps: list[datetime] = []
         for tp in committed:
             offset = tp.offset
             use_watermark = False
             if offset == OFFSET_INVALID:
-                # No committed offset — fall back to latest message.
-                low, high = consumer.get_watermark_offsets(
-                    TopicPartition(topic, tp.partition), timeout=timeout
-                )
+                low, high = consumer.get_watermark_offsets(TopicPartition(topic, tp.partition), timeout=timeout)
                 offset = max(high - 1, low)
                 if offset < 0:
-                    continue  # empty partition
+                    continue
                 use_watermark = True
             seek_tp = TopicPartition(topic, tp.partition, offset)
             consumer.assign([seek_tp])
@@ -131,32 +146,146 @@ def peek_reference_ts(
                 continue
             raw = msg.value()
             data = json.loads(raw.decode() if raw is not None else "{}")
-            ts = datetime.fromisoformat(data["ts"])
-            timestamps.append(ts)
+            timestamps.append(datetime.fromisoformat(data["ts"]))
 
         return min(timestamps) if timestamps else None
     except Exception:
-        logger.warning(
-            "peek_reference_ts failed — falling back to now()", exc_info=True
-        )
+        logger.warning("peek_reference_ts failed — falling back to now()", exc_info=True)
         return None
     finally:
         consumer.close()
 
 
-PRICE_COLUMNS = [
-    "exchange",
-    "instrument",
-    "ts",
-    "open",
-    "high",
-    "low",
-    "close",
-    "volume",
-]
+def _bootstrap_state(
+    mode: str,
+    reference_ts: "datetime | None",
+) -> tuple[AnchorState, set[tuple[str, datetime]]]:
+    """Seed AnchorState for one mode. Returns (state, seen_set).
+
+    seen_set is populated for prod/bt (dedup guard). Empty for real_trade (uses
+    AnchorState revision guard instead).
+    """
+    cfg = _MODE_CONFIG[mode]
+    now = datetime.now(UTC).replace(tzinfo=None)
+    ref_ts = reference_ts if reference_ts is not None else now
+    start_ts = ref_ts - timedelta(days=_COLD_START_DAYS)
+
+    seeds: list[BootstrapSeed] = fetch_bootstrap_seeds(
+        pnl_table=cfg["pnl_table"],
+        history_table=cfg["history_table"],
+        start_ts=start_ts,
+        real_trade=cfg["real_trade"],
+    )
+
+    state = AnchorState()
+    for seed in seeds:
+        state.set(
+            seed.strategy_table_name,
+            AnchorRecord(
+                pnl=seed.pnl,
+                price=seed.price,
+                position=seed.position,
+                bar_ts=seed.bar_ts,
+                revision_ts=seed.revision_ts,
+            ),
+        )
+
+    walk_rows: list[WalkRow] = fetch_walk_rows(
+        pnl_table=cfg["pnl_table"],
+        history_table=cfg["history_table"],
+        start_ts=start_ts,
+        reference_ts=ref_ts,
+        real_trade=cfg["real_trade"],
+    )
+
+    seen: set[tuple[str, datetime]] = set()
+    prev_pnl: dict[str, float] = {s.strategy_table_name: s.pnl for s in seeds}
+    prev_price: dict[str, float] = {s.strategy_table_name: s.price for s in seeds}
+
+    for wr in walk_rows:
+        stn = wr.strategy_table_name
+        pp = prev_price.get(stn, 0.0)
+        pp_pnl = prev_pnl.get(stn, 0.0)
+        position = wr.position
+        price = wr.price
+
+        if pp != 0.0:
+            recomputed = pp_pnl + position * (price - pp) / pp
+            deviation = abs(recomputed - wr.cumulative_pnl)
+            if deviation > _PNL_CRASH_TOLERANCE:
+                raise RuntimeError(
+                    f"Cold-start PnL mismatch for {stn} at {wr.ts}: "
+                    f"stored={wr.cumulative_pnl:.8f} recomputed={recomputed:.8f} "
+                    f"delta={deviation:.2e} > {_PNL_CRASH_TOLERANCE:.1e}"
+                )
+            if deviation > _PNL_WARN_TOLERANCE:
+                logger.warning(
+                    "Cold-start PnL drift %s ts=%s stored=%.8f recomputed=%.8f delta=%.2e",
+                    stn, wr.ts, wr.cumulative_pnl, recomputed, deviation,
+                )
+
+        prev_pnl[stn] = wr.cumulative_pnl
+        prev_price[stn] = price
+
+        state.set(stn, AnchorRecord(
+            pnl=wr.cumulative_pnl,
+            price=price,
+            position=position,
+            bar_ts=wr.bar_ts,
+            revision_ts=wr.revision_ts,
+        ))
+
+        if not cfg["real_trade"]:
+            seen.add((wr.strategy_instance_id, wr.bar_ts))
+
+    logger.info(
+        "Bootstrap [%s]: seeded %d strategies, walked %d rows",
+        mode, len(state), len(walk_rows),
+    )
+    return state, seen
 
 
-_ALL_SINKS_ENABLED = SinkConfig(price=True, prod=True, real_trade=True, bt=True)
+def _compute_pnl_row(
+    state: AnchorState,
+    strategy_table_name: str,
+    candle: CandleEvent,
+    bar,
+    source_label: str,
+    now: datetime,
+    bar_ts: "datetime | None" = None,
+    revision_ts: "datetime | None" = None,
+) -> "list | None":
+    """Compute one PnL row. Lazy-seeds from zero if strategy not yet in state."""
+    if not state.has(strategy_table_name):
+        logger.info("New strategy '%s' — seeding from zero at price=%.4f ts=%s",
+                    strategy_table_name, candle.open, candle.ts)
+        state.set(strategy_table_name, AnchorRecord(pnl=0.0, price=candle.open, position=0.0))
+
+    pnl = state.compute_pnl(
+        strategy_table_name,
+        candle.open,
+        bar.position,
+        bar_ts=bar_ts or datetime.min,
+        revision_ts=revision_ts or datetime.min,
+    )
+    return [
+        strategy_table_name,
+        bar.strategy_id,
+        bar.strategy_name,
+        bar.underlying,
+        bar.config_timeframe,
+        source_label,
+        "v2",
+        candle.ts,
+        pnl,
+        bar.benchmark,
+        bar.position,
+        candle.open,
+        bar.final_signal,
+        bar.weighting,
+        now,
+        bar.strategy_instance_id,
+    ]
 
 
 def process_candle(
@@ -164,409 +293,61 @@ def process_candle(
     state_prod: AnchorState,
     state_real_trade: AnchorState,
     state_bt: AnchorState,
-    cfg: SinkConfig | None = None,
-    last_real_trade_revisions: "dict[str, StrategyRevision] | None" = None,
+    seen_prod: set[tuple[str, datetime]],
+    seen_bt: set[tuple[str, datetime]],
+    cfg: SinkConfig,
 ) -> list[dict]:
-    """Pure business logic: lookup strategies, compute PnL, return rows.
-
-    Returns a list of dicts. Each dict has a '_sink' key:
-      '_sink' == 'price'          → write to futures_price_1min
-      '_sink' == 'pnl_prod'       → write to strategy_pnl_1min_prod_v2
-      '_sink' == 'pnl_real_trade' → write to strategy_pnl_1min_real_trade_v2
-      '_sink' == 'pnl_bt'         → write to strategy_pnl_1min_bt_v2
-
-    cfg controls which sinks are active. Defaults to all enabled for backward
-    compatibility. In production, pass SinkConfig.from_env() to honour env vars.
-
-    last_real_trade_revisions: mutable dict updated in-place with the active revision
-    per strategy after each candle. Strategies missing from the current candle's lookup
-    are carried forward from this dict so the strategy count never drops due to gaps
-    in strategy_output_history_v2.
-    """
-    if cfg is None:
-        cfg = _ALL_SINKS_ENABLED
-
+    """Compute all output rows for one candle. Returns list of dicts with '_sink' key."""
     now = datetime.now(UTC).replace(tzinfo=None)
     rows: list[dict] = []
 
     if cfg.price:
-        rows.append(
-            {
-                "_sink": "price",
-                "exchange": candle.exchange,
-                "instrument": candle.instrument,
-                "ts": candle.ts,
-                "open": candle.open,
-                "high": candle.high,
-                "low": candle.low,
-                "close": candle.close,
-                "volume": candle.volume,
-            }
-        )
+        rows.append({
+            "_sink": "price",
+            "exchange": candle.exchange,
+            "instrument": candle.instrument,
+            "ts": candle.ts,
+            "open": candle.open,
+            "high": candle.high,
+            "low": candle.low,
+            "close": candle.close,
+            "volume": candle.volume,
+        })
 
-    def _compute_pnl_with_lazy_seed(
-        state: AnchorState, strategy_table_name: str, price: float, position: float
-    ) -> float | None:
-        """Compute PnL; lazy-seed from ClickHouse if strategy is missing. Returns None to skip."""
-        try:
-            return state.compute_pnl(strategy_table_name, price, position)
-        except RuntimeError:
-            anchor = fetch_anchor_for_strategy(strategy_table_name)
-            if anchor is None:
-                anchor = AnchorRecord(pnl=0.0, price=price, position=0.0)
-                logger.info(
-                    "New strategy '%s' — seeding from zero at price=%.4f ts=%s",
-                    strategy_table_name,
-                    price,
-                    candle.ts,
-                )
-            else:
-                logger.info(
-                    "Lazy-seeded state for strategy '%s' from ClickHouse (pnl=%.4f, price=%.2f)",
-                    strategy_table_name,
-                    anchor.pnl,
-                    anchor.price,
-                )
-            state.set(strategy_table_name, anchor)
-            return state.compute_pnl(strategy_table_name, price, position)
-
-    # --- prod ---
     if cfg.prod:
-        prod_strategies = fetch_strategies_for_candle(candle.instrument, candle.ts)
-        for bar in prod_strategies:
-            pnl = _compute_pnl_with_lazy_seed(
-                state_prod, bar.strategy_table_name, candle.open, bar.position
-            )
-            if pnl is None:
+        for bar in fetch_strategies_for_candle(candle.instrument, candle.ts):
+            key = (bar.strategy_instance_id, bar.bar_ts)
+            if key in seen_prod:
                 continue
-            rows.append(
-                {
-                    "_sink": "pnl_prod",
-                    "strategy_table_name": bar.strategy_table_name,
-                    "strategy_id": bar.strategy_id,
-                    "strategy_name": bar.strategy_name,
-                    "underlying": bar.underlying,
-                    "config_timeframe": bar.config_timeframe,
-                    "source": "production",
-                    "version": "v2",
-                    "ts": candle.ts,
-                    "cumulative_pnl": pnl,
-                    "benchmark": bar.benchmark,
-                    "position": bar.position,
-                    "price": candle.open,
-                    "final_signal": bar.final_signal,
-                    "weighting": bar.weighting,
-                    "updated_at": now,
-                }
-            )
+            seen_prod.add(key)
+            row = _compute_pnl_row(state_prod, bar.strategy_table_name, candle, bar, "production", now)
+            if row:
+                rows.append({"_sink": "pnl_prod", "_row": row})
 
-    # --- real_trade ---
-    if cfg.real_trade:
-        real_trade_revisions = fetch_real_trade_revisions_for_candle(
-            candle.instrument, candle.ts
-        )
-        # Pick the latest active revision per strategy (revisions are ASC by revision_ts).
-        # A revision is active when execution_ts <= candle.ts.
-        active_revisions: dict[str, tuple[StrategyRevision, datetime]] = {}
-        for rev in real_trade_revisions:
-            execution_ts = (rev.revision_ts + timedelta(seconds=59)).replace(
-                second=0, microsecond=0
-            )
-            if execution_ts <= candle.ts:
-                active_revisions[rev.strategy_table_name] = (rev, execution_ts)
-
-        # Carry forward strategies with no active revision yet (gap in history or
-        # revision not yet fired). Use wall-clock candle.ts as execution_ts placeholder.
-        # Only carry forward strategies for this candle's underlying to prevent
-        # cross-underlying price contamination (e.g. DOGE strategies computed with SOL price).
-        candle_underlying = candle.instrument.removesuffix("USDT")
-        if last_real_trade_revisions is not None:
-            for stn, prev_rev in last_real_trade_revisions.items():
-                if (
-                    stn not in active_revisions
-                    and prev_rev.underlying == candle_underlying
-                ):
-                    active_revisions[stn] = (prev_rev, candle.ts)
-
-        for stn, (rev, execution_ts) in active_revisions.items():
-            pnl = _compute_pnl_with_lazy_seed(
-                state_real_trade, stn, candle.open, rev.position
-            )
-            if pnl is None:
-                continue
-            rows.append(
-                {
-                    "_sink": "pnl_real_trade",
-                    "strategy_table_name": stn,
-                    "strategy_id": rev.strategy_id,
-                    "strategy_name": rev.strategy_name,
-                    "underlying": rev.underlying,
-                    "config_timeframe": rev.config_timeframe,
-                    "source": "real_trade",
-                    "version": "v2",
-                    "ts": candle.ts,
-                    "cumulative_pnl": pnl,
-                    "benchmark": rev.benchmark,
-                    "position": rev.position,
-                    "price": candle.open,
-                    "final_signal": rev.final_signal,
-                    "weighting": rev.weighting,
-                    "updated_at": now,
-                    "closing_ts": rev.closing_ts,
-                    "execution_ts": execution_ts,
-                }
-            )
-
-        # Update carry-forward state with this candle's active revisions.
-        if last_real_trade_revisions is not None:
-            last_real_trade_revisions.update(
-                {stn: rev for stn, (rev, _) in active_revisions.items()}
-            )
-
-    # --- bt ---
     if cfg.bt:
-        bt_bars = fetch_bt_strategies_for_candle(candle.instrument, candle.ts)
-        for bt_bar in bt_bars:
-            pnl = _compute_pnl_with_lazy_seed(
-                state_bt, bt_bar.strategy_table_name, candle.open, bt_bar.position
-            )
-            if pnl is None:
+        for bar in fetch_bt_strategies_for_candle(candle.instrument, candle.ts):
+            key = (bar.strategy_instance_id, bar.bar_ts)
+            if key in seen_bt:
                 continue
-            rows.append(
-                {
-                    "_sink": "pnl_bt",
-                    "strategy_table_name": bt_bar.strategy_table_name,
-                    "strategy_id": bt_bar.strategy_id,
-                    "strategy_name": bt_bar.strategy_name,
-                    "underlying": bt_bar.underlying,
-                    "config_timeframe": bt_bar.config_timeframe,
-                    "source": "backtest",
-                    "version": "v2",
-                    "ts": candle.ts,
-                    "cumulative_pnl": pnl,
-                    "benchmark": bt_bar.benchmark,
-                    "position": bt_bar.position,
-                    "price": candle.open,
-                    "final_signal": bt_bar.final_signal,
-                    "weighting": bt_bar.weighting,
-                    "updated_at": now,
-                }
+            seen_bt.add(key)
+            row = _compute_pnl_row(state_bt, bar.strategy_table_name, candle, bar, "backtest", now)
+            if row:
+                rows.append({"_sink": "pnl_bt", "_row": row})
+
+    if cfg.real_trade:
+        for rev in fetch_real_trade_for_candle(candle.instrument, candle.ts):
+            if not state_real_trade.should_apply_revision(
+                rev.strategy_table_name, rev.bar_ts, rev.revision_ts
+            ):
+                continue
+            row = _compute_pnl_row(
+                state_real_trade, rev.strategy_table_name, candle, rev,
+                "real_trade", now, rev.bar_ts, rev.revision_ts,
             )
+            if row:
+                rows.append({"_sink": "pnl_real_trade", "_row": row})
 
     return rows
-
-
-_COLD_START_DAYS = 3
-_PNL_TOLERANCE = 1e-6  # warn threshold: above this is logged
-_PNL_CRASH_TOLERANCE = 2e-3  # 0.2% — above this indicates real corruption
-
-
-def _recompute_and_verify(
-    table: str,
-    state: AnchorState,
-    reference_ts: "datetime | None" = None,
-) -> int:
-    """Re-walk the last _COLD_START_DAYS of PnL rows and verify they match ClickHouse.
-
-    For each strategy, fetches the last row just before the 3-day window as the
-    starting point, then walks every stored minute in chronological order
-    re-applying the PnL formula.
-
-    Small deviations (> _PNL_TOLERANCE but <= _PNL_CRASH_TOLERANCE) are logged as
-    warnings — expected when a Dagster backfill overwrote consumer rows using
-    futures_price_1min (REST) prices instead of WebSocket prices.
-
-    Large deviations (> _PNL_CRASH_TOLERANCE) crash the consumer — these indicate
-    real corruption that cannot be explained by REST vs WebSocket price drift.
-
-    Returns the number of strategies seeded into state.
-    """
-    if reference_ts is not None:
-        window_start = reference_ts - timedelta(days=_COLD_START_DAYS)
-        window_start_str = window_start.strftime("%Y-%m-%d %H:%M:%S")
-        window_end_str = reference_ts.strftime("%Y-%m-%d %H:%M:%S")
-        seed_clause = f"ts < '{window_start_str}'"
-        window_clause = f"ts >= '{window_start_str}' AND ts <= '{window_end_str}'"
-    else:
-        seed_clause = f"ts < now() - INTERVAL {_COLD_START_DAYS} DAY"
-        window_clause = f"ts >= now() - INTERVAL {_COLD_START_DAYS} DAY"
-
-    seed_sql = f"""\
-SELECT
-    strategy_table_name,
-    cumulative_pnl  AS pnl,
-    price,
-    position
-FROM {table}
-WHERE {seed_clause}
-ORDER BY strategy_table_name, ts DESC, updated_at DESC
-LIMIT 1 BY strategy_table_name
-"""
-    seeds: dict[str, AnchorRecord] = {}
-    for row in query_dicts(seed_sql):
-        seeds[row["strategy_table_name"]] = AnchorRecord(
-            pnl=row["pnl"],
-            price=row["price"],
-            position=row["position"],
-        )
-
-    window_sql = f"""\
-SELECT
-    strategy_table_name,
-    ts,
-    cumulative_pnl,
-    price,
-    position
-FROM {table}
-WHERE {window_clause}
-ORDER BY strategy_table_name, ts ASC, updated_at DESC
-LIMIT 1 BY strategy_table_name, ts
-"""
-    rows = query_dicts(window_sql)
-    if not rows:
-        logger.warning(
-            "Cold-start verify: no rows in 3-day window for %s — skipping", table
-        )
-        return 0
-
-    soft_mismatches: list[str] = []  # small delta — REST vs WebSocket price drift
-    hard_mismatches: list[str] = []  # large delta — likely real corruption
-    prev: dict[str, AnchorRecord] = dict(seeds)
-
-    for row in rows:
-        stn = row["strategy_table_name"]
-        stored_pnl: float = row["cumulative_pnl"]
-        price: float = row["price"]
-        position: float = row["position"]
-        ts = row["ts"]
-
-        if stn not in prev:
-            # No row before the window — accept stored value as the chain start.
-            prev[stn] = AnchorRecord(pnl=stored_pnl, price=price, position=position)
-            continue
-
-        p = prev[stn]
-        recomputed = p.pnl + position * (price - p.price) / p.price
-        deviation = abs(recomputed - stored_pnl)
-        if deviation > _PNL_CRASH_TOLERANCE:
-            hard_mismatches.append(
-                f"{stn} ts={ts} stored={stored_pnl:.8f} recomputed={recomputed:.8f} "
-                f"delta={deviation:.2e}"
-            )
-        elif deviation > _PNL_TOLERANCE:
-            soft_mismatches.append(
-                f"{stn} ts={ts} stored={stored_pnl:.8f} recomputed={recomputed:.8f} "
-                f"delta={deviation:.2e}"
-            )
-
-        # Advance using stored value to stay in sync with ClickHouse.
-        prev[stn] = AnchorRecord(pnl=stored_pnl, price=price, position=position)
-
-    if soft_mismatches:
-        detail = "\n  ".join(soft_mismatches[:20])
-        logger.warning(
-            "Cold-start PnL verify: %d small mismatch(es) for %s "
-            "(delta <= %.1e — expected REST vs WebSocket price drift from Dagster backfill, "
-            "seeding from stored values):\n  %s",
-            len(soft_mismatches),
-            table,
-            _PNL_CRASH_TOLERANCE,
-            detail,
-        )
-
-    if hard_mismatches:
-        detail = "\n  ".join(hard_mismatches[:20])
-        raise RuntimeError(
-            f"Cold-start PnL verification failed for {table} "
-            f"({len(hard_mismatches)} mismatch(es) exceeding {_PNL_CRASH_TOLERANCE:.1e}):\n  {detail}\n"
-            "Consumer cannot start with inconsistent PnL state. "
-            "Run a Dagster backfill to reconcile ClickHouse before restarting."
-        )
-
-    seeded = 0
-    for stn, record in prev.items():
-        state.set(stn, record)
-        seeded += 1
-
-    logger.info(
-        "Cold-start verify passed for %s: walked %d row(s), seeded %d strategy state(s)",
-        table,
-        len(rows),
-        seeded,
-    )
-    return seeded
-
-
-def _bootstrap_anchors(
-    state_prod: AnchorState,
-    state_real_trade: AnchorState,
-    state_bt: AnchorState,
-    cfg: SinkConfig | None = None,
-    reference_ts: "datetime | None" = None,
-) -> None:
-    """On cold start, seed running state from ClickHouse for enabled PnL sinks.
-
-    Re-walks the last _COLD_START_DAYS of stored rows and crashes if any stored
-    value deviates from the recomputed value — ensuring the consumer never starts
-    on top of inconsistent data.
-    """
-    if cfg is not None and not any([cfg.prod, cfg.real_trade, cfg.bt]):
-        logger.info("No PnL sinks enabled — skipping anchor bootstrap")
-        return
-
-    candidates = [
-        ("analytics.strategy_pnl_1min_prod_v2", state_prod, cfg.prod if cfg else True),
-        (
-            "analytics.strategy_pnl_1min_real_trade_v2",
-            state_real_trade,
-            cfg.real_trade if cfg else True,
-        ),
-        ("analytics.strategy_pnl_1min_bt_v2", state_bt, cfg.bt if cfg else True),
-    ]
-    for table, state, enabled in candidates:
-        if not enabled:
-            continue
-        _recompute_and_verify(table, state, reference_ts=reference_ts)
-
-    enabled_states = [state for _, state, enabled in candidates if enabled]
-    if all(len(s) == 0 for s in enabled_states):
-        raise RuntimeError(
-            "Bootstrap failed: no rows found in ClickHouse within the last "
-            f"{_COLD_START_DAYS} days. "
-            "Cannot start consumer without a valid PnL baseline."
-        )
-    logger.info(
-        "Bootstrapped %d prod, %d real_trade, %d bt strategy state(s) from ClickHouse",
-        len(state_prod),
-        len(state_real_trade),
-        len(state_bt),
-    )
-
-
-def emit_candle_lag(candle_ts: datetime, cw_client: Any, sink: str) -> None:
-    """Emit CandleLagSeconds and CandleProcessingTs to CloudWatch. Swallows errors."""
-    try:
-        lag = (datetime.now(UTC).replace(tzinfo=None) - candle_ts).total_seconds()
-        dimensions = [{"Name": "Sink", "Value": sink}]
-        cw_client.put_metric_data(
-            Namespace="trading-analysis",
-            MetricData=[
-                {
-                    "MetricName": "CandleLagSeconds",
-                    "Value": lag,
-                    "Unit": "Seconds",
-                    "Dimensions": dimensions,
-                },
-                {
-                    "MetricName": "CandleProcessingTs",
-                    "Value": candle_ts.timestamp(),
-                    "Unit": "None",
-                    "Dimensions": dimensions,
-                },
-            ],
-        )
-    except Exception:
-        logger.warning("Failed to emit candle metrics", exc_info=True)
 
 
 def _flush(
@@ -576,23 +357,14 @@ def _flush(
     pnl_real_trade_batch: list[list],
     pnl_bt_batch: list[list],
 ) -> None:
-    """Insert batches to ClickHouse, then commit offsets. Raises on failure."""
     if price_batch:
         insert_rows("analytics.futures_price_1min", PRICE_COLUMNS, price_batch)
     if pnl_prod_batch:
-        insert_rows(
-            "analytics.strategy_pnl_1min_prod_v2", PROD_INSERT_COLUMNS, pnl_prod_batch
-        )
+        insert_rows("analytics.strategy_pnl_1min_prod_v2", INSERT_COLUMNS, pnl_prod_batch)
     if pnl_real_trade_batch:
-        insert_rows(
-            "analytics.strategy_pnl_1min_real_trade_v2",
-            REAL_TRADE_INSERT_COLUMNS,
-            pnl_real_trade_batch,
-        )
+        insert_rows("analytics.strategy_pnl_1min_real_trade_v2", INSERT_COLUMNS, pnl_real_trade_batch)
     if pnl_bt_batch:
-        insert_rows(
-            "analytics.strategy_pnl_1min_bt_v2", PROD_INSERT_COLUMNS, pnl_bt_batch
-        )
+        insert_rows("analytics.strategy_pnl_1min_bt_v2", INSERT_COLUMNS, pnl_bt_batch)
     price_batch.clear()
     pnl_prod_batch.clear()
     pnl_real_trade_batch.clear()
@@ -600,64 +372,60 @@ def _flush(
     try:
         consumer.commit(asynchronous=False)
     except KafkaException as e:
-        if e.args[0].code() == KafkaError._NO_OFFSET:
-            pass  # no messages consumed yet — nothing to commit
-        else:
+        if e.args[0].code() != KafkaError._NO_OFFSET:
             raise
+
+
+def emit_candle_lag(candle_ts: datetime, cw_client: Any, sink: str) -> None:
+    try:
+        lag = (datetime.now(UTC).replace(tzinfo=None) - candle_ts).total_seconds()
+        dims = [{"Name": "Sink", "Value": sink}]
+        cw_client.put_metric_data(
+            Namespace="trading-analysis",
+            MetricData=[
+                {"MetricName": "CandleLagSeconds", "Value": lag, "Unit": "Seconds", "Dimensions": dims},
+                {"MetricName": "CandleProcessingTs", "Value": candle_ts.timestamp(), "Unit": "None", "Dimensions": dims},
+            ],
+        )
+    except Exception:
+        logger.warning("Failed to emit candle metrics", exc_info=True)
 
 
 def run() -> None:
     logging.basicConfig(level=logging.INFO)
-
     sink_cfg = SinkConfig.from_env()
-    logger.info(
-        "Sink config: price=%s prod=%s real_trade=%s bt=%s",
-        sink_cfg.price,
-        sink_cfg.prod,
-        sink_cfg.real_trade,
-        sink_cfg.bt,
-    )
+    logger.info("Sink config: price=%s prod=%s real_trade=%s bt=%s",
+                sink_cfg.price, sink_cfg.prod, sink_cfg.real_trade, sink_cfg.bt)
 
-    reference_ts = peek_reference_ts(
-        os.environ["REDPANDA_BROKERS"],
-        resolve_group_id(),
-    )
+    reference_ts = peek_reference_ts(os.environ["REDPANDA_BROKERS"], resolve_group_id())
     if reference_ts is not None:
-        logger.info(
-            "Cold-start reference_ts from Redpanda committed offset: %s", reference_ts
-        )
+        logger.info("Cold-start reference_ts from committed offset: %s", reference_ts)
     else:
-        logger.info("Cold-start reference_ts: no committed offset found, using now()")
+        logger.info("No committed offset — using now() as reference_ts")
 
     state_prod = AnchorState()
-    state_real_trade = AnchorState()
     state_bt = AnchorState()
-    _bootstrap_anchors(state_prod, state_real_trade, state_bt, sink_cfg, reference_ts)
+    state_real_trade = AnchorState()
+    seen_prod: set[tuple[str, datetime]] = set()
+    seen_bt: set[tuple[str, datetime]] = set()
 
-    last_real_trade_revisions: dict[str, StrategyRevision] = {}
+    if sink_cfg.prod:
+        state_prod, seen_prod = _bootstrap_state("prod", reference_ts)
+    if sink_cfg.bt:
+        state_bt, seen_bt = _bootstrap_state("bt", reference_ts)
     if sink_cfg.real_trade:
-        ref = reference_ts if reference_ts is not None else datetime.now(UTC).replace(tzinfo=None)
-        last_real_trade_revisions = fetch_last_active_revisions(ref)
-        logger.info(
-            "Seeded last_real_trade_revisions with %d strategies from ClickHouse at reference_ts=%s",
-            len(last_real_trade_revisions),
-            ref,
-        )
+        state_real_trade, _ = _bootstrap_state("real_trade", reference_ts)
 
-    cw_client = boto3.client(
-        "cloudwatch", region_name=os.environ.get("AWS_REGION", "ap-northeast-1")
-    )
-
+    cw_client = boto3.client("cloudwatch", region_name=os.environ.get("AWS_REGION", "ap-northeast-1"))
     group_id = resolve_group_id()
     sink_label = group_id.removeprefix("pnl-consumer-") or group_id
-    consumer = Consumer(
-        {
-            "bootstrap.servers": os.environ["REDPANDA_BROKERS"],
-            "group.id": group_id,
-            "auto.offset.reset": "earliest",
-            "enable.auto.commit": False,
-        }
-    )
+
+    consumer = Consumer({
+        "bootstrap.servers": os.environ["REDPANDA_BROKERS"],
+        "group.id": group_id,
+        "auto.offset.reset": "earliest",
+        "enable.auto.commit": False,
+    })
     consumer.subscribe([TOPIC])
     logger.info("Subscribed to %s as group %s", TOPIC, group_id)
 
@@ -667,15 +435,9 @@ def run() -> None:
     pnl_bt_batch: list[list] = []
 
     def _shutdown(signum, frame):
-        logger.info("Shutdown signal received, flushing and closing")
+        logger.info("Shutdown signal received — flushing and closing")
         try:
-            _flush(
-                consumer,
-                price_batch,
-                pnl_prod_batch,
-                pnl_real_trade_batch,
-                pnl_bt_batch,
-            )
+            _flush(consumer, price_batch, pnl_prod_batch, pnl_real_trade_batch, pnl_bt_batch)
         except Exception:
             logger.exception("Error during shutdown flush")
         consumer.close()
@@ -710,77 +472,29 @@ def run() -> None:
                 close=data["close"],
                 volume=data["volume"],
             )
-            logger.info(
-                "Received %s close=%.2f ts=%s batch=%d/%d",
-                candle.instrument,
-                candle.close,
-                candle.ts,
-                len(price_batch) + 1,
-                FLUSH_EVERY,
-            )
+            logger.info("Candle %s open=%.2f ts=%s", candle.instrument, candle.open, candle.ts)
 
             for row in process_candle(
-                candle,
-                state_prod,
-                state_real_trade,
-                state_bt,
-                sink_cfg,
-                last_real_trade_revisions,
+                candle, state_prod, state_real_trade, state_bt,
+                seen_prod, seen_bt, sink_cfg,
             ):
-                if row["_sink"] == "price":
-                    price_batch.append(
-                        [
-                            row["exchange"],
-                            row["instrument"],
-                            row["ts"],
-                            row["open"],
-                            row["high"],
-                            row["low"],
-                            row["close"],
-                            row["volume"],
-                        ]
-                    )
-                elif row["_sink"] == "pnl_prod":
-                    pnl_prod_batch.append([row[c] for c in PROD_INSERT_COLUMNS])
-                elif row["_sink"] == "pnl_real_trade":
-                    pnl_real_trade_batch.append(
-                        [row[c] for c in REAL_TRADE_INSERT_COLUMNS]
-                    )
-                elif row["_sink"] == "pnl_bt":
-                    pnl_bt_batch.append([row[c] for c in PROD_INSERT_COLUMNS])
+                sink = row["_sink"]
+                if sink == "price":
+                    price_batch.append([row["exchange"], row["instrument"], row["ts"],
+                                        row["open"], row["high"], row["low"], row["close"], row["volume"]])
+                elif sink == "pnl_prod":
+                    pnl_prod_batch.append(row["_row"])
+                elif sink == "pnl_real_trade":
+                    pnl_real_trade_batch.append(row["_row"])
+                elif sink == "pnl_bt":
+                    pnl_bt_batch.append(row["_row"])
 
-            total_batch = (
-                len(price_batch)
-                + len(pnl_prod_batch)
-                + len(pnl_real_trade_batch)
-                + len(pnl_bt_batch)
-            )
-            if total_batch >= FLUSH_EVERY:
-                n_price = len(price_batch)
-                n_prod = len(pnl_prod_batch)
-                n_rt = len(pnl_real_trade_batch)
-                n_bt = len(pnl_bt_batch)
-                _flush(
-                    consumer,
-                    price_batch,
-                    pnl_prod_batch,
-                    pnl_real_trade_batch,
-                    pnl_bt_batch,
-                )
+            total = len(price_batch) + len(pnl_prod_batch) + len(pnl_real_trade_batch) + len(pnl_bt_batch)
+            if total >= FLUSH_EVERY:
+                n = (len(price_batch), len(pnl_prod_batch), len(pnl_real_trade_batch), len(pnl_bt_batch))
+                _flush(consumer, price_batch, pnl_prod_batch, pnl_real_trade_batch, pnl_bt_batch)
                 emit_candle_lag(candle.ts, cw_client, sink_label)
-                logger.info(
-                    "Flushed %d price + %d prod + %d real_trade + %d bt rows",
-                    n_price,
-                    n_prod,
-                    n_rt,
-                    n_bt,
-                )
-                if n_prod:
-                    logger.info("ClickHouseSink prod rows=%d", n_prod)
-                if n_rt:
-                    logger.info("ClickHouseSink real_trade rows=%d", n_rt)
-                if n_bt:
-                    logger.info("ClickHouseSink bt rows=%d", n_bt)
+                logger.info("Flushed %d price + %d prod + %d real_trade + %d bt rows", *n)
 
     except Exception:
         logger.exception("Fatal error in consumer loop")

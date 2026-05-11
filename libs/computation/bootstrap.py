@@ -1,31 +1,26 @@
 """Cold-start bootstrap queries for the PnL streaming consumer.
 
 Provides the data needed to seed AnchorState before the live streaming loop starts:
-  1. fetch_bootstrap_seeds() — per-strategy anchor state at start_ts
-  2. fetch_walk_rows()       — stored PnL rows in [start_ts, reference_ts) for verification
+  1. fetch_bootstrap_seeds()      — per-strategy anchor state at start_ts
+  2. fetch_walk_rows()            — stored PnL rows in [start_ts, reference_ts) for verification
 
-These are called once at startup (not per-candle), so they query all underlyings at once.
-Position always comes from strategy_output_history_*; price from futures_price_1min.
+Supports all three modes (prod, bt, real_trade) via the pnl_table / history_table parameters.
+
+Position resolution differs by mode:
+  - prod/bt:        latest bar with ts <= cutoff, argMin(row_json, revision_ts) — first revision wins
+  - real_trade:     latest revision with revision_ts <= cutoff per strategy_instance_id
+
+Price always comes from futures_price_1min, never from the PnL table's price column.
 """
 
 import json
-from dataclasses import dataclass
+from bisect import bisect_right
+from dataclasses import dataclass, field
 from datetime import datetime
 
-from trading_dagster.utils.clickhouse_client import query_dicts
+from libs.clickhouse_client import query_dicts
 
-_TF_MINUTES_EXPR_NO_ALIAS = """\
-multiIf(
-        config_timeframe = '1m',  1,
-        config_timeframe = '3m',  3,
-        config_timeframe = '5m',  5,
-        config_timeframe = '15m', 15,
-        config_timeframe = '30m', 30,
-        config_timeframe = '1h',  60,
-        config_timeframe = '4h',  240,
-        config_timeframe = '1d',  1440,
-        5
-    )"""
+_DATETIME_MIN = datetime.min
 
 
 @dataclass
@@ -36,6 +31,10 @@ class BootstrapSeed:
     pnl: float
     price: float
     position: float
+    # bar_ts and revision_ts are used by real_trade's AnchorState revision guard.
+    # For prod/bt these are unused — left at datetime.min so any real revision passes.
+    bar_ts: datetime = field(default_factory=lambda: _DATETIME_MIN)
+    revision_ts: datetime = field(default_factory=lambda: _DATETIME_MIN)
 
 
 @dataclass
@@ -47,39 +46,41 @@ class WalkRow:
     cumulative_pnl: float
     price: float
     position: float
+    # real_trade only: the bar_ts and revision_ts active at this minute.
+    bar_ts: datetime = field(default_factory=lambda: _DATETIME_MIN)
+    revision_ts: datetime = field(default_factory=lambda: _DATETIME_MIN)
 
 
 def fetch_bootstrap_seeds(
     pnl_table: str,
     history_table: str,
     start_ts: datetime,
+    real_trade: bool = False,
 ) -> list[BootstrapSeed]:
     """Return per-strategy anchor state to seed AnchorState at start_ts.
 
     For each strategy_instance_id:
-      - cumulative_pnl: from the latest pnl_table row with ts < start_ts
-        (0.0 if no prior row)
-      - price: from futures_price_1min at the same minute as that pnl row
-        (0.0 if no prior row — signals "no price yet")
-      - position: from the latest bar in history_table with ts <= start_ts,
-        first revision only (argMin by revision_ts)
-        (0.0 if no bar has arrived yet)
+      - cumulative_pnl: latest pnl_table row with ts < start_ts (0.0 if none)
+      - price: from futures_price_1min at that same minute (0.0 if none)
+      - position: from history_table
+          prod/bt:     latest bar with ts <= start_ts, first revision (argMin)
+          real_trade:  latest revision with revision_ts <= start_ts
+      - bar_ts / revision_ts: populated for real_trade (used by revision guard); datetime.min for prod/bt
 
     Args:
-        pnl_table: fully-qualified table name, e.g. 'analytics.strategy_pnl_1min_prod_v2'
+        pnl_table:     e.g. 'analytics.strategy_pnl_1min_prod_v2'
         history_table: e.g. 'analytics.strategy_output_history_v2'
-        start_ts: reference_ts - 3 days; bootstrap anchor point
+        start_ts:      reference_ts - 3 days
+        real_trade:    True to use revision_ts-based position resolution
     """
     start_str = start_ts.strftime("%Y-%m-%d %H:%M:%S")
 
-    # Step 1: get latest pnl row per strategy before start_ts to seed cumulative_pnl.
-    # Price comes from futures_price_1min at the same minute, not from the pnl table.
+    # ── PnL + price baseline ──────────────────────────────────────────────────
     pnl_sql = f"""\
 SELECT
     p.strategy_table_name,
     p.strategy_instance_id,
     p.cumulative_pnl,
-    p.ts AS pnl_ts,
     coalesce(fp.open, 0.0) AS price
 FROM (
     SELECT
@@ -105,10 +106,33 @@ LEFT JOIN analytics.futures_price_1min fp
             "price": float(row["price"]),
         }
 
-    # Step 2: get latest position per strategy_instance_id from history at start_ts.
-    # ts <= start_ts (not revision_ts) because bars arrive late; we want what was
-    # visible at start_ts, even if revision_ts is slightly later.
-    pos_sql = f"""\
+    # ── Position ──────────────────────────────────────────────────────────────
+    if real_trade:
+        # Latest revision whose revision_ts <= start_ts per strategy_instance_id.
+        pos_sql = f"""\
+SELECT
+    strategy_table_name,
+    strategy_instance_id,
+    ts AS bar_ts,
+    max(revision_ts) AS revision_ts,
+    argMax(row_json, revision_ts) AS row_json
+FROM {history_table}
+WHERE revision_ts <= '{start_str}'
+GROUP BY strategy_table_name, strategy_instance_id, ts
+ORDER BY strategy_instance_id, ts DESC
+LIMIT 1 BY strategy_instance_id
+"""
+        pos_rows: dict[str, dict] = {}
+        for row in query_dicts(pos_sql):
+            rj = json.loads(row["row_json"])
+            pos_rows[row["strategy_table_name"]] = {
+                "position": float(rj.get("position", 0.0)),
+                "bar_ts": row["bar_ts"],
+                "revision_ts": row["revision_ts"],
+            }
+    else:
+        # Prod/bt: latest bar ts <= start_ts, first revision only.
+        pos_sql = f"""\
 SELECT
     strategy_table_name,
     strategy_instance_id,
@@ -116,25 +140,33 @@ SELECT
 FROM {history_table}
 WHERE ts <= '{start_str}'
 GROUP BY strategy_table_name, strategy_instance_id
+ORDER BY strategy_table_name, ts DESC
+LIMIT 1 BY strategy_table_name
 """
-    positions: dict[str, float] = {}
-    for row in query_dicts(pos_sql):
-        rj = json.loads(row["row_json"])
-        key = row["strategy_table_name"]
-        positions[key] = float(rj.get("position", 0.0))
+        pos_rows = {}
+        for row in query_dicts(pos_sql):
+            rj = json.loads(row["row_json"])
+            pos_rows[row["strategy_table_name"]] = {
+                "position": float(rj.get("position", 0.0)),
+                "bar_ts": _DATETIME_MIN,
+                "revision_ts": _DATETIME_MIN,
+            }
 
-    # Merge: every strategy seen in either source gets a seed entry.
-    all_keys = set(pnl_seeds) | set(positions)
+    # ── Merge ─────────────────────────────────────────────────────────────────
+    all_keys = set(pnl_seeds) | set(pos_rows)
     seeds: list[BootstrapSeed] = []
     for stn in all_keys:
         pnl_info = pnl_seeds.get(stn, {})
+        pos_info = pos_rows.get(stn, {})
         seeds.append(
             BootstrapSeed(
                 strategy_table_name=stn,
                 strategy_instance_id=pnl_info.get("strategy_instance_id", ""),
                 pnl=pnl_info.get("pnl", 0.0),
                 price=pnl_info.get("price", 0.0),
-                position=positions.get(stn, 0.0),
+                position=pos_info.get("position", 0.0),
+                bar_ts=pos_info.get("bar_ts", _DATETIME_MIN),
+                revision_ts=pos_info.get("revision_ts", _DATETIME_MIN),
             )
         )
     return seeds
@@ -145,31 +177,42 @@ def fetch_walk_rows(
     history_table: str,
     start_ts: datetime,
     reference_ts: datetime,
+    real_trade: bool = False,
 ) -> list[WalkRow]:
     """Return stored PnL rows in [start_ts, reference_ts) ordered chronologically.
 
-    Used during the bootstrap walk to verify that stored cumulative_pnl values are
-    consistent with the formula: pnl = prev_pnl + position * (price - prev_price) / prev_price
+    Used during the bootstrap walk to verify stored cumulative_pnl values against:
+        pnl = prev_pnl + position * (price - prev_price) / prev_price
 
-    Price for each row comes from futures_price_1min at that minute — never from the
-    pnl table's price column.
-
-    Position for each row is the latest bar in history_table with ts <= row.ts,
-    first revision only (argMin by revision_ts).
-
+    Price for each row comes from futures_price_1min — never the pnl table's price column.
     reference_ts is EXCLUDED — the consumer will process that candle live from Kafka.
+
+    Position resolution:
+      prod/bt:     latest bar with ts <= row.ts, first revision only
+      real_trade:  latest revision with revision_ts <= row.ts per strategy_instance_id
+
+    For real_trade, WalkRow.bar_ts and WalkRow.revision_ts are also populated so the
+    caller can advance AnchorState's revision guard fields after each walked row.
+
+    Args:
+        pnl_table:     e.g. 'analytics.strategy_pnl_1min_prod_v2'
+        history_table: e.g. 'analytics.strategy_output_history_v2'
+        start_ts:      start of walk window (inclusive)
+        reference_ts:  end of walk window (exclusive)
+        real_trade:    True to use revision_ts-based position resolution
     """
     start_str = start_ts.strftime("%Y-%m-%d %H:%M:%S")
     ref_str = reference_ts.strftime("%Y-%m-%d %H:%M:%S")
 
-    sql = f"""\
+    # ── Fetch stored PnL rows with price joined ───────────────────────────────
+    pnl_sql = f"""\
 SELECT
     p.strategy_table_name,
     p.strategy_instance_id,
     p.ts,
     p.cumulative_pnl,
-    coalesce(fp.open, 0.0) AS price,
-    p.underlying
+    p.underlying,
+    coalesce(fp.open, 0.0) AS price
 FROM (
     SELECT
         strategy_table_name,
@@ -188,57 +231,100 @@ LEFT JOIN analytics.futures_price_1min fp
  AND fp.ts = p.ts
 ORDER BY p.strategy_table_name, p.ts
 """
-    rows = query_dicts(sql)
-    if not rows:
+    pnl_rows = query_dicts(pnl_sql)
+    if not pnl_rows:
         return []
 
-    # Fetch position for each (strategy_table_name, ts) pair in one batch.
-    # For each row ts, the active position is the latest bar with ts <= row.ts.
-    # We get the min ts and max ts from the walk window and fetch all bars in range,
-    # then resolve per row in Python.
-    max_ts_str = ref_str  # walk goes up to reference_ts exclusive
-    pos_sql = f"""\
+    # ── Fetch history bars/revisions for position resolution ──────────────────
+    if real_trade:
+        # All revisions with revision_ts in [start_ts, reference_ts) — sorted ASC.
+        # We resolve per walk row in Python using bisect.
+        hist_sql = f"""\
+SELECT
+    strategy_instance_id,
+    ts AS bar_ts,
+    revision_ts,
+    argMax(row_json, revision_ts) AS row_json
+FROM {history_table}
+WHERE revision_ts >= '{start_str}'
+  AND revision_ts < '{ref_str}'
+GROUP BY strategy_instance_id, ts, revision_ts
+ORDER BY strategy_instance_id, revision_ts
+"""
+        # Build per-strategy_instance_id sorted list of (revision_ts, bar_ts, position).
+        rt_revisions: dict[str, list[tuple[datetime, datetime, float]]] = {}
+        for row in query_dicts(hist_sql):
+            siid = row["strategy_instance_id"]
+            rj = json.loads(row["row_json"])
+            entry = (row["revision_ts"], row["bar_ts"], float(rj.get("position", 0.0)))
+            rt_revisions.setdefault(siid, []).append(entry)
+
+        def _get_rt_position(
+            siid: str, row_ts: datetime
+        ) -> tuple[float, datetime, datetime]:
+            revs = rt_revisions.get(siid)
+            if not revs:
+                return 0.0, _DATETIME_MIN, _DATETIME_MIN
+            rev_ts_keys = [r[0] for r in revs]
+            idx = bisect_right(rev_ts_keys, row_ts) - 1
+            if idx < 0:
+                return 0.0, _DATETIME_MIN, _DATETIME_MIN
+            _, bar_ts, position = revs[idx]
+            return position, bar_ts, rev_ts_keys[idx]
+
+    else:
+        # Prod/bt: bars in window, first revision per (strategy_table_name, bar_ts).
+        hist_sql = f"""\
 SELECT
     strategy_table_name,
-    strategy_instance_id,
     ts AS bar_ts,
     argMin(row_json, revision_ts) AS row_json
 FROM {history_table}
-WHERE ts <= '{max_ts_str}'
-  AND ts >= '{start_str}'
-GROUP BY strategy_table_name, strategy_instance_id, ts
+WHERE ts >= '{start_str}'
+  AND ts < '{ref_str}'
+GROUP BY strategy_table_name, ts
 ORDER BY strategy_table_name, ts
 """
-    # Build position lookup: stn -> sorted list of (bar_ts, position)
-    from bisect import bisect_right
-    bar_positions: dict[str, list[tuple[datetime, float]]] = {}
-    for pos_row in query_dicts(pos_sql):
-        stn = pos_row["strategy_table_name"]
-        rj = json.loads(pos_row["row_json"])
-        position = float(rj.get("position", 0.0))
-        bar_ts = pos_row["bar_ts"]
-        if stn not in bar_positions:
-            bar_positions[stn] = []
-        bar_positions[stn].append((bar_ts, position))
+        bar_positions: dict[str, list[tuple[datetime, float]]] = {}
+        for row in query_dicts(hist_sql):
+            stn = row["strategy_table_name"]
+            rj = json.loads(row["row_json"])
+            bar_positions.setdefault(stn, []).append(
+                (row["bar_ts"], float(rj.get("position", 0.0)))
+            )
 
-    def _get_position(stn: str, row_ts: datetime) -> float:
-        bars = bar_positions.get(stn)
-        if not bars:
-            return 0.0
-        ts_keys = [b[0] for b in bars]
-        idx = bisect_right(ts_keys, row_ts) - 1
-        return bars[idx][1] if idx >= 0 else 0.0
+        def _get_prod_position(stn: str, row_ts: datetime) -> float:
+            bars = bar_positions.get(stn)
+            if not bars:
+                return 0.0
+            ts_keys = [b[0] for b in bars]
+            idx = bisect_right(ts_keys, row_ts) - 1
+            return bars[idx][1] if idx >= 0 else 0.0
 
+    # ── Build WalkRow list ────────────────────────────────────────────────────
     result: list[WalkRow] = []
-    for row in rows:
+    for row in pnl_rows:
+        stn = row["strategy_table_name"]
+        siid = row["strategy_instance_id"]
+        row_ts = row["ts"]
+
+        if real_trade:
+            position, bar_ts, revision_ts = _get_rt_position(siid, row_ts)
+        else:
+            position = _get_prod_position(stn, row_ts)
+            bar_ts = _DATETIME_MIN
+            revision_ts = _DATETIME_MIN
+
         result.append(
             WalkRow(
-                strategy_table_name=row["strategy_table_name"],
-                strategy_instance_id=row["strategy_instance_id"],
-                ts=row["ts"],
+                strategy_table_name=stn,
+                strategy_instance_id=siid,
+                ts=row_ts,
                 cumulative_pnl=float(row["cumulative_pnl"] or 0.0),
                 price=float(row["price"]),
-                position=_get_position(row["strategy_table_name"], row["ts"]),
+                position=position,
+                bar_ts=bar_ts,
+                revision_ts=revision_ts,
             )
         )
     return result
