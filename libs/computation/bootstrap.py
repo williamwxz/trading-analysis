@@ -141,11 +141,11 @@ SELECT
     strategy_table_name,
     strategy_instance_id,
     argMin(row_json, revision_ts) AS row_json,
-    max(ts) AS ts
+    max(ts) AS max_ts
 FROM {history_table}
 WHERE ts <= '{start_str}'
 GROUP BY strategy_table_name, strategy_instance_id
-ORDER BY strategy_table_name, ts DESC
+ORDER BY strategy_table_name, max_ts DESC
 LIMIT 1 BY strategy_table_name
 """
         pos_rows = {}
