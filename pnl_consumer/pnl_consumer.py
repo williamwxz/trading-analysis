@@ -291,10 +291,16 @@ def process_candle(
     seen_prod: set[tuple[str, datetime]],
     seen_bt: set[tuple[str, datetime]],
     cfg: SinkConfig,
-) -> list[dict]:
-    """Compute all output rows for one candle. Returns list of dicts with '_sink' key."""
+) -> tuple[list[dict], int, int, int]:
+    """Compute all output rows for one candle.
+
+    Returns (rows, prod_fetched, bt_fetched, real_trade_fetched) where the
+    fetched counts are the number of strategy instances returned by each
+    candle lookup query — used by the caller to validate flush completeness.
+    """
     now = datetime.now(UTC).replace(tzinfo=None)
     rows: list[dict] = []
+    prod_fetched = bt_fetched = real_trade_fetched = 0
 
     if cfg.price:
         rows.append({
@@ -310,7 +316,9 @@ def process_candle(
         })
 
     if cfg.prod:
-        for bar in fetch_strategies_for_candle(candle.instrument, candle.ts):
+        prod_bars = fetch_strategies_for_candle(candle.instrument, candle.ts)
+        prod_fetched = len(prod_bars)
+        for bar in prod_bars:
             key = (bar.strategy_instance_id, bar.bar_ts)
             if key in seen_prod:
                 continue
@@ -320,7 +328,9 @@ def process_candle(
             )})
 
     if cfg.bt:
-        for bar in fetch_bt_strategies_for_candle(candle.instrument, candle.ts):
+        bt_bars = fetch_bt_strategies_for_candle(candle.instrument, candle.ts)
+        bt_fetched = len(bt_bars)
+        for bar in bt_bars:
             key = (bar.strategy_instance_id, bar.bar_ts)
             if key in seen_bt:
                 continue
@@ -330,7 +340,9 @@ def process_candle(
             )})
 
     if cfg.real_trade:
-        for rev in fetch_real_trade_for_candle(candle.instrument, candle.ts):
+        rt_revs = fetch_real_trade_for_candle(candle.instrument, candle.ts)
+        real_trade_fetched = len(rt_revs)
+        for rev in rt_revs:
             if not state_real_trade.should_apply_revision(
                 rev.strategy_table_name, rev.bar_ts, rev.revision_ts
             ):
@@ -340,7 +352,10 @@ def process_candle(
                 "real_trade", now, rev.bar_ts, rev.revision_ts,
             )})
 
-    return rows
+    return rows, prod_fetched, bt_fetched, real_trade_fetched
+
+
+_SIID_COL = INSERT_COLUMNS.index("strategy_instance_id")  # 15
 
 
 def _flush(
@@ -349,7 +364,30 @@ def _flush(
     pnl_prod_batch: list[list],
     pnl_real_trade_batch: list[list],
     pnl_bt_batch: list[list],
+    expected_prod: int = 0,
+    expected_bt: int = 0,
+    expected_real_trade: int = 0,
 ) -> None:
+    # Validate completeness before writing anything.
+    # The expected counts come from the last fetch_*_for_candle result — the
+    # ground truth for how many strategy instances should be in the output.
+    # If the batch has fewer distinct instances, crash without sinking a single row.
+    for batch, expected, label in (
+        (pnl_prod_batch, expected_prod, "prod"),
+        (pnl_bt_batch, expected_bt, "bt"),
+        (pnl_real_trade_batch, expected_real_trade, "real_trade"),
+    ):
+        if not batch or not expected:
+            continue
+        actual = len({row[_SIID_COL] for row in batch})
+        if actual < expected:
+            raise RuntimeError(
+                f"Flush completeness check failed [{label}]: "
+                f"{actual} distinct strategy_instance_ids in batch < "
+                f"{expected} fetched from history table. "
+                "Refusing to sink partial data."
+            )
+
     if price_batch:
         insert_rows("analytics.futures_price_1min", PRICE_COLUMNS, price_batch)
     if pnl_prod_batch:
@@ -426,6 +464,7 @@ def run() -> None:
     pnl_prod_batch: list[list] = []
     pnl_real_trade_batch: list[list] = []
     pnl_bt_batch: list[list] = []
+    last_prod_fetched = last_bt_fetched = last_rt_fetched = 0
 
     def _shutdown(signum, frame):
         logger.info("Shutdown signal received — flushing and closing")
@@ -467,10 +506,18 @@ def run() -> None:
             )
             logger.info("Candle %s open=%.2f ts=%s", candle.instrument, candle.open, candle.ts)
 
-            for row in process_candle(
+            rows, prod_fetched, bt_fetched, rt_fetched = process_candle(
                 candle, state_prod, state_real_trade, state_bt,
                 seen_prod, seen_bt, sink_cfg,
-            ):
+            )
+            if prod_fetched:
+                last_prod_fetched = prod_fetched
+            if bt_fetched:
+                last_bt_fetched = bt_fetched
+            if rt_fetched:
+                last_rt_fetched = rt_fetched
+
+            for row in rows:
                 sink = row["_sink"]
                 if sink == "price":
                     price_batch.append([row["exchange"], row["instrument"], row["ts"],
@@ -485,7 +532,12 @@ def run() -> None:
             total = len(price_batch) + len(pnl_prod_batch) + len(pnl_real_trade_batch) + len(pnl_bt_batch)
             if total >= FLUSH_EVERY:
                 n = (len(price_batch), len(pnl_prod_batch), len(pnl_real_trade_batch), len(pnl_bt_batch))
-                _flush(consumer, price_batch, pnl_prod_batch, pnl_real_trade_batch, pnl_bt_batch)
+                _flush(
+                    consumer, price_batch, pnl_prod_batch, pnl_real_trade_batch, pnl_bt_batch,
+                    expected_prod=last_prod_fetched,
+                    expected_bt=last_bt_fetched,
+                    expected_real_trade=last_rt_fetched,
+                )
                 emit_candle_lag(candle.ts, cw_client, sink_label)
                 logger.info("Flushed %d price + %d prod + %d real_trade + %d bt rows", *n)
 
