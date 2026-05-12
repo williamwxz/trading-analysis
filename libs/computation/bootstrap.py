@@ -11,14 +11,15 @@ Position resolution differs by mode:
   - prod/bt:        latest bar with ts <= cutoff, argMin(row_json, revision_ts) — first revision wins
   - real_trade:     latest revision with revision_ts <= cutoff per strategy_instance_id
 
-Price always comes from futures_price_1min, never from the PnL table's price column.
+Price comes from the stored price column in the PnL table — this ensures the verification
+chain uses the same prices that Dagster/consumer used when writing the rows.
 """
 
 import json
 import logging
 from bisect import bisect_right
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from libs.clickhouse_client import query_dicts
 
@@ -82,30 +83,14 @@ def fetch_bootstrap_seeds(
     # ── PnL + price baseline ──────────────────────────────────────────────────
     pnl_sql = f"""\
 SELECT
-    p.strategy_table_name,
-    p.strategy_instance_id,
-    p.cumulative_pnl,
-    coalesce(fp.open, 0.0) AS price
-FROM (
-    SELECT
-        strategy_table_name,
-        strategy_instance_id,
-        cumulative_pnl,
-        ts,
-        underlying
-    FROM {pnl_table}
-    WHERE ts < '{start_str}'
-    ORDER BY strategy_table_name, ts DESC, updated_at DESC
-    LIMIT 1 BY strategy_table_name
-) p
-LEFT JOIN (
-    SELECT instrument, ts, open
-    FROM analytics.futures_price_1min
-    WHERE ts < '{start_str}'
-      AND ts >= '{start_str}'::DateTime - INTERVAL 7 DAY
-) fp
-  ON fp.instrument = p.underlying || 'USDT'
- AND fp.ts = p.ts
+    strategy_table_name,
+    strategy_instance_id,
+    cumulative_pnl,
+    price
+FROM {pnl_table}
+WHERE ts < '{start_str}'
+ORDER BY strategy_table_name, ts DESC, updated_at DESC
+LIMIT 1 BY strategy_table_name
 """
     pnl_seeds: dict[str, dict] = {}
     for row in query_dicts(pnl_sql):
@@ -215,7 +200,8 @@ def fetch_walk_rows(
     Used during the bootstrap walk to verify stored cumulative_pnl values against:
         pnl = prev_pnl + position * (price - prev_price) / prev_price
 
-    Price for each row comes from futures_price_1min — never the pnl table's price column.
+    Price comes from the stored price column in the pnl table — same price used when the
+    row was written — so verification uses an identical chain to what Dagster/consumer computed.
     reference_ts is EXCLUDED — the consumer will process that candle live from Kafka.
 
     Position resolution:
@@ -235,37 +221,19 @@ def fetch_walk_rows(
     start_str = start_ts.strftime("%Y-%m-%d %H:%M:%S")
     ref_str = reference_ts.strftime("%Y-%m-%d %H:%M:%S")
 
-    # ── Fetch stored PnL rows with price joined ───────────────────────────────
+    # ── Fetch stored PnL rows — use stored price column for chain consistency ──
     pnl_sql = f"""\
 SELECT
-    p.strategy_table_name,
-    p.strategy_instance_id,
-    p.ts,
-    p.cumulative_pnl,
-    p.underlying,
-    coalesce(fp.open, 0.0) AS price
-FROM (
-    SELECT
-        strategy_table_name,
-        strategy_instance_id,
-        ts,
-        cumulative_pnl,
-        underlying
-    FROM {pnl_table}
-    WHERE ts >= '{start_str}'
-      AND ts < '{ref_str}'
-    ORDER BY strategy_table_name, ts ASC, updated_at DESC
-    LIMIT 1 BY strategy_table_name, ts
-) p
-LEFT JOIN (
-    SELECT instrument, ts, open
-    FROM analytics.futures_price_1min
-    WHERE ts >= '{start_str}'
-      AND ts < '{ref_str}'
-) fp
-  ON fp.instrument = p.underlying || 'USDT'
- AND fp.ts = p.ts
-ORDER BY p.strategy_table_name, p.ts
+    strategy_table_name,
+    strategy_instance_id,
+    ts,
+    cumulative_pnl,
+    price
+FROM {pnl_table}
+WHERE ts >= '{start_str}'
+  AND ts < '{ref_str}'
+ORDER BY strategy_table_name, ts ASC, updated_at DESC
+LIMIT 1 BY strategy_table_name, ts
 """
     pnl_rows = query_dicts(pnl_sql)
     if not pnl_rows:
@@ -275,16 +243,19 @@ ORDER BY p.strategy_table_name, p.ts
     if real_trade:
         # All revisions with revision_ts in [start_ts, reference_ts) — sorted ASC.
         # We resolve per walk row in Python using bisect.
+        # Group by (siid, revision_ts) taking the highest bar_ts per revision_ts.
+        # Multiple bars can share the same revision_ts (batch revisions); taking the
+        # latest bar_ts matches the AnchorState revision guard used in the live loop.
         hist_sql = f"""\
 SELECT
     strategy_instance_id,
-    ts AS bar_ts,
     revision_ts,
-    argMax(row_json, revision_ts) AS row_json
+    argMax(ts, ts)         AS bar_ts,
+    argMax(row_json, ts)   AS row_json
 FROM {history_table}
-WHERE revision_ts >= '{start_str}'
+WHERE revision_ts >= '{start_str}'::DateTime - INTERVAL 2 DAY
   AND revision_ts < '{ref_str}'
-GROUP BY strategy_instance_id, ts, revision_ts
+GROUP BY strategy_instance_id, revision_ts
 ORDER BY strategy_instance_id, revision_ts
 """
         # Build per-strategy_instance_id sorted list of (revision_ts, bar_ts, position).
@@ -316,17 +287,21 @@ SELECT
     ts AS bar_ts,
     argMin(row_json, revision_ts) AS row_json
 FROM {history_table}
-WHERE ts >= '{start_str}'
+WHERE ts >= '{start_str}'::DateTime - INTERVAL 2 DAY
   AND ts < '{ref_str}'
 GROUP BY strategy_table_name, ts
 ORDER BY strategy_table_name, ts
 """
+        # Key on closing_ts (= bar_ts + cfg_bar_sec) so that a bar's position
+        # only becomes active at bar close, matching iter_compute_prod_pnl.
         bar_positions: dict[str, list[tuple[datetime, float]]] = {}
         for row in query_dicts(hist_sql):
             stn = row["strategy_table_name"]
             rj = json.loads(row["row_json"])
+            bar_sec = int(rj.get("cfg_bar_sec", 300))
+            closing_ts = row["bar_ts"] + timedelta(seconds=bar_sec)
             bar_positions.setdefault(stn, []).append(
-                (row["bar_ts"], float(rj.get("position", 0.0)))
+                (closing_ts, float(rj.get("position", 0.0)))
             )
 
         def _get_prod_position(stn: str, row_ts: datetime) -> float:
