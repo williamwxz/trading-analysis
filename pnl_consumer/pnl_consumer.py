@@ -160,12 +160,8 @@ def peek_reference_ts(
 def _bootstrap_state(
     mode: str,
     reference_ts: "datetime | None",
-) -> tuple[AnchorState, set[tuple[str, datetime]]]:
-    """Seed AnchorState for one mode. Returns (state, seen_set).
-
-    seen_set is populated for prod/bt (dedup guard). Empty for real_trade (uses
-    AnchorState revision guard instead).
-    """
+) -> AnchorState:
+    """Seed AnchorState for one mode."""
     cfg = _MODE_CONFIG[mode]
     now = datetime.now(UTC).replace(tzinfo=None)
     ref_ts = reference_ts if reference_ts is not None else now
@@ -199,7 +195,6 @@ def _bootstrap_state(
         real_trade=cfg["real_trade"],
     )
 
-    seen: set[tuple[str, datetime]] = set()
     prev_pnl: dict[str, float] = {s.strategy_table_name: s.pnl for s in seeds}
     prev_price: dict[str, float] = {s.strategy_table_name: s.price for s in seeds}
 
@@ -234,14 +229,12 @@ def _bootstrap_state(
             bar_ts=wr.bar_ts,
             revision_ts=wr.revision_ts,
         ))
-        if not cfg["real_trade"]:
-            seen.add((wr.strategy_instance_id, wr.bar_ts))
 
     logger.info(
         "Bootstrap [%s]: seeded %d strategies, walked %d rows",
         mode, len(state), len(walk_rows),
     )
-    return state, seen
+    return state
 
 
 def _compute_pnl_row(
@@ -343,8 +336,6 @@ def process_candle(
     state_prod: AnchorState,
     state_real_trade: AnchorState,
     state_bt: AnchorState,
-    seen_prod: set[tuple[str, datetime]],
-    seen_bt: set[tuple[str, datetime]],
     cfg: SinkConfig,
 ) -> tuple[list[dict], int, int, int]:
     """Compute all output rows for one candle.
@@ -382,10 +373,6 @@ def process_candle(
         fetched_prod_stns: set[str] = set()
         for bar in prod_bars:
             fetched_prod_stns.add(bar.strategy_table_name)
-            key = (bar.strategy_instance_id, bar.bar_ts)
-            if key in seen_prod:
-                continue
-            seen_prod.add(key)
             rows.append({"_sink": "pnl_prod", "_row": _compute_pnl_row(
                 state_prod, bar.strategy_table_name, candle, bar, "production", now,
             )})
@@ -402,10 +389,6 @@ def process_candle(
         fetched_bt_stns: set[str] = set()
         for bar in bt_bars:
             fetched_bt_stns.add(bar.strategy_table_name)
-            key = (bar.strategy_instance_id, bar.bar_ts)
-            if key in seen_bt:
-                continue
-            seen_bt.add(key)
             rows.append({"_sink": "pnl_bt", "_row": _compute_pnl_row(
                 state_bt, bar.strategy_table_name, candle, bar, "backtest", now,
             )})
@@ -515,16 +498,14 @@ def run() -> None:
     state_prod = AnchorState()
     state_bt = AnchorState()
     state_real_trade = AnchorState()
-    seen_prod: set[tuple[str, datetime]] = set()
-    seen_bt: set[tuple[str, datetime]] = set()
 
     try:
         if sink_cfg.prod:
-            state_prod, seen_prod = _bootstrap_state("prod", reference_ts)
+            state_prod = _bootstrap_state("prod", reference_ts)
         if sink_cfg.bt:
-            state_bt, seen_bt = _bootstrap_state("bt", reference_ts)
+            state_bt = _bootstrap_state("bt", reference_ts)
         if sink_cfg.real_trade:
-            state_real_trade, _ = _bootstrap_state("real_trade", reference_ts)
+            state_real_trade = _bootstrap_state("real_trade", reference_ts)
     except Exception:
         logger.exception("Fatal error during bootstrap — exiting")
         sys.exit(1)
@@ -582,8 +563,7 @@ def run() -> None:
             # failure, computation error) leaves the offset uncommitted — the consumer
             # restarts from the same Kafka position and replays with the original price.
             rows, prod_fetched, bt_fetched, rt_fetched = process_candle(
-                candle, state_prod, state_real_trade, state_bt,
-                seen_prod, seen_bt, sink_cfg,
+                candle, state_prod, state_real_trade, state_bt, sink_cfg,
             )
 
             price_row: "list | None" = None
