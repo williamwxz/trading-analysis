@@ -26,6 +26,7 @@ jobs:
           filters: |
             dagster:
               - 'trading_dagster/**'
+              - 'libs/**'
               - 'Dockerfile'
               - 'pyproject.toml'
               - 'dagster.yaml'
@@ -34,6 +35,7 @@ jobs:
               - 'streaming/**'
             pnl-consumer:
               - 'pnl_consumer/**'
+              - 'libs/**'
             terraform:
               - 'infra/terraform/**'
             grafana:
