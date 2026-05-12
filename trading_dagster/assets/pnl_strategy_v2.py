@@ -11,8 +11,6 @@ All computation logic delegates to libs.computation. This file handles only:
 """
 
 import logging
-import math
-from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 
@@ -35,9 +33,6 @@ from libs.computation import (
     AnchorRecord,
     AnchorState,
     INSERT_COLUMNS,
-    PROD_INSERT_COLUMNS,
-    REAL_TRADE_INSERT_COLUMNS,
-    TIMEFRAME_MAP,
     active_prod_bar_at,
     active_rt_revision_at,
     build_carry_forward_row,
@@ -45,16 +40,12 @@ from libs.computation import (
     build_pnl_row,
     build_rt_lookup,
     check_strategy_drop,
-    compute_bt_pnl,
-    compute_real_trade_pnl,
-    extract_row_anchor,
     fetch_anchors,
     fetch_new_bars_bt,
     fetch_new_bars_prod,
     fetch_new_bars_real_trade,
     fetch_prices_multi,
     first_active_minute,
-    iter_compute_prod_pnl,
     last_active_minute,
 )
 
@@ -154,10 +145,6 @@ GROUP BY strategy_table_name, strategy_id, strategy_name, underlying,
     _emit(f"[1hour] re-aggregated {hour_table} from {window_start_ts}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Per-underlying chunk processor (full historical recompute)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _get_source_strategies(source_table: str, underlying: str, ts_start: str, ts_end: str, client) -> set[str]:
     """Return distinct strategy_table_names in source for the given window."""
     rows = query_rows(
@@ -212,99 +199,6 @@ def _check_output_completeness(
         f"[{underlying}] completeness OK: {len(written_stns)}/{len(source_stns)} strategies "
         f"written in [{ts_start}, {ts_end})"
     )
-
-
-def _process_underlying(
-    underlying: str,
-    target_table: str,
-    source_table: str,
-    label: str,
-    mode: str,
-    start_dt: datetime,
-    end_dt: datetime,
-    log_fn=None,
-) -> int:
-    _emit = log_fn or _log.info
-    client = get_client()
-
-    start_dt = start_dt.replace(tzinfo=None)
-    end_dt = end_dt.replace(tzinfo=None)
-
-    resume_dt = _get_underlying_resume_dt(underlying, target_table, client)
-    if resume_dt is not None and resume_dt > start_dt:
-        _emit(f"[{underlying}] resuming from {resume_dt.strftime('%Y-%m-%d')}")
-        start_dt = resume_dt
-
-    anchors: dict = {}
-    total_rows = 0
-    chunk_count = math.ceil((end_dt - start_dt).total_seconds() / 86400 / _CHUNK_DAYS)
-    chunks_done = 0
-    _emit(f"[{underlying}] starting: {start_dt.strftime('%Y-%m-%d')} → {end_dt.strftime('%Y-%m-%d')}, {chunk_count} chunks")
-
-    chunk_start = start_dt
-    while chunk_start < end_dt:
-        chunk_end = min(chunk_start + timedelta(days=_CHUNK_DAYS), end_dt)
-        ts_start = chunk_start.strftime("%Y-%m-%d %H:%M:%S")
-        ts_end = chunk_end.strftime("%Y-%m-%d %H:%M:%S")
-
-        source_stns = _get_source_strategies(source_table, underlying, ts_start, ts_end, client)
-
-        if mode == "prod":
-            rows_dict = fetch_new_bars_prod(source_table, underlying, ts_start, ts_end, client)
-        elif mode == "bt":
-            rows_dict = fetch_new_bars_bt(source_table, underlying, ts_start, ts_end, client)
-        else:
-            rows_dict = fetch_new_bars_real_trade(source_table, underlying, ts_start, ts_end, client)
-
-        chunks_done += 1
-        if not rows_dict:
-            chunk_start = chunk_end
-            continue
-
-        prices_map = fetch_prices_multi([underlying], ts_start, ts_end, client, extend_minutes=0)
-        prices = prices_map.pop(underlying, {})
-
-        if mode == "prod":
-            for stn, strategy_rows in iter_compute_prod_pnl(rows_dict, anchors, prices, label):
-                _prepare_rows_for_clickhouse(strategy_rows)
-                n = insert_rows(f"analytics.{target_table}", INSERT_COLUMNS, strategy_rows, client)
-                total_rows += n
-                if strategy_rows:
-                    last = strategy_rows[-1]
-                    anchors[stn] = extract_row_anchor(last)
-        elif mode == "bt":
-            by_stn: dict[str, list] = defaultdict(list)
-            for bar in rows_dict:
-                by_stn[bar["strategy_table_name"]].append(bar)
-            for stn, stn_bars in by_stn.items():
-                strategy_rows = compute_bt_pnl(stn_bars, prices, anchors=anchors)
-                _prepare_rows_for_clickhouse(strategy_rows)
-                n = insert_rows(f"analytics.{target_table}", INSERT_COLUMNS, strategy_rows, client)
-                total_rows += n
-                if strategy_rows:
-                    last = strategy_rows[-1]
-                    anchors[stn] = extract_row_anchor(last)
-        else:
-            by_strategy: dict[str, list] = defaultdict(list)
-            for bar in rows_dict:
-                by_strategy[bar["strategy_table_name"]].append(bar)
-            for stn, stn_bars in by_strategy.items():
-                strategy_rows = compute_real_trade_pnl(stn_bars, anchors, prices)
-                _prepare_rows_for_clickhouse(strategy_rows)
-                n = insert_rows(f"analytics.{target_table}", INSERT_COLUMNS, strategy_rows, client)
-                total_rows += n
-                if strategy_rows:
-                    last = strategy_rows[-1]
-                    anchors[stn] = extract_row_anchor(last)
-
-        del rows_dict, prices
-        _check_output_completeness(target_table, underlying, ts_start, ts_end, source_stns, client, _emit)
-        if chunks_done % 100 == 0:
-            _emit(f"[{underlying}] progress: {chunks_done}/{chunk_count} chunks, {total_rows:,} rows")
-        chunk_start = chunk_end
-
-    _emit(f"[{underlying}] complete: {total_rows:,} rows inserted")
-    return total_rows
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -477,40 +371,6 @@ def _process_underlying_recent(
 # ─────────────────────────────────────────────────────────────────────────────
 # Asset drivers
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _recompute_pnl_full(
-    context: AssetExecutionContext,
-    target_table: str,
-    source_table: str,
-    label: str,
-    mode: str,
-    start_date: str | None = None,
-    max_workers: int = _MAX_WORKERS,
-) -> MaterializeResult:
-    if start_date is None:
-        start_date = PROD_REAL_TRADE_START_DATE
-    start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=UTC)
-    end_dt = datetime.now(tz=UTC)
-    underlyings = _get_underlyings(source_table)
-    context.log.info(f"Full recompute {label}: {len(underlyings)} underlyings, {start_date} → now")
-
-    total_rows = 0
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {
-            pool.submit(_process_underlying, u, target_table, source_table, label, mode,
-                        start_dt, end_dt, context.log.info): u
-            for u in underlyings
-        }
-        for future in as_completed(futures):
-            total_rows += future.result()
-
-    context.log.info(f"Full recompute {label} complete: {total_rows:,} rows")
-    return MaterializeResult(metadata={
-        "rows_inserted": total_rows,
-        "start_ts": f"{start_date} 00:00:00",
-        "end_ts": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
-    })
-
 
 def _recompute_pnl_recent(
     context: AssetExecutionContext,
