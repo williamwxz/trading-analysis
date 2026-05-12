@@ -147,6 +147,62 @@ GROUP BY strategy_table_name, strategy_id, strategy_name, underlying,
 # Per-underlying chunk processor (full historical recompute)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _get_source_strategies(source_table: str, underlying: str, ts_start: str, ts_end: str, client) -> set[str]:
+    """Return distinct strategy_table_names in source for the given window."""
+    rows = query_rows(
+        f"SELECT DISTINCT strategy_table_name FROM analytics.{source_table} "
+        f"WHERE underlying = '{underlying}' "
+        f"  AND strategy_table_name NOT LIKE 'manual_probe%' "
+        f"  AND toDateTime(ts) >= toDateTime('{ts_start}') "
+        f"  AND toDateTime(ts) < toDateTime('{ts_end}')",
+        client=client,
+    )
+    return {str(r[0]) for r in rows}
+
+
+def _check_output_completeness(
+    target_table: str,
+    underlying: str,
+    ts_start: str,
+    ts_end: str,
+    source_stns: set[str],
+    client,
+    log_fn=None,
+) -> None:
+    """Fail if any source strategy is missing from the written output window.
+
+    The output query extends ts_end by 1 day to account for bar expansion:
+    a bar near ts_end may have its first output row at closing_ts = bar_ts + tf_minutes,
+    which can land up to 1440 minutes (1d bars) past ts_end.
+
+    Raises RuntimeError listing the missing strategies so the Dagster run is
+    marked failed and the operator knows to investigate before the consumer restarts.
+    """
+    _emit = log_fn or _log.info
+    if not source_stns:
+        return
+    rows = query_rows(
+        f"SELECT DISTINCT strategy_table_name FROM analytics.{target_table} "
+        f"WHERE underlying = '{underlying}' "
+        f"  AND ts >= toDateTime('{ts_start}') "
+        f"  AND ts < toDateTime('{ts_end}') + INTERVAL 1 DAY",
+        client=client,
+    )
+    written_stns = {str(r[0]) for r in rows}
+    missing = source_stns - written_stns
+    if missing:
+        raise RuntimeError(
+            f"[{underlying}] Output completeness check failed: "
+            f"{len(missing)} of {len(source_stns)} source strategies missing from "
+            f"{target_table} in [{ts_start}, {ts_end}). "
+            f"Missing: {sorted(missing)[:5]}{'...' if len(missing) > 5 else ''}"
+        )
+    _emit(
+        f"[{underlying}] completeness OK: {len(written_stns)}/{len(source_stns)} strategies "
+        f"written in [{ts_start}, {ts_end})"
+    )
+
+
 def _process_underlying(
     underlying: str,
     target_table: str,
@@ -176,6 +232,8 @@ def _process_underlying(
         chunk_end = min(chunk_start + timedelta(days=_CHUNK_DAYS), end_dt)
         ts_start = chunk_start.strftime("%Y-%m-%d %H:%M:%S")
         ts_end = chunk_end.strftime("%Y-%m-%d %H:%M:%S")
+
+        source_stns = _get_source_strategies(source_table, underlying, ts_start, ts_end, client)
 
         if mode == "prod":
             rows_dict = fetch_new_bars_prod(source_table, underlying, ts_start, ts_end, client)
@@ -226,6 +284,7 @@ def _process_underlying(
                     anchors[stn] = extract_row_anchor(last)
 
         del rows_dict, prices
+        _check_output_completeness(target_table, underlying, ts_start, ts_end, source_stns, client, _emit)
         if chunks_done % 100 == 0:
             _emit(f"[{underlying}] progress: {chunks_done}/{chunk_count} chunks, {total_rows:,} rows")
         chunk_start = chunk_end
@@ -256,6 +315,12 @@ def _process_underlying_recent(
     _emit(f"[{underlying}] window_start={window_start.strftime('%Y-%m-%d %H:%M:%S')}")
 
     window_start_ts = window_start.strftime("%Y-%m-%d %H:%M:%S")
+    end_ts = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    # Snapshot source strategies BEFORE deleting output rows — used for post-write check.
+    source_stns = _get_source_strategies(source_table, underlying, window_start_ts, end_ts, client)
+    _emit(f"[{underlying}] source has {len(source_stns)} strategies in [{window_start_ts}, {end_ts})")
+
     anchors = fetch_anchors(target_table, underlying, before_ts=window_start, client=client)
     _emit(f"[{underlying}] loaded {len(anchors)} anchors")
 
@@ -322,6 +387,10 @@ def _process_underlying_recent(
 
         del rows_dict, prices
         chunk_start = chunk_end
+
+    # Fail before returning if any source strategy is absent from the written output.
+    # This catches race conditions where source bars arrive after the recompute fetches them.
+    _check_output_completeness(target_table, underlying, window_start_ts, end_ts, source_stns, client, _emit)
 
     _emit(f"[{underlying}] recent recompute complete: {total_rows:,} rows")
     return total_rows, window_start
