@@ -206,9 +206,11 @@ def _bootstrap_state(
         stn = wr.strategy_table_name
         pp = prev_price.get(stn, 0.0)
         pp_pnl = prev_pnl.get(stn, 0.0)
+        # Use previous price as fallback when current price is missing (0.0 from coalesce).
+        effective_price = wr.price if wr.price != 0.0 else pp
 
-        if pp != 0.0 and wr.price != 0.0:
-            recomputed = pp_pnl + wr.position * (wr.price - pp) / pp
+        if pp != 0.0 and effective_price != 0.0:
+            recomputed = pp_pnl + wr.position * (effective_price - pp) / pp
             deviation = abs(recomputed - wr.cumulative_pnl)
             if deviation > _PNL_CRASH_TOLERANCE:
                 raise RuntimeError(
@@ -223,10 +225,10 @@ def _bootstrap_state(
                 )
 
         prev_pnl[stn] = wr.cumulative_pnl
-        prev_price[stn] = wr.price
+        prev_price[stn] = effective_price
         state.set(stn, AnchorRecord(
             pnl=wr.cumulative_pnl,
-            price=wr.price,
+            price=effective_price,
             position=wr.position,
             bar_ts=wr.bar_ts,
             revision_ts=wr.revision_ts,
