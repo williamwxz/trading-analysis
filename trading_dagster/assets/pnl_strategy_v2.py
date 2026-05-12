@@ -390,6 +390,11 @@ def _process_underlying_recent(
           f"[{minute_cur}, {minute_end})")
 
     # ── Per-minute loop ───────────────────────────────────────────────────────
+    # anchor_meta[stn] stores bar metadata for carry-forward rows.
+    # Richer than `anchors` (pnl/price/position only) — kept separate to preserve
+    # the existing anchors dict shape used by fetch_anchors() upstream.
+    anchor_meta: dict[str, dict] = {}
+
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     total_rows = 0
     prev_active: set[str] | None = None
@@ -442,8 +447,44 @@ def _process_underlying_recent(
                 bar.get("strategy_instance_id", ""),
             ])
             anchors[stn] = (cpnl, price, bar["position"])
+            # Always update metadata from the active bar so carry-forward is accurate.
+            anchor_meta[stn] = bar
 
-        # Fail if a strategy that had an active bar at M-1 has no bar at M.
+        # Carry-forward: strategies previously seen (in anchor_meta) but with no
+        # active bar this minute hold their last known position until the next bar
+        # arrives. This covers the gap when source bars are late (e.g. sid=11).
+        for stn, meta in anchor_meta.items():
+            if stn in curr_active:
+                continue
+            anchor_pnl, anchor_price, anchor_pos = anchors.get(stn, (0.0, 0.0, 0.0))
+            if not anchor_price:
+                anchor_price = price
+            cpnl = (
+                anchor_pnl + anchor_pos * (price - anchor_price) / anchor_price
+                if anchor_price != 0.0 else anchor_pnl
+            )
+            minute_rows.append([
+                stn,
+                meta["strategy_id"],
+                meta["strategy_name"],
+                meta["underlying"],
+                meta["config_timeframe"],
+                label,
+                "v2",
+                ts_str,
+                cpnl,
+                meta["bar_benchmark"],
+                anchor_pos,
+                price,
+                meta["final_signal"],
+                meta["weighting"],
+                now_str,
+                meta.get("strategy_instance_id", ""),
+            ])
+            anchors[stn] = (cpnl, price, anchor_pos)
+
+        # Fail if a strategy that had an active bar at M-1 has no bar at M
+        # AND still has future lookup entries (indicates a data hole, not late arrival).
         if prev_active is not None:
             check_strategy_drop(prev_active, curr_active, minute_cur, underlying, lookup, is_rt)
 
