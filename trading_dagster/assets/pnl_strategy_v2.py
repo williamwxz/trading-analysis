@@ -223,6 +223,9 @@ def _process_underlying(
     _emit = log_fn or _log.info
     client = get_client()
 
+    start_dt = start_dt.replace(tzinfo=None)
+    end_dt = end_dt.replace(tzinfo=None)
+
     resume_dt = _get_underlying_resume_dt(underlying, target_table, client)
     if resume_dt is not None and resume_dt > start_dt:
         _emit(f"[{underlying}] resuming from {resume_dt.strftime('%Y-%m-%d')}")
@@ -327,6 +330,9 @@ def _process_underlying_recent(
 
     resume_dt = _get_underlying_resume_dt(underlying, target_table, client)
     window_start = resume_dt if resume_dt is not None else default_window_start
+    # Strip tzinfo — all internal datetimes are naive (parsed from ClickHouse strings).
+    window_start = window_start.replace(tzinfo=None)
+    end_dt = end_dt.replace(tzinfo=None)
     window_start_ts = window_start.strftime("%Y-%m-%d %H:%M:%S")
     end_ts = end_dt.strftime("%Y-%m-%d %H:%M:%S")
     _emit(f"[{underlying}] window_start={window_start_ts}")
