@@ -49,7 +49,7 @@ TOPIC = "binance.price.ticks"
 _DEFAULT_GROUP_ID = "flink-pnl-consumer"
 FLUSH_EVERY = 1000
 
-_COLD_START_DAYS = 3
+_COLD_START_DAYS = 1
 _PNL_WARN_TOLERANCE = 1e-6
 _PNL_CRASH_TOLERANCE = 2e-3  # 0.2%
 
