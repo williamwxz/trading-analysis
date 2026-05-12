@@ -127,13 +127,12 @@ jobs:
         run: |
           [ -n "$REGISTRY" ] || { echo "ERROR: REGISTRY is empty — AWS_ACCOUNT_ID or AWS_REGION secret is unset"; exit 1; }
           IMAGE_URI=$REGISTRY/trading-analysis-dagster:${{ github.sha }}
-          IMAGE_LATEST=$REGISTRY/trading-analysis-dagster:latest
           IMAGE_CACHE=$REGISTRY/trading-analysis-dagster:cache
           docker buildx build \
             --cache-from type=registry,ref=$IMAGE_CACHE \
             --cache-to   type=registry,ref=$IMAGE_CACHE,mode=max \
             --provenance=false \
-            -t $IMAGE_URI -t $IMAGE_LATEST \
+            -t $IMAGE_URI \
             --push .
           echo "image_tag=${{ github.sha }}" >> $GITHUB_OUTPUT
 
@@ -172,14 +171,13 @@ jobs:
         run: |
           [ -n "$REGISTRY" ] || { echo "ERROR: REGISTRY is empty"; exit 1; }
           IMAGE_URI=$REGISTRY/trading-analysis-ws-consumer:${{ github.sha }}
-          IMAGE_LATEST=$REGISTRY/trading-analysis-ws-consumer:latest
           IMAGE_CACHE=$REGISTRY/trading-analysis-ws-consumer:cache
           docker buildx build \
             -f streaming/Dockerfile \
             --cache-from type=registry,ref=$IMAGE_CACHE \
             --cache-to   type=registry,ref=$IMAGE_CACHE,mode=max \
             --provenance=false \
-            -t $IMAGE_URI -t $IMAGE_LATEST \
+            -t $IMAGE_URI \
             --push .
           echo "image_tag=${{ github.sha }}" >> $GITHUB_OUTPUT
 
@@ -218,14 +216,13 @@ jobs:
         run: |
           [ -n "$REGISTRY" ] || { echo "ERROR: REGISTRY is empty"; exit 1; }
           IMAGE_URI=$REGISTRY/trading-analysis-pnl-consumer:${{ github.sha }}
-          IMAGE_LATEST=$REGISTRY/trading-analysis-pnl-consumer:latest
           IMAGE_CACHE=$REGISTRY/trading-analysis-pnl-consumer:cache
           docker buildx build \
             -f pnl_consumer/Dockerfile \
             --cache-from type=registry,ref=$IMAGE_CACHE \
             --cache-to   type=registry,ref=$IMAGE_CACHE,mode=max \
             --provenance=false \
-            -t $IMAGE_URI -t $IMAGE_LATEST \
+            -t $IMAGE_URI \
             --push .
           echo "image_tag=${{ github.sha }}" >> $GITHUB_OUTPUT
 
