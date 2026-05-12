@@ -86,7 +86,7 @@ def test_fetch_real_trade_returns_list_of_strategy_revisions():
             "config_timeframe": "5m",
             "weighting": 1.0,
             "bar_ts": datetime(2026, 4, 26, 0, 0, 0),
-            "revision_ts": datetime(2026, 4, 26, 0, 1, 10),
+            "max_revision_ts": datetime(2026, 4, 26, 0, 1, 10),
             "row_json": '{"position": 0.5, "final_signal": 1.0, "benchmark": 0.0}',
         }
     ]

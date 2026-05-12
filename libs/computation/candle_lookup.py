@@ -91,7 +91,7 @@ def _parse_revision(row: dict) -> StrategyRevision:
         final_signal=float(rj.get("final_signal", 0.0)),
         benchmark=float(rj.get("benchmark", 0.0)),
         bar_ts=row["bar_ts"],
-        revision_ts=row["revision_ts"],
+        revision_ts=row["max_revision_ts"],
     )
 
 
@@ -193,7 +193,7 @@ SELECT
     config_timeframe,
     weighting,
     ts AS bar_ts,
-    max(revision_ts) AS revision_ts,
+    max(revision_ts) AS max_revision_ts,
     argMax(row_json, revision_ts) AS row_json
 FROM analytics.strategy_output_history_v2
 WHERE underlying = '{underlying}'

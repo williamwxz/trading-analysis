@@ -87,7 +87,7 @@ def _make_revision_row(
         "weighting": weighting,
         "strategy_instance_id": strategy_instance_id,
         "bar_ts": bar_ts,
-        "revision_ts": revision_ts,
+        "max_revision_ts": revision_ts,
         "row_json": json.dumps(
             {"position": position, "final_signal": final_signal, "benchmark": benchmark}
         ),

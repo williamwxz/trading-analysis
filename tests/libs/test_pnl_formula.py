@@ -795,6 +795,271 @@ class TestBtPnlFormula:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Additional missing-price, stale-revision, and BT≡prod tests
+# ═════════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestMissingPriceCases:
+    """Explicit coverage of carry-forward vs skip behavior across all three modes."""
+
+    def test_prod_no_anchor_no_price_row_skipped(self):
+        """Very first minute: no anchor AND no price → row is skipped entirely."""
+        bar = _prod_bar(ts="2024-01-01 00:00:00", tf="5m")
+        prices = {}  # nothing — every minute is skipped
+        rows = compute_prod_pnl([bar], {}, prices)
+        assert len(rows) == 0
+
+    def test_prod_multiple_consecutive_missing_prices_carry_forward(self):
+        """Several consecutive gap minutes all emit with carry-forward price, pnl unchanged."""
+        bar = _prod_bar(ts="2024-01-01 00:00:00", tf="5m")
+        prices = {
+            "2024-01-01 00:05:00": 100.0,
+            # 00:06, 00:07, 00:08 all missing
+            "2024-01-01 00:09:00": 105.0,
+        }
+        rows = compute_prod_pnl([bar], {}, prices)
+        ts_values = [r[_TS] for r in rows]
+        # All four minutes must be emitted
+        for t in ["2024-01-01 00:05:00", "2024-01-01 00:06:00",
+                  "2024-01-01 00:07:00", "2024-01-01 00:08:00", "2024-01-01 00:09:00"]:
+            assert t in ts_values
+        # Carry-forward minutes use anchor price = 100, pnl unchanged
+        row_06 = next(r for r in rows if r[_TS] == "2024-01-01 00:06:00")
+        row_07 = next(r for r in rows if r[_TS] == "2024-01-01 00:07:00")
+        row_08 = next(r for r in rows if r[_TS] == "2024-01-01 00:08:00")
+        assert row_06[_PRC] == pytest.approx(100.0)
+        assert row_07[_PRC] == pytest.approx(100.0)
+        assert row_08[_PRC] == pytest.approx(100.0)
+        assert row_06[_CPNL] == pytest.approx(0.0)
+        assert row_07[_CPNL] == pytest.approx(0.0)
+        assert row_08[_CPNL] == pytest.approx(0.0)
+
+    def test_prod_all_prices_missing_no_anchor_no_rows(self):
+        """If no prices at all and no anchor, no rows are emitted."""
+        bar = _prod_bar(ts="2024-01-01 00:00:00", tf="5m")
+        rows = compute_prod_pnl([bar], {}, {})
+        assert rows == []
+
+    def test_prod_all_prices_missing_with_anchor_carry_forward(self):
+        """With an established anchor, missing-every-minute still emits rows at carry-forward price."""
+        bar = _prod_bar(ts="2024-01-01 00:00:00", tf="5m")
+        anchors = {"S1": (0.10, 100.0, 1.0)}
+        rows = compute_prod_pnl([bar], anchors, {})
+        # All 5 minutes emitted at carry-forward price=100, pnl=0.10
+        assert len(rows) == 5
+        for row in rows:
+            assert row[_PRC] == pytest.approx(100.0)
+            assert row[_CPNL] == pytest.approx(0.10)
+
+    def test_rt_no_anchor_no_price_row_skipped(self):
+        """Real-trade: very first minute with no price and no anchor is skipped."""
+        bar = _rt_bar()
+        rows = compute_real_trade_pnl([bar], {}, {})
+        assert rows == []
+
+    def test_rt_multiple_consecutive_missing_prices_carry_forward(self):
+        """Real-trade: consecutive gap minutes all carry-forward once anchor is set."""
+        bar = _rt_bar()
+        prices = {
+            "2024-01-01 00:05:00": 100.0,
+            # 00:06, 00:07 missing
+            "2024-01-01 00:08:00": 100.0,
+        }
+        rows = compute_real_trade_pnl([bar], {}, prices)
+        ts_values = [r[_TS] for r in rows]
+        assert "2024-01-01 00:06:00" in ts_values
+        assert "2024-01-01 00:07:00" in ts_values
+        for t in ["2024-01-01 00:06:00", "2024-01-01 00:07:00"]:
+            row = next(r for r in rows if r[_TS] == t)
+            assert row[_PRC] == pytest.approx(100.0)
+            assert row[_CPNL] == pytest.approx(0.0)
+
+    def test_bt_no_anchor_no_price_row_skipped(self):
+        """BT: no price at all, no anchor → no rows emitted."""
+        bar = _bt_bar(cumulative_pnl=0.05)
+        rows = compute_bt_pnl([bar], {})
+        assert rows == []
+
+    def test_bt_multiple_consecutive_missing_prices_carry_forward(self):
+        """BT: consecutive gap minutes carry-forward once anchor price is set."""
+        bar = _bt_bar()
+        prices = {
+            "2024-01-01 00:05:00": 100.0,
+            # 00:06, 00:07 missing
+            "2024-01-01 00:08:00": 100.0,
+        }
+        rows = compute_bt_pnl([bar], prices)
+        ts_values = [r[_TS] for r in rows]
+        assert "2024-01-01 00:06:00" in ts_values
+        assert "2024-01-01 00:07:00" in ts_values
+
+
+@pytest.mark.unit
+class TestRealTradeStaleRevision:
+    """Explicit coverage of stale revision discard and boundary conditions."""
+
+    def test_revision_ts_equal_to_next_bar_closing_ts_discarded(self):
+        """revision_ts == next_bar_closing_ts is NOT accepted (condition is strictly <)."""
+        stale = _rt_bar(
+            ts="2024-01-01 00:00:00",
+            closing_ts="2024-01-01 01:00:00",
+            execution_ts="2024-01-01 02:00:00",
+            revision_ts="2024-01-01 02:00:00",   # == next_bar_closing_ts → discard
+            next_bar_closing_ts="2024-01-01 02:00:00",
+            position=1.0,
+            tf="1h",
+        )
+        prices = _prices("2024-01-01 02:00:00", 5, base=100.0)
+        rows = compute_real_trade_pnl([stale], {}, prices)
+        assert rows == [], "revision_ts == next_bar_closing_ts must be discarded"
+
+    def test_revision_ts_one_second_before_next_bar_closing_ts_accepted(self):
+        """revision_ts strictly less than next_bar_closing_ts is accepted."""
+        rev = _rt_bar(
+            ts="2024-01-01 00:00:00",
+            closing_ts="2024-01-01 01:00:00",
+            execution_ts="2024-01-01 01:59:00",
+            revision_ts="2024-01-01 01:59:59",  # < next_bar_closing_ts
+            next_bar_closing_ts="2024-01-01 02:00:00",
+            position=1.0,
+            tf="1h",
+        )
+        prices = _prices("2024-01-01 01:59:00", 3, base=100.0)
+        rows = compute_real_trade_pnl([rev], {}, prices)
+        assert len(rows) > 0
+
+    def test_multiple_stale_revisions_all_discarded(self):
+        """Multiple stale revisions for the same bar are all discarded."""
+        bars = [
+            _rt_bar(
+                ts="2024-01-01 00:00:00",
+                closing_ts="2024-01-01 01:00:00",
+                execution_ts="2024-01-01 02:01:00",
+                revision_ts="2024-01-01 02:00:00",  # == next → discard
+                next_bar_closing_ts="2024-01-01 02:00:00",
+                position=0.5,
+                tf="1h",
+            ),
+            _rt_bar(
+                ts="2024-01-01 00:00:00",
+                closing_ts="2024-01-01 01:00:00",
+                execution_ts="2024-01-01 02:05:00",
+                revision_ts="2024-01-01 02:04:00",  # > next → discard
+                next_bar_closing_ts="2024-01-01 02:00:00",
+                position=0.8,
+                tf="1h",
+            ),
+        ]
+        prices = _prices("2024-01-01 02:00:00", 10, base=100.0)
+        rows = compute_real_trade_pnl(bars, {}, prices)
+        assert rows == [], "all stale revisions must be discarded"
+
+    def test_stale_revision_pnl_continuity(self):
+        """When a stale revision is discarded, PnL continues from the previously accepted revision."""
+        bars = [
+            _rt_bar(
+                ts="2024-01-01 00:00:00",
+                closing_ts="2024-01-01 01:00:00",
+                execution_ts="2024-01-01 01:00:00",
+                revision_ts="2024-01-01 00:59:00",  # < next_bar_closing_ts=02:00 → accept
+                next_bar_closing_ts="2024-01-01 02:00:00",
+                position=1.0,
+                tf="1h",
+            ),
+            _rt_bar(
+                ts="2024-01-01 00:00:00",
+                closing_ts="2024-01-01 01:00:00",
+                execution_ts="2024-01-01 02:01:00",
+                revision_ts="2024-01-01 02:00:00",  # == next_bar_closing_ts=02:00 → DISCARD
+                next_bar_closing_ts="2024-01-01 02:00:00",
+                position=-1.0,
+                tf="1h",
+            ),
+        ]
+        prices = _prices("2024-01-01 01:00:00", 5, base=100.0)
+        rows = compute_real_trade_pnl(bars, {}, prices)
+        # Only accepted revision emits rows; position must be 1.0 throughout (stale -1.0 discarded)
+        assert all(r[_POS] == pytest.approx(1.0) for r in rows)
+
+
+@pytest.mark.unit
+class TestBtEqualsProdFormula:
+    """BT with an anchor uses the same formula as prod — results must be identical."""
+
+    def test_bt_matches_prod_flat_prices(self):
+        """Flat prices: bt and prod both hold pnl = anchor_pnl."""
+        anchor_pnl, anchor_price = 0.05, 100.0
+        prod_bar = _prod_bar(ts="2024-01-01 00:00:00", position=1.0, tf="5m")
+        bt_bar_obj = _bt_bar(
+            ts="2024-01-01 00:00:00", execution_ts="2024-01-01 00:05:00",
+            position=1.0, cumulative_pnl=0.0,
+        )
+        prices = _prices("2024-01-01 00:05:00", 5, base=anchor_price)
+        anchors = {"S1": (anchor_pnl, anchor_price, 1.0)}
+
+        prod_rows = compute_prod_pnl([prod_bar], anchors, prices)
+        bt_rows = compute_bt_pnl([bt_bar_obj], prices, anchors=anchors)
+
+        assert len(prod_rows) == len(bt_rows)
+        for p, b in zip(prod_rows, bt_rows):
+            assert p[_CPNL] == pytest.approx(b[_CPNL])
+
+    def test_bt_matches_prod_rising_prices(self):
+        """Rising prices: per-minute pnl chain is identical between bt and prod."""
+        anchor_pnl, anchor_price = 0.0, 100.0
+        prod_bar = _prod_bar(ts="2024-01-01 00:00:00", position=1.0, tf="5m")
+        bt_bar_obj = _bt_bar(
+            ts="2024-01-01 00:00:00", execution_ts="2024-01-01 00:05:00",
+            position=1.0, cumulative_pnl=0.0,
+        )
+        prices = {
+            "2024-01-01 00:05:00": 100.0,
+            "2024-01-01 00:06:00": 102.0,
+            "2024-01-01 00:07:00": 105.0,
+            "2024-01-01 00:08:00": 108.0,
+            "2024-01-01 00:09:00": 110.0,
+        }
+        anchors = {"S1": (anchor_pnl, anchor_price, 1.0)}
+
+        prod_rows = compute_prod_pnl([prod_bar], anchors, prices)
+        bt_rows = compute_bt_pnl([bt_bar_obj], prices, anchors=anchors)
+
+        assert len(prod_rows) == len(bt_rows)
+        for p, b in zip(prod_rows, bt_rows):
+            assert p[_CPNL] == pytest.approx(b[_CPNL], rel=1e-9)
+            assert p[_PRC] == pytest.approx(b[_PRC])
+
+    def test_bt_matches_prod_with_missing_prices(self):
+        """Carry-forward behavior is identical between bt and prod."""
+        anchors = {"S1": (0.0, 100.0, 1.0)}
+        prices = {
+            "2024-01-01 00:05:00": 100.0,
+            # 00:06 missing
+            "2024-01-01 00:07:00": 102.0,
+        }
+        prod_bar = _prod_bar(ts="2024-01-01 00:00:00", position=1.0, tf="5m")
+        bt_bar_obj = _bt_bar(
+            ts="2024-01-01 00:00:00", execution_ts="2024-01-01 00:05:00",
+            position=1.0, cumulative_pnl=0.0,
+        )
+        prod_rows = compute_prod_pnl([prod_bar], anchors, prices)
+        bt_rows = compute_bt_pnl([bt_bar_obj], prices, anchors=anchors)
+
+        # Both must emit 00:06 as carry-forward
+        prod_ts = [r[_TS] for r in prod_rows]
+        bt_ts = [r[_TS] for r in bt_rows]
+        assert "2024-01-01 00:06:00" in prod_ts
+        assert "2024-01-01 00:06:00" in bt_ts
+
+        # Pnl values must match at every emitted minute
+        prod_by_ts = {r[_TS]: r[_CPNL] for r in prod_rows}
+        bt_by_ts = {r[_TS]: r[_CPNL] for r in bt_rows}
+        for ts in prod_by_ts:
+            if ts in bt_by_ts:
+                assert prod_by_ts[ts] == pytest.approx(bt_by_ts[ts], rel=1e-9)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # extract_row_anchor
 # ═════════════════════════════════════════════════════════════════════════════
 
