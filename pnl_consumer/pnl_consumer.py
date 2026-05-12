@@ -207,7 +207,7 @@ def _bootstrap_state(
         pp = prev_price.get(stn, 0.0)
         pp_pnl = prev_pnl.get(stn, 0.0)
 
-        if pp != 0.0:
+        if pp != 0.0 and wr.price != 0.0:
             recomputed = pp_pnl + wr.position * (wr.price - pp) / pp
             deviation = abs(recomputed - wr.cumulative_pnl)
             if deviation > _PNL_CRASH_TOLERANCE:
