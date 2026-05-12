@@ -440,12 +440,16 @@ def run() -> None:
     seen_prod: set[tuple[str, datetime]] = set()
     seen_bt: set[tuple[str, datetime]] = set()
 
-    if sink_cfg.prod:
-        state_prod, seen_prod = _bootstrap_state("prod", reference_ts)
-    if sink_cfg.bt:
-        state_bt, seen_bt = _bootstrap_state("bt", reference_ts)
-    if sink_cfg.real_trade:
-        state_real_trade, _ = _bootstrap_state("real_trade", reference_ts)
+    try:
+        if sink_cfg.prod:
+            state_prod, seen_prod = _bootstrap_state("prod", reference_ts)
+        if sink_cfg.bt:
+            state_bt, seen_bt = _bootstrap_state("bt", reference_ts)
+        if sink_cfg.real_trade:
+            state_real_trade, _ = _bootstrap_state("real_trade", reference_ts)
+    except Exception:
+        logger.exception("Fatal error during bootstrap — exiting")
+        sys.exit(1)
 
     cw_client = boto3.client("cloudwatch", region_name=os.environ.get("AWS_REGION", "ap-northeast-1"))
     group_id = resolve_group_id()
