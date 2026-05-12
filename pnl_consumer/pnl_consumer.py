@@ -47,7 +47,6 @@ logger = logging.getLogger(__name__)
 
 TOPIC = "binance.price.ticks"
 _DEFAULT_GROUP_ID = "flink-pnl-consumer"
-FLUSH_EVERY = 1000
 
 _COLD_START_DAYS = 1
 _PNL_WARN_TOLERANCE = 1e-6
@@ -360,48 +359,50 @@ def process_candle(
 _SIID_COL = INSERT_COLUMNS.index("strategy_instance_id")  # 15
 
 
-def _flush(
+def _flush_candle(
     consumer: Consumer,
-    price_batch: list[list],
-    pnl_prod_batch: list[list],
-    pnl_real_trade_batch: list[list],
-    pnl_bt_batch: list[list],
+    price_row: "list | None",
+    pnl_prod_rows: list[list],
+    pnl_real_trade_rows: list[list],
+    pnl_bt_rows: list[list],
     expected_prod: int = 0,
     expected_bt: int = 0,
     expected_real_trade: int = 0,
 ) -> None:
-    # Validate completeness before writing anything.
-    # The expected counts come from the last fetch_*_for_candle result — the
-    # ground truth for how many strategy instances should be in the output.
-    # If the batch has fewer distinct instances, crash without sinking a single row.
-    for batch, expected, label in (
-        (pnl_prod_batch, expected_prod, "prod"),
-        (pnl_bt_batch, expected_bt, "bt"),
-        (pnl_real_trade_batch, expected_real_trade, "real_trade"),
+    """Write one candle's rows to ClickHouse, then commit its Kafka offset.
+
+    Called once per candle. The offset is committed only after every ClickHouse
+    insert for this candle succeeds. If any write fails, the exception propagates
+    to the main loop which exits without committing — the consumer restarts from
+    the same Kafka position so the candle price is replayed from the original message.
+    """
+    for rows, expected, label in (
+        (pnl_prod_rows, expected_prod, "prod"),
+        (pnl_bt_rows, expected_bt, "bt"),
+        (pnl_real_trade_rows, expected_real_trade, "real_trade"),
     ):
-        if not batch or not expected:
+        if not rows or not expected:
             continue
-        actual = len({row[_SIID_COL] for row in batch})
+        actual = len({row[_SIID_COL] for row in rows})
         if actual < expected:
             raise RuntimeError(
                 f"Flush completeness check failed [{label}]: "
-                f"{actual} distinct strategy_instance_ids in batch < "
+                f"{actual} distinct strategy_instance_ids < "
                 f"{expected} fetched from history table. "
                 "Refusing to sink partial data."
             )
 
-    if price_batch:
-        insert_rows("analytics.futures_price_1min", PRICE_COLUMNS, price_batch)
-    if pnl_prod_batch:
-        insert_rows("analytics.strategy_pnl_1min_prod_v2", INSERT_COLUMNS, pnl_prod_batch)
-    if pnl_real_trade_batch:
-        insert_rows("analytics.strategy_pnl_1min_real_trade_v2", INSERT_COLUMNS, pnl_real_trade_batch)
-    if pnl_bt_batch:
-        insert_rows("analytics.strategy_pnl_1min_bt_v2", INSERT_COLUMNS, pnl_bt_batch)
-    price_batch.clear()
-    pnl_prod_batch.clear()
-    pnl_real_trade_batch.clear()
-    pnl_bt_batch.clear()
+    # Insert all sinks. Any failure here raises before the commit below.
+    if price_row:
+        insert_rows("analytics.futures_price_1min", PRICE_COLUMNS, [price_row])
+    if pnl_prod_rows:
+        insert_rows("analytics.strategy_pnl_1min_prod_v2", INSERT_COLUMNS, pnl_prod_rows)
+    if pnl_real_trade_rows:
+        insert_rows("analytics.strategy_pnl_1min_real_trade_v2", INSERT_COLUMNS, pnl_real_trade_rows)
+    if pnl_bt_rows:
+        insert_rows("analytics.strategy_pnl_1min_bt_v2", INSERT_COLUMNS, pnl_bt_rows)
+
+    # Commit the offset only after all inserts confirmed.
     try:
         consumer.commit(asynchronous=False)
     except KafkaException as e:
@@ -466,18 +467,8 @@ def run() -> None:
     consumer.subscribe([TOPIC])
     logger.info("Subscribed to %s as group %s", TOPIC, group_id)
 
-    price_batch: list[list] = []
-    pnl_prod_batch: list[list] = []
-    pnl_real_trade_batch: list[list] = []
-    pnl_bt_batch: list[list] = []
-    last_prod_fetched = last_bt_fetched = last_rt_fetched = 0
-
     def _shutdown(signum, frame):
-        logger.info("Shutdown signal received — flushing and closing")
-        try:
-            _flush(consumer, price_batch, pnl_prod_batch, pnl_real_trade_batch, pnl_bt_batch)
-        except Exception:
-            logger.exception("Error during shutdown flush")
+        logger.info("Shutdown signal received — closing consumer")
         consumer.close()
         sys.exit(0)
 
@@ -512,46 +503,46 @@ def run() -> None:
             )
             logger.info("Candle %s open=%.2f ts=%s", candle.instrument, candle.open, candle.ts)
 
+            # Compute all rows for this candle. Any exception here (ClickHouse fetch
+            # failure, computation error) leaves the offset uncommitted — the consumer
+            # restarts from the same Kafka position and replays with the original price.
             rows, prod_fetched, bt_fetched, rt_fetched = process_candle(
                 candle, state_prod, state_real_trade, state_bt,
                 seen_prod, seen_bt, sink_cfg,
             )
-            if prod_fetched:
-                last_prod_fetched = prod_fetched
-            if bt_fetched:
-                last_bt_fetched = bt_fetched
-            if rt_fetched:
-                last_rt_fetched = rt_fetched
-            logger.info(
-                "Candle processed %s ts=%s prod=%d bt=%d rt=%d batch=%d",
-                candle.instrument, candle.ts,
-                prod_fetched, bt_fetched, rt_fetched,
-                len(pnl_prod_batch) + len(pnl_bt_batch) + len(pnl_real_trade_batch),
-            )
+
+            price_row: "list | None" = None
+            pnl_prod_rows: list[list] = []
+            pnl_real_trade_rows: list[list] = []
+            pnl_bt_rows: list[list] = []
 
             for row in rows:
                 sink = row["_sink"]
                 if sink == "price":
-                    price_batch.append([row["exchange"], row["instrument"], row["ts"],
-                                        row["open"], row["high"], row["low"], row["close"], row["volume"]])
+                    price_row = [row["exchange"], row["instrument"], row["ts"],
+                                 row["open"], row["high"], row["low"], row["close"], row["volume"]]
                 elif sink == "pnl_prod":
-                    pnl_prod_batch.append(row["_row"])
+                    pnl_prod_rows.append(row["_row"])
                 elif sink == "pnl_real_trade":
-                    pnl_real_trade_batch.append(row["_row"])
+                    pnl_real_trade_rows.append(row["_row"])
                 elif sink == "pnl_bt":
-                    pnl_bt_batch.append(row["_row"])
+                    pnl_bt_rows.append(row["_row"])
 
-            total = len(price_batch) + len(pnl_prod_batch) + len(pnl_real_trade_batch) + len(pnl_bt_batch)
-            if total >= FLUSH_EVERY:
-                n = (len(price_batch), len(pnl_prod_batch), len(pnl_real_trade_batch), len(pnl_bt_batch))
-                _flush(
-                    consumer, price_batch, pnl_prod_batch, pnl_real_trade_batch, pnl_bt_batch,
-                    expected_prod=last_prod_fetched,
-                    expected_bt=last_bt_fetched,
-                    expected_real_trade=last_rt_fetched,
-                )
-                emit_candle_lag(candle.ts, cw_client, sink_label)
-                logger.info("Flushed %d price + %d prod + %d real_trade + %d bt rows", *n)
+            # Write all rows for this candle to ClickHouse, then commit the offset.
+            # If any insert fails the exception propagates here — consumer exits and
+            # restarts from this candle's offset, replaying with the live Kafka price.
+            _flush_candle(
+                consumer, price_row, pnl_prod_rows, pnl_real_trade_rows, pnl_bt_rows,
+                expected_prod=prod_fetched,
+                expected_bt=bt_fetched,
+                expected_real_trade=rt_fetched,
+            )
+            emit_candle_lag(candle.ts, cw_client, sink_label)
+            logger.info(
+                "Flushed candle %s ts=%s price=%s prod=%d rt=%d bt=%d",
+                candle.instrument, candle.ts,
+                price_row is not None, len(pnl_prod_rows), len(pnl_real_trade_rows), len(pnl_bt_rows),
+            )
 
     except Exception:
         logger.exception("Fatal error in consumer loop")

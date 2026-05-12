@@ -12,7 +12,7 @@ import pytest
 from libs.computation import AnchorRecord, AnchorState, StrategyBar, StrategyRevision
 from pnl_consumer.pnl_consumer import (
     SinkConfig,
-    _flush,
+    _flush_candle,
     emit_candle_lag,
     process_candle,
     resolve_group_id,
@@ -416,19 +416,19 @@ def test_process_candle_bt_dedup_skips_seen_bar():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# _flush
+# _flush_candle
 # ─────────────────────────────────────────────────────────────────────────────
 
 @pytest.mark.unit
-def test_flush_writes_all_four_tables():
+def test_flush_candle_writes_all_four_tables():
     consumer = MagicMock()
-    price_batch = [["binance", "BTCUSDT", datetime(2026, 4, 26), 93100.0, 93250.0, 93050.0, 93200.0, 12.0]]
-    prod_batch = [["strat"] + [None] * 15]
-    rt_batch = [["strat_rt"] + [None] * 15]
-    bt_batch = [["strat_bt"] + [None] * 15]
+    price_row = ["binance", "BTCUSDT", datetime(2026, 4, 26), 93100.0, 93250.0, 93050.0, 93200.0, 12.0]
+    prod_rows = [["strat"] + [None] * 15]
+    rt_rows = [["strat_rt"] + [None] * 15]
+    bt_rows = [["strat_bt"] + [None] * 15]
 
     with patch("pnl_consumer.pnl_consumer.insert_rows") as mock_insert:
-        _flush(consumer, price_batch, prod_batch, rt_batch, bt_batch)
+        _flush_candle(consumer, price_row, prod_rows, rt_rows, bt_rows)
 
     assert mock_insert.call_count == 4
     tables = [c.args[0] for c in mock_insert.call_args_list]
@@ -440,21 +440,23 @@ def test_flush_writes_all_four_tables():
 
 
 @pytest.mark.unit
-def test_flush_skips_empty_batches():
+def test_flush_candle_skips_none_price_and_empty_pnl():
     consumer = MagicMock()
     with patch("pnl_consumer.pnl_consumer.insert_rows") as mock_insert:
-        _flush(consumer, [], [], [], [])
+        _flush_candle(consumer, None, [], [], [])
     mock_insert.assert_not_called()
     consumer.commit.assert_called_once_with(asynchronous=False)
 
 
 @pytest.mark.unit
-def test_flush_clears_all_batches():
+def test_flush_candle_commits_after_all_inserts():
+    """Offset must not be committed if an insert raises."""
     consumer = MagicMock()
-    p, a, b, c = [["x"]], [["x"]], [["x"]], [["x"]]
-    with patch("pnl_consumer.pnl_consumer.insert_rows"):
-        _flush(consumer, p, a, b, c)
-    assert p == [] and a == [] and b == [] and c == []
+    price_row = ["binance", "BTCUSDT", datetime(2026, 4, 26), 100.0, 101.0, 99.0, 100.5, 1.0]
+    with patch("pnl_consumer.pnl_consumer.insert_rows", side_effect=RuntimeError("CH down")):
+        with pytest.raises(RuntimeError):
+            _flush_candle(consumer, price_row, [], [], [])
+    consumer.commit.assert_not_called()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
