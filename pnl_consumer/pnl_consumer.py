@@ -35,6 +35,8 @@ from libs.computation import (
     BootstrapSeed,
     INSERT_COLUMNS,
     WalkRow,
+    build_carry_forward_row,
+    build_pnl_row,
     fetch_bootstrap_seeds,
     fetch_bt_strategies_for_candle,
     fetch_real_trade_for_candle,
@@ -279,24 +281,25 @@ def _compute_pnl_row(
         revision_ts=revision_ts or datetime.min,
         meta=meta,
     )
-    return [
+    return build_pnl_row(
         strategy_table_name,
-        bar.strategy_id,
-        bar.strategy_name,
-        bar.underlying,
-        bar.config_timeframe,
-        source_label,
-        "v2",
-        candle.ts,
-        pnl,
-        bar.benchmark,
-        bar.position,
+        {
+            "strategy_id": bar.strategy_id,
+            "strategy_name": bar.strategy_name,
+            "underlying": bar.underlying,
+            "config_timeframe": bar.config_timeframe,
+            "weighting": bar.weighting,
+            "strategy_instance_id": bar.strategy_instance_id,
+            "final_signal": bar.final_signal,
+            "bar_benchmark": bar.benchmark,
+            "position": bar.position,
+        },
         candle.open,
-        bar.final_signal,
-        bar.weighting,
+        pnl,
+        source_label,
+        candle.ts,
         now,
-        bar.strategy_instance_id,
-    ]
+    )
 
 
 def _carry_forward_row(
@@ -324,24 +327,15 @@ def _carry_forward_row(
         bar_ts=rec.bar_ts,
         revision_ts=rec.revision_ts,
     )
-    return [
+    return build_carry_forward_row(
         strategy_table_name,
-        rec.strategy_id,
-        rec.strategy_name,
-        rec.underlying,
-        rec.config_timeframe,
-        source_label,
-        "v2",
-        candle.ts,
-        pnl,
-        rec.benchmark,
-        rec.position,
+        rec,
         candle.open,
-        rec.final_signal,
-        rec.weighting,
+        pnl,
+        source_label,
+        candle.ts,
         now,
-        rec.strategy_instance_id,
-    ]
+    )
 
 
 def process_candle(

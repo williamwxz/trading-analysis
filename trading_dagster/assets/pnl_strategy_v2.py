@@ -32,13 +32,17 @@ from ..utils.clickhouse_client import (
     query_scalar,
 )
 from libs.computation import (
+    AnchorRecord,
+    AnchorState,
     INSERT_COLUMNS,
     PROD_INSERT_COLUMNS,
     REAL_TRADE_INSERT_COLUMNS,
     TIMEFRAME_MAP,
     active_prod_bar_at,
     active_rt_revision_at,
+    build_carry_forward_row,
     build_prod_lookup,
+    build_pnl_row,
     build_rt_lookup,
     check_strategy_drop,
     compute_bt_pnl,
@@ -341,11 +345,14 @@ def _process_underlying_recent(
     source_stns = _get_source_strategies(source_table, underlying, window_start_ts, end_ts, client)
     _emit(f"[{underlying}] source has {len(source_stns)} strategies in [{window_start_ts}, {end_ts})")
 
-    # Load anchors from the last committed row before window_start.
-    anchors: dict[str, tuple[float, float, float]] = fetch_anchors(
+    # Load anchors from the last committed row before window_start and seed AnchorState.
+    anchors_raw: dict[str, tuple[float, float, float]] = fetch_anchors(
         target_table, underlying, before_ts=window_start, client=client
     )
-    _emit(f"[{underlying}] loaded {len(anchors)} anchors")
+    state = AnchorState()
+    for stn, (pnl, price, position) in anchors_raw.items():
+        state.set(stn, AnchorRecord(pnl=pnl, price=price, position=position))
+    _emit(f"[{underlying}] loaded {len(state)} anchors")
 
     execute(
         f"ALTER TABLE analytics.{target_table} DELETE "
@@ -390,11 +397,6 @@ def _process_underlying_recent(
           f"[{minute_cur}, {minute_end})")
 
     # ── Per-minute loop ───────────────────────────────────────────────────────
-    # anchor_meta[stn] stores bar metadata for carry-forward rows.
-    # Richer than `anchors` (pnl/price/position only) — kept separate to preserve
-    # the existing anchors dict shape used by fetch_anchors() upstream.
-    anchor_meta: dict[str, dict] = {}
-
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     total_rows = 0
     prev_active: set[str] | None = None
@@ -421,67 +423,35 @@ def _process_underlying_recent(
             curr_active.add(stn)
 
             bar = entry.rev if is_rt else entry.bar
-            anchor_pnl, anchor_price, _ = anchors.get(stn, (0.0, 0.0, 0.0))
-            if anchor_price == 0.0:
-                anchor_price = price
-            cpnl = (
-                anchor_pnl + bar["position"] * (price - anchor_price) / anchor_price
-                if anchor_price != 0.0 else anchor_pnl
-            )
-            minute_rows.append([
-                stn,
-                bar["strategy_id"],
-                bar["strategy_name"],
-                bar["underlying"],
-                bar["config_timeframe"],
-                label,
-                "v2",
-                ts_str,
-                cpnl,
-                bar["bar_benchmark"],
-                bar["position"],
-                price,
-                bar["final_signal"],
-                bar["weighting"],
-                now_str,
-                bar.get("strategy_instance_id", ""),
-            ])
-            anchors[stn] = (cpnl, price, bar["position"])
-            # Always update metadata from the active bar so carry-forward is accurate.
-            anchor_meta[stn] = bar
 
-        # Carry-forward: strategies previously seen (in anchor_meta) but with no
-        # active bar this minute hold their last known position until the next bar
-        # arrives. This covers the gap when source bars are late (e.g. sid=11).
-        for stn, meta in anchor_meta.items():
+            # Lazy-seed new strategies not yet present from fetch_anchors.
+            if not state.has(stn):
+                state.set(stn, AnchorRecord(pnl=0.0, price=price, position=0.0))
+
+            meta = AnchorRecord(
+                strategy_id=bar["strategy_id"],
+                strategy_name=bar["strategy_name"],
+                underlying=bar["underlying"],
+                config_timeframe=bar["config_timeframe"],
+                weighting=bar["weighting"],
+                strategy_instance_id=bar.get("strategy_instance_id", ""),
+                final_signal=bar["final_signal"],
+                benchmark=bar["bar_benchmark"],
+            )
+            cpnl = state.compute_pnl(stn, price, bar["position"], meta=meta)
+            minute_rows.append(build_pnl_row(stn, bar, price, cpnl, label, ts_str, now_str))
+
+        # Carry-forward: strategies previously seen (in state with bar metadata) but
+        # with no active bar this minute hold their last known position until the next
+        # bar arrives. This covers the gap when source bars are late (e.g. sid=11).
+        for stn in list(state.keys()):
             if stn in curr_active:
                 continue
-            anchor_pnl, anchor_price, anchor_pos = anchors.get(stn, (0.0, 0.0, 0.0))
-            if not anchor_price:
-                anchor_price = price
-            cpnl = (
-                anchor_pnl + anchor_pos * (price - anchor_price) / anchor_price
-                if anchor_price != 0.0 else anchor_pnl
-            )
-            minute_rows.append([
-                stn,
-                meta["strategy_id"],
-                meta["strategy_name"],
-                meta["underlying"],
-                meta["config_timeframe"],
-                label,
-                "v2",
-                ts_str,
-                cpnl,
-                meta["bar_benchmark"],
-                anchor_pos,
-                price,
-                meta["final_signal"],
-                meta["weighting"],
-                now_str,
-                meta.get("strategy_instance_id", ""),
-            ])
-            anchors[stn] = (cpnl, price, anchor_pos)
+            rec = state.get(stn)
+            if not rec.strategy_instance_id:
+                continue  # never saw a bar with metadata — skip
+            cpnl = state.compute_pnl(stn, price, rec.position)
+            minute_rows.append(build_carry_forward_row(stn, rec, price, cpnl, label, ts_str, now_str))
 
         # Fail if a strategy that had an active bar at M-1 has no bar at M
         # AND still has future lookup entries (indicates a data hole, not late arrival).

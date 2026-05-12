@@ -9,9 +9,14 @@ Formula:
     cumulative_pnl = anchor_pnl + position * (current_price - anchor_price) / anchor_price
 """
 
+from __future__ import annotations
+
 from collections import defaultdict
 from datetime import datetime, timedelta
-from typing import Dict, Generator, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, Generator, List, Optional, Tuple, Union
+
+if TYPE_CHECKING:
+    from libs.computation.anchor_state import AnchorRecord
 
 TIMEFRAME_MAP: Dict[str, int] = {
     "1m": 1,
@@ -53,6 +58,77 @@ REAL_TRADE_INSERT_COLUMNS = INSERT_COLUMNS
 
 def _parse_ts(s: str) -> datetime:
     return datetime.strptime(str(s)[:19], "%Y-%m-%d %H:%M:%S")
+
+
+def build_pnl_row(
+    strategy_table_name: str,
+    bar: dict,
+    price: float,
+    cumulative_pnl: float,
+    source_label: str,
+    ts: Union[str, datetime],
+    now: Union[str, datetime],
+) -> list:
+    """Build one INSERT_COLUMNS-ordered row from a bar dict and pre-computed pnl.
+
+    bar must have: strategy_id, strategy_name, underlying, config_timeframe,
+    weighting, strategy_instance_id, final_signal, bar_benchmark, position.
+    ts and now accept str or datetime — the insert path for each caller handles
+    the required type (Dagster: _prepare_rows_for_clickhouse converts str→datetime;
+    pnl_consumer: passes datetime objects directly).
+    """
+    return [
+        strategy_table_name,
+        bar["strategy_id"],
+        bar["strategy_name"],
+        bar["underlying"],
+        bar["config_timeframe"],
+        source_label,
+        "v2",
+        ts,
+        cumulative_pnl,
+        bar["bar_benchmark"],
+        bar["position"],
+        price,
+        bar["final_signal"],
+        bar["weighting"],
+        now,
+        bar.get("strategy_instance_id", ""),
+    ]
+
+
+def build_carry_forward_row(
+    strategy_table_name: str,
+    rec: AnchorRecord,
+    price: float,
+    cumulative_pnl: float,
+    source_label: str,
+    ts: Union[str, datetime],
+    now: Union[str, datetime],
+) -> list:
+    """Build one INSERT_COLUMNS-ordered row from an AnchorRecord for carry-forward.
+
+    Used when there is no active bar — the record supplies all bar-metadata fields
+    (populated by the last seen bar). Returns the same column layout as build_pnl_row.
+    """
+    return [
+        strategy_table_name,
+        rec.strategy_id,
+        rec.strategy_name,
+        rec.underlying,
+        rec.config_timeframe,
+        source_label,
+        "v2",
+        ts,
+        cumulative_pnl,
+        rec.benchmark,
+        rec.position,
+        price,
+        rec.final_signal,
+        rec.weighting,
+        now,
+        rec.strategy_instance_id,
+    ]
 
 
 def iter_compute_prod_pnl(
