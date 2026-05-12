@@ -93,7 +93,11 @@ def _get_underlying_resume_dt(underlying: str, target_table: str, client) -> dat
         return None
     if isinstance(result, str):
         result = _parse_ts(result)
-    return (result.replace(tzinfo=UTC) - timedelta(days=_CHUNK_DAYS)).replace(
+    result = result.replace(tzinfo=UTC)
+    # ClickHouse returns epoch (1970-01-01) for max(ts) on an empty table — treat as no rows.
+    if result.year < 2000:
+        return None
+    return (result - timedelta(days=_CHUNK_DAYS)).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
 
