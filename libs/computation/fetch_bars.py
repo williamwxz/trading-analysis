@@ -35,7 +35,7 @@ def fetch_anchors(
     before_ts: Optional[datetime] = None,
     client=None,
 ) -> Dict[str, Tuple[float, float, float]]:
-    """Read the last committed PnL row per strategy from the target table.
+    """Read the last committed PnL row per strategy_instance_id from the target table.
 
     Returns {strategy_table_name: (anchor_pnl, anchor_price, anchor_position)}.
     before_ts: if provided, only rows with ts < before_ts are considered.
@@ -47,13 +47,14 @@ def fetch_anchors(
     sql = f"""\
 SELECT
     strategy_table_name,
+    strategy_instance_id,
     cumulative_pnl AS anchor_pnl,
     price          AS anchor_price,
     position       AS anchor_position
 FROM analytics.{target_table}
 WHERE underlying = '{underlying}'
-{ts_filter}ORDER BY strategy_table_name, ts DESC, updated_at DESC
-LIMIT 1 BY strategy_table_name
+{ts_filter}ORDER BY strategy_instance_id, ts DESC, updated_at DESC
+LIMIT 1 BY strategy_instance_id
 """
     result: Dict[str, Tuple[float, float, float]] = {}
     for r in query_dicts(sql, client):
