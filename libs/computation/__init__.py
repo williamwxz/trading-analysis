@@ -19,6 +19,19 @@ from libs.computation.fetch_bars import (
     fetch_new_bars_real_trade,
 )
 from libs.computation.fetch_prices import fetch_prices_multi
+from libs.computation.minute_loop import (
+    ProdBarEntry,
+    ProdLookup,
+    RtLookup,
+    RtRevisionEntry,
+    active_prod_bar_at,
+    active_rt_revision_at,
+    build_prod_lookup,
+    build_rt_lookup,
+    check_strategy_drop,
+    first_active_minute,
+    last_active_minute,
+)
 from libs.computation.pnl_formula import (
     INSERT_COLUMNS,
     PROD_INSERT_COLUMNS,
@@ -53,6 +66,18 @@ __all__ = [
     "fetch_new_bars_real_trade",
     # fetch_prices (Dagster batch)
     "fetch_prices_multi",
+    # minute_loop (Dagster per-minute recompute)
+    "ProdBarEntry",
+    "ProdLookup",
+    "RtLookup",
+    "RtRevisionEntry",
+    "active_prod_bar_at",
+    "active_rt_revision_at",
+    "build_prod_lookup",
+    "build_rt_lookup",
+    "check_strategy_drop",
+    "first_active_minute",
+    "last_active_minute",
     # pnl_formula (shared computation)
     "INSERT_COLUMNS",
     "PROD_INSERT_COLUMNS",

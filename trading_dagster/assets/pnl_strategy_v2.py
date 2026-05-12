@@ -36,6 +36,11 @@ from libs.computation import (
     PROD_INSERT_COLUMNS,
     REAL_TRADE_INSERT_COLUMNS,
     TIMEFRAME_MAP,
+    active_prod_bar_at,
+    active_rt_revision_at,
+    build_prod_lookup,
+    build_rt_lookup,
+    check_strategy_drop,
     compute_bt_pnl,
     compute_real_trade_pnl,
     extract_row_anchor,
@@ -44,7 +49,9 @@ from libs.computation import (
     fetch_new_bars_prod,
     fetch_new_bars_real_trade,
     fetch_prices_multi,
+    first_active_minute,
     iter_compute_prod_pnl,
+    last_active_minute,
 )
 
 PROD_REAL_TRADE_START_DATE = "2026-02-27"
@@ -307,21 +314,31 @@ def _process_underlying_recent(
     end_dt: datetime,
     log_fn=None,
 ) -> tuple[int, datetime]:
+    """Recompute PnL for one underlying over [window_start, end_dt) minute by minute.
+
+    Mirrors pnl_consumer semantics exactly: for each minute, resolve the currently
+    active bar/revision from a pre-fetched snapshot, compute PnL, and write all rows
+    for that minute atomically. Fails the job if any source strategy is absent from
+    the written output (catches late-arriving source bars).
+    """
     _emit = log_fn or _log.info
     client = get_client()
+    is_rt = mode == "real_trade"
 
     resume_dt = _get_underlying_resume_dt(underlying, target_table, client)
     window_start = resume_dt if resume_dt is not None else default_window_start
-    _emit(f"[{underlying}] window_start={window_start.strftime('%Y-%m-%d %H:%M:%S')}")
-
     window_start_ts = window_start.strftime("%Y-%m-%d %H:%M:%S")
     end_ts = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+    _emit(f"[{underlying}] window_start={window_start_ts}")
 
-    # Snapshot source strategies BEFORE deleting output rows — used for post-write check.
+    # Snapshot source strategies before DELETE — used for post-write completeness check.
     source_stns = _get_source_strategies(source_table, underlying, window_start_ts, end_ts, client)
     _emit(f"[{underlying}] source has {len(source_stns)} strategies in [{window_start_ts}, {end_ts})")
 
-    anchors = fetch_anchors(target_table, underlying, before_ts=window_start, client=client)
+    # Load anchors from the last committed row before window_start.
+    anchors: dict[str, tuple[float, float, float]] = fetch_anchors(
+        target_table, underlying, before_ts=window_start, client=client
+    )
     _emit(f"[{underlying}] loaded {len(anchors)} anchors")
 
     execute(
@@ -331,68 +348,112 @@ def _process_underlying_recent(
     )
     _emit(f"[{underlying}] deleted rows >= {window_start_ts}")
 
+    # ── Fetch all bars/revisions and prices for the full window upfront ──────
+    if mode == "prod":
+        all_bars = fetch_new_bars_prod(source_table, underlying, window_start_ts, end_ts, client)
+    elif mode == "bt":
+        all_bars = fetch_new_bars_bt(source_table, underlying, window_start_ts, end_ts, client)
+    else:
+        all_bars = fetch_new_bars_real_trade(source_table, underlying, window_start_ts, end_ts, client)
+
+    if not all_bars:
+        _emit(f"[{underlying}] no bars in window — skipping")
+        return 0, window_start
+
+    # Prices include expansion past end_ts (1d bars can expand 1440 min past their open).
+    prices_map = fetch_prices_multi([underlying], window_start_ts, end_ts, client, extend_minutes=1440)
+    prices = prices_map.pop(underlying, {})
+
+    # ── Build per-strategy sorted lookup ─────────────────────────────────────
+    if is_rt:
+        lookup = build_rt_lookup(all_bars)
+    else:
+        lookup = build_prod_lookup(all_bars)
+
+    minute_start = first_active_minute(lookup, is_rt)
+    minute_end = last_active_minute(lookup, is_rt)
+    if minute_start is None or minute_end is None:
+        _emit(f"[{underlying}] empty lookup — skipping")
+        return 0, window_start
+
+    # Clamp: don't write before window_start; stop at end_dt (consumer takes over after).
+    minute_cur = max(minute_start, window_start)
+    minute_end = min(minute_end, end_dt)
+
+    _emit(f"[{underlying}] iterating {int((minute_end - minute_cur).total_seconds() // 60)} minutes "
+          f"[{minute_cur}, {minute_end})")
+
+    # ── Per-minute loop ───────────────────────────────────────────────────────
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     total_rows = 0
-    chunk_start = window_start
-    while chunk_start < end_dt:
-        chunk_end = min(chunk_start + timedelta(days=_CHUNK_DAYS), end_dt)
-        ts_start = chunk_start.strftime("%Y-%m-%d %H:%M:%S")
-        ts_end = chunk_end.strftime("%Y-%m-%d %H:%M:%S")
+    prev_active: set[str] | None = None
+    all_stns = set(lookup.keys())
 
-        if mode == "prod":
-            rows_dict = fetch_new_bars_prod(source_table, underlying, ts_start, ts_end, client)
-        elif mode == "bt":
-            rows_dict = fetch_new_bars_bt(source_table, underlying, ts_start, ts_end, client)
-        else:
-            rows_dict = fetch_new_bars_real_trade(source_table, underlying, ts_start, ts_end, client)
-
-        if not rows_dict:
-            chunk_start = chunk_end
+    while minute_cur < minute_end:
+        ts_str = minute_cur.strftime("%Y-%m-%d %H:%M:%S")
+        price = prices.get(ts_str)
+        if price is None:
+            minute_cur += timedelta(minutes=1)
             continue
 
-        prices_map = fetch_prices_multi([underlying], ts_start, ts_end, client, extend_minutes=0)
-        prices = prices_map.pop(underlying, {})
+        # Resolve active bar/revision per strategy at this minute.
+        curr_active: set[str] = set()
+        minute_rows: list[list] = []
 
-        if mode == "prod":
-            for stn, strategy_rows in iter_compute_prod_pnl(rows_dict, anchors, prices, label):
-                _prepare_rows_for_clickhouse(strategy_rows)
-                n = insert_rows(f"analytics.{target_table}", INSERT_COLUMNS, strategy_rows, client)
-                total_rows += n
-                if strategy_rows:
-                    last = strategy_rows[-1]
-                    anchors[stn] = extract_row_anchor(last)
-        elif mode == "bt":
-            by_stn: dict[str, list] = defaultdict(list)
-            for bar in rows_dict:
-                by_stn[bar["strategy_table_name"]].append(bar)
-            for stn, stn_bars in by_stn.items():
-                strategy_rows = compute_bt_pnl(stn_bars, prices, anchors=anchors)
-                _prepare_rows_for_clickhouse(strategy_rows)
-                n = insert_rows(f"analytics.{target_table}", INSERT_COLUMNS, strategy_rows, client)
-                total_rows += n
-                if strategy_rows:
-                    last = strategy_rows[-1]
-                    anchors[stn] = extract_row_anchor(last)
-        else:
-            by_strategy: dict[str, list] = defaultdict(list)
-            for bar in rows_dict:
-                by_strategy[bar["strategy_table_name"]].append(bar)
-            for stn, stn_bars in by_strategy.items():
-                strategy_rows = compute_real_trade_pnl(stn_bars, anchors, prices)
-                _prepare_rows_for_clickhouse(strategy_rows)
-                n = insert_rows(f"analytics.{target_table}", INSERT_COLUMNS, strategy_rows, client)
-                total_rows += n
-                if strategy_rows:
-                    last = strategy_rows[-1]
-                    anchors[stn] = extract_row_anchor(last)
+        for stn in all_stns:
+            if is_rt:
+                entry = active_rt_revision_at(lookup, stn, minute_cur)
+            else:
+                entry = active_prod_bar_at(lookup, stn, minute_cur)
+            if entry is None:
+                continue
+            curr_active.add(stn)
 
-        del rows_dict, prices
-        chunk_start = chunk_end
+            bar = entry.rev if is_rt else entry.bar
+            anchor_pnl, anchor_price, _ = anchors.get(stn, (0.0, 0.0, 0.0))
+            if anchor_price == 0.0:
+                anchor_price = price
+            cpnl = (
+                anchor_pnl + bar["position"] * (price - anchor_price) / anchor_price
+                if anchor_price != 0.0 else anchor_pnl
+            )
+            minute_rows.append([
+                stn,
+                bar["strategy_id"],
+                bar["strategy_name"],
+                bar["underlying"],
+                bar["config_timeframe"],
+                label,
+                "v2",
+                ts_str,
+                cpnl,
+                bar["bar_benchmark"],
+                bar["position"],
+                price,
+                bar["final_signal"],
+                bar["weighting"],
+                now_str,
+                bar.get("strategy_instance_id", ""),
+            ])
+            anchors[stn] = (cpnl, price, bar["position"])
 
-    # Fail before returning if any source strategy is absent from the written output.
-    # This catches race conditions where source bars arrive after the recompute fetches them.
+        # Fail if a strategy that had an active bar at M-1 has no bar at M.
+        if prev_active is not None:
+            check_strategy_drop(prev_active, curr_active, minute_cur, underlying, lookup, is_rt)
+
+        if minute_rows:
+            _prepare_rows_for_clickhouse(minute_rows)
+            n = insert_rows(f"analytics.{target_table}", INSERT_COLUMNS, minute_rows, client)
+            total_rows += n
+
+        if curr_active:
+            prev_active = curr_active
+        minute_cur += timedelta(minutes=1)
+
+    # Final completeness guard: every source strategy must appear in the output.
     _check_output_completeness(target_table, underlying, window_start_ts, end_ts, source_stns, client, _emit)
 
-    _emit(f"[{underlying}] recent recompute complete: {total_rows:,} rows")
+    _emit(f"[{underlying}] complete: {total_rows:,} rows")
     return total_rows, window_start
 
 
