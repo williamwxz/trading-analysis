@@ -582,7 +582,7 @@ def test_fetch_bootstrap_seeds_real_trade_bar_ts_revision_ts_populated():
             "strategy_table_name": "strat_rt",
             "strategy_instance_id": "inst_rt",
             "bar_ts": expected_bar_ts,
-            "revision_ts": expected_rev_ts,
+            "max_revision_ts": expected_rev_ts,
             "row_json": json.dumps({"position": 0.8}),
         }
     ]
@@ -618,7 +618,7 @@ def test_fetch_bootstrap_seeds_real_trade_correct_position():
             "strategy_table_name": "strat_rt",
             "strategy_instance_id": "inst_rt",
             "bar_ts": datetime(2026, 5, 9, 22, 0, 0),
-            "revision_ts": datetime(2026, 5, 9, 22, 5, 0),
+            "max_revision_ts": datetime(2026, 5, 9, 22, 5, 0),
             "row_json": json.dumps({"position": -1.0}),
         }
     ]

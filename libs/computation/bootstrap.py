@@ -123,7 +123,7 @@ SELECT
     strategy_table_name,
     strategy_instance_id,
     ts AS bar_ts,
-    max(revision_ts) AS revision_ts,
+    max(revision_ts) AS max_revision_ts,
     argMax(row_json, revision_ts) AS row_json
 FROM {history_table}
 WHERE revision_ts <= '{start_str}'
@@ -137,7 +137,7 @@ LIMIT 1 BY strategy_instance_id
             pos_rows[row["strategy_table_name"]] = {
                 "position": float(rj.get("position", 0.0)),
                 "bar_ts": row["bar_ts"],
-                "revision_ts": row["revision_ts"],
+                "revision_ts": row["max_revision_ts"],
             }
     else:
         # Prod/bt: latest bar ts <= start_ts, first revision only.
