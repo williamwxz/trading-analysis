@@ -252,17 +252,32 @@ def _compute_pnl_row(
     bar_ts: "datetime | None" = None,
     revision_ts: "datetime | None" = None,
 ) -> list:
-    """Compute one PnL row. Lazy-seeds from zero if strategy not yet in state."""
+    """Compute one PnL row. Lazy-seeds from zero if strategy not yet in state.
+
+    Always stores bar metadata on the anchor so carry-forward rows can be emitted
+    if the next bar arrives late.
+    """
     if not state.has(strategy_table_name):
         logger.info("New strategy '%s' — seeding from zero at price=%.4f ts=%s",
                     strategy_table_name, candle.open, candle.ts)
         state.set(strategy_table_name, AnchorRecord(pnl=0.0, price=candle.open, position=0.0))
+    meta = AnchorRecord(
+        strategy_id=bar.strategy_id,
+        strategy_name=bar.strategy_name,
+        underlying=bar.underlying,
+        config_timeframe=bar.config_timeframe,
+        weighting=bar.weighting,
+        strategy_instance_id=bar.strategy_instance_id,
+        final_signal=bar.final_signal,
+        benchmark=bar.benchmark,
+    )
     pnl = state.compute_pnl(
         strategy_table_name,
         candle.open,
         bar.position,
         bar_ts=bar_ts or datetime.min,
         revision_ts=revision_ts or datetime.min,
+        meta=meta,
     )
     return [
         strategy_table_name,
@@ -284,6 +299,51 @@ def _compute_pnl_row(
     ]
 
 
+def _carry_forward_row(
+    state: AnchorState,
+    strategy_table_name: str,
+    candle: CandleEvent,
+    source_label: str,
+    now: datetime,
+) -> "list | None":
+    """Emit a PnL row using the last known position when no bar is active.
+
+    Called for strategies that were active last candle but absent from the current
+    candle lookup — their next bar arrived late. Holds the previous position and
+    advances the PnL chain until a new bar appears.
+
+    Returns None if the anchor has no metadata (strategy was never seen with a bar).
+    """
+    rec = state.get(strategy_table_name)
+    if not rec.strategy_instance_id:
+        return None
+    pnl = state.compute_pnl(
+        strategy_table_name,
+        candle.open,
+        rec.position,
+        bar_ts=rec.bar_ts,
+        revision_ts=rec.revision_ts,
+    )
+    return [
+        strategy_table_name,
+        rec.strategy_id,
+        rec.strategy_name,
+        rec.underlying,
+        rec.config_timeframe,
+        source_label,
+        "v2",
+        candle.ts,
+        pnl,
+        rec.benchmark,
+        rec.position,
+        candle.open,
+        rec.final_signal,
+        rec.weighting,
+        now,
+        rec.strategy_instance_id,
+    ]
+
+
 def process_candle(
     candle: CandleEvent,
     state_prod: AnchorState,
@@ -298,6 +358,12 @@ def process_candle(
     Returns (rows, prod_fetched, bt_fetched, real_trade_fetched) where the
     fetched counts are the number of strategy instances returned by each
     candle lookup query — used by the caller to validate flush completeness.
+
+    For prod/bt: strategies in state that return no active bar (next bar not yet
+    arrived) receive a carry-forward row using their last known position. This
+    prevents gaps when source bars arrive late (e.g. sid=11 arriving 2+ hours late).
+    Real_trade does not use carry-forward — its revision guard already handles late
+    arrivals by holding the last accepted revision until a new one appears.
     """
     now = datetime.now(UTC).replace(tzinfo=None)
     rows: list[dict] = []
@@ -319,7 +385,9 @@ def process_candle(
     if cfg.prod:
         prod_bars = fetch_strategies_for_candle(candle.instrument, candle.ts)
         prod_fetched = len(prod_bars)
+        fetched_prod_stns: set[str] = set()
         for bar in prod_bars:
+            fetched_prod_stns.add(bar.strategy_table_name)
             key = (bar.strategy_instance_id, bar.bar_ts)
             if key in seen_prod:
                 continue
@@ -327,11 +395,19 @@ def process_candle(
             rows.append({"_sink": "pnl_prod", "_row": _compute_pnl_row(
                 state_prod, bar.strategy_table_name, candle, bar, "production", now,
             )})
+        # Carry-forward: hold position for strategies in state that returned no bar.
+        for stn in list(state_prod.keys()):
+            if stn not in fetched_prod_stns:
+                row = _carry_forward_row(state_prod, stn, candle, "production", now)
+                if row is not None:
+                    rows.append({"_sink": "pnl_prod", "_row": row})
 
     if cfg.bt:
         bt_bars = fetch_bt_strategies_for_candle(candle.instrument, candle.ts)
         bt_fetched = len(bt_bars)
+        fetched_bt_stns: set[str] = set()
         for bar in bt_bars:
+            fetched_bt_stns.add(bar.strategy_table_name)
             key = (bar.strategy_instance_id, bar.bar_ts)
             if key in seen_bt:
                 continue
@@ -339,6 +415,11 @@ def process_candle(
             rows.append({"_sink": "pnl_bt", "_row": _compute_pnl_row(
                 state_bt, bar.strategy_table_name, candle, bar, "backtest", now,
             )})
+        for stn in list(state_bt.keys()):
+            if stn not in fetched_bt_stns:
+                row = _carry_forward_row(state_bt, stn, candle, "backtest", now)
+                if row is not None:
+                    rows.append({"_sink": "pnl_bt", "_row": row})
 
     if cfg.real_trade:
         rt_revs = fetch_real_trade_for_candle(candle.instrument, candle.ts)

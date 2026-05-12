@@ -543,3 +543,105 @@ def test_peek_reference_ts_returns_none_when_no_messages():
         result = peek_reference_ts("localhost:9092", "test-group")
 
     assert result is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Carry-forward: strategies in state with no active bar this candle
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.unit
+def test_carry_forward_emits_row_when_bar_absent():
+    """Strategy in state with no bar in lookup gets a carry-forward row."""
+    state = AnchorState()
+    state.set("strat_late", AnchorRecord(
+        pnl=0.05, price=93100.0, position=-1.0,
+        strategy_id=11, strategy_name="late_strat", underlying="BTC",
+        config_timeframe="1h", weighting=1.0,
+        strategy_instance_id="inst_late", final_signal=-1.0, benchmark=0.0,
+    ))
+    candle = _candle(open=93000.0)
+    cfg = SinkConfig(price=False, prod=True, real_trade=False, bt=False)
+
+    # No bars returned — simulates the case where the next bar hasn't arrived yet
+    with patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[]):
+        rows, _, _, _ = process_candle(candle, state, AnchorState(), AnchorState(),
+                              set(), set(), cfg)
+
+    pnl_rows = [r for r in rows if r["_sink"] == "pnl_prod"]
+    assert len(pnl_rows) == 1, "carry-forward must emit one row for the late strategy"
+    row = pnl_rows[0]["_row"]
+    assert row[0] == "strat_late"          # strategy_table_name
+    assert row[10] == -1.0                 # position carried forward
+    assert row[11] == 93000.0             # current price
+    assert row[5] == "production"          # source_label
+    # PnL: 0.05 + (-1.0) * (93000 - 93100) / 93100 ≈ 0.05 + 0.001074
+    expected = 0.05 + (-1.0) * (93000.0 - 93100.0) / 93100.0
+    assert row[8] == pytest.approx(expected)
+
+
+@pytest.mark.unit
+def test_carry_forward_skipped_when_no_metadata():
+    """Strategy in state with no bar metadata (never saw a bar) emits no carry-forward."""
+    state = AnchorState()
+    # AnchorRecord with empty strategy_instance_id — seeded from bootstrap with no bar seen
+    state.set("strat_no_meta", AnchorRecord(pnl=0.0, price=93100.0, position=0.0))
+    candle = _candle()
+    cfg = SinkConfig(price=False, prod=True, real_trade=False, bt=False)
+
+    with patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[]):
+        rows, _, _, _ = process_candle(candle, state, AnchorState(), AnchorState(),
+                              set(), set(), cfg)
+
+    pnl_rows = [r for r in rows if r["_sink"] == "pnl_prod"]
+    assert pnl_rows == [], "no metadata means no carry-forward row"
+
+
+@pytest.mark.unit
+def test_carry_forward_not_emitted_when_bar_present():
+    """When a bar IS returned for a strategy, no carry-forward is emitted."""
+    state = AnchorState()
+    state.set("strat_prod_1", AnchorRecord(
+        pnl=0.0, price=93100.0, position=1.0,
+        strategy_id=1, strategy_name="momentum", underlying="BTC",
+        config_timeframe="5m", weighting=1.0,
+        strategy_instance_id="inst_001", final_signal=1.0, benchmark=0.0,
+    ))
+    candle = _candle(open=93200.0)
+    bar = _bar(position=1.0)
+    cfg = SinkConfig(price=False, prod=True, real_trade=False, bt=False)
+
+    with patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[bar]):
+        rows, _, _, _ = process_candle(candle, state, AnchorState(), AnchorState(),
+                              set(), set(), cfg)
+
+    pnl_rows = [r for r in rows if r["_sink"] == "pnl_prod"]
+    # Exactly 1 row — from the bar, not a duplicate carry-forward
+    assert len(pnl_rows) == 1
+
+
+@pytest.mark.unit
+def test_carry_forward_metadata_updated_after_new_bar():
+    """After a new bar is processed, carry-forward uses the new bar's metadata."""
+    state = AnchorState()
+    state.set("strat_prod_1", AnchorRecord(pnl=0.0, price=93000.0, position=1.0,
+        strategy_id=1, strategy_name="momentum", underlying="BTC",
+        config_timeframe="5m", weighting=1.0,
+        strategy_instance_id="inst_001", final_signal=1.0, benchmark=0.0,
+    ))
+    # Candle 1: bar arrives, position flips to -1.0
+    candle1 = _candle(open=93100.0)
+    bar_new = _bar(position=-1.0, siid="inst_001")
+    cfg = SinkConfig(price=False, prod=True, real_trade=False, bt=False)
+
+    with patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[bar_new]):
+        process_candle(candle1, state, AnchorState(), AnchorState(), set(), set(), cfg)
+
+    # Candle 2: no bar — carry-forward should use position=-1.0
+    candle2 = _candle(open=93200.0)
+    with patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[]):
+        rows, _, _, _ = process_candle(candle2, state, AnchorState(), AnchorState(),
+                              {("inst_001", _CANDLE_TS)}, set(), cfg)
+
+    pnl_rows = [r for r in rows if r["_sink"] == "pnl_prod"]
+    assert len(pnl_rows) == 1
+    assert pnl_rows[0]["_row"][10] == -1.0  # new position carried forward
