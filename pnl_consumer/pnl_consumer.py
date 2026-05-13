@@ -403,12 +403,12 @@ def process_candle(
 
     if cfg.real_trade:
         rt_revs = fetch_real_trade_for_candle(candle.instrument, candle.ts)
-        real_trade_fetched = len(rt_revs)
         for rev in rt_revs:
             if not state_real_trade.should_apply_revision(
                 rev.strategy_table_name, rev.bar_ts, rev.revision_ts
             ):
                 continue
+            real_trade_fetched += 1
             rows.append({"_sink": "pnl_real_trade", "_row": _compute_pnl_row(
                 state_real_trade, rev.strategy_table_name, candle, rev,
                 "real_trade", now, rev.bar_ts, rev.revision_ts,
