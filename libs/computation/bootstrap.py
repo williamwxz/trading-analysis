@@ -7,19 +7,20 @@ Provides the data needed to seed AnchorState before the live streaming loop star
 
 Supports all three modes (prod, bt, real_trade) via the pnl_table / history_table parameters.
 
-Position resolution differs by mode:
-  - prod/bt:        latest bar with ts <= cutoff, argMin(row_json, revision_ts) — first revision wins
-  - real_trade:     latest revision with revision_ts <= cutoff per strategy_instance_id
+Walk rows use price AND position from the stored pnl table columns — this ensures the
+verification chain uses the exact values that Dagster/consumer used when writing the rows.
+Re-deriving position from history would diverge if a new revision arrives between when
+a row was stored and when bootstrap runs.
 
-Price comes from the stored price column in the PnL table — this ensures the verification
-chain uses the same prices that Dagster/consumer used when writing the rows.
+For real_trade, bar_ts and revision_ts are still fetched from history so AnchorState's
+revision guard can be seeded correctly for the live loop.
 """
 
 import json
 import logging
 from bisect import bisect_right
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from libs.clickhouse_client import query_dicts
 
@@ -206,31 +207,32 @@ def fetch_walk_rows(
     row was written — so verification uses an identical chain to what Dagster/consumer computed.
     reference_ts is EXCLUDED — the consumer will process that candle live from Kafka.
 
-    Position resolution:
-      prod/bt:     latest bar with ts <= row.ts, first revision only
-      real_trade:  latest revision with revision_ts <= row.ts per strategy_instance_id
+    Position comes from the stored position column in the pnl table (same writer as price
+    and cumulative_pnl) — re-querying history would diverge if a new revision arrives after
+    the row was stored.
 
-    For real_trade, WalkRow.bar_ts and WalkRow.revision_ts are also populated so the
-    caller can advance AnchorState's revision guard fields after each walked row.
+    For real_trade, bar_ts and revision_ts are additionally fetched from history to seed
+    AnchorState's revision guard for the live loop.  For prod/bt these remain datetime.min.
 
     Args:
         pnl_table:     e.g. 'analytics.strategy_pnl_1min_prod_v2'
         history_table: e.g. 'analytics.strategy_output_history_v2'
         start_ts:      start of walk window (inclusive)
         reference_ts:  end of walk window (exclusive)
-        real_trade:    True to use revision_ts-based position resolution
+        real_trade:    True to populate bar_ts/revision_ts from history for the revision guard
     """
     start_str = start_ts.strftime("%Y-%m-%d %H:%M:%S")
     ref_str = reference_ts.strftime("%Y-%m-%d %H:%M:%S")
 
-    # ── Fetch stored PnL rows — use stored price column for chain consistency ──
+    # ── Fetch stored PnL rows — use stored price and position for chain consistency ──
     pnl_sql = f"""\
 SELECT
     strategy_table_name,
     strategy_instance_id,
     ts,
     cumulative_pnl,
-    price
+    price,
+    position
 FROM {pnl_table} FINAL
 WHERE ts >= '{start_str}'
   AND ts < '{ref_str}'
@@ -240,78 +242,40 @@ ORDER BY strategy_table_name, ts ASC
     if not pnl_rows:
         return []
 
-    # ── Fetch history bars/revisions for position resolution ──────────────────
+    # ── For real_trade: fetch bar_ts/revision_ts from history for the revision guard ──
+    # Position is NOT taken from history — it comes from the stored pnl row above.
+    # Only real_trade needs bar_ts/revision_ts to seed AnchorState's revision guard.
+    rt_guard: dict[str, list[tuple[datetime, datetime, datetime]]] = {}
     if real_trade:
-        # All revisions with revision_ts in [start_ts, reference_ts) — sorted ASC.
-        # We resolve per walk row in Python using bisect.
-        # Group by (siid, revision_ts) taking the highest bar_ts per revision_ts.
-        # Multiple bars can share the same revision_ts (batch revisions); taking the
-        # latest bar_ts matches the AnchorState revision guard used in the live loop.
+        # All revisions in the walk window, sorted by revision_ts per siid.
         hist_sql = f"""\
 SELECT
     strategy_instance_id,
     revision_ts,
-    argMax(ts, ts)         AS bar_ts,
-    argMax(row_json, ts)   AS row_json
+    argMax(ts, ts) AS bar_ts
 FROM {history_table}
 WHERE revision_ts >= '{start_str}'::DateTime - INTERVAL 2 DAY
   AND revision_ts < '{ref_str}'
 GROUP BY strategy_instance_id, revision_ts
 ORDER BY strategy_instance_id, revision_ts
 """
-        # Build per-strategy_instance_id sorted list of (revision_ts, bar_ts, position).
-        rt_revisions: dict[str, list[tuple[datetime, datetime, float]]] = {}
         for row in query_dicts(hist_sql):
             siid = row["strategy_instance_id"]
-            rj = json.loads(row["row_json"])
-            entry = (row["revision_ts"], row["bar_ts"], float(rj.get("position", 0.0)))
-            rt_revisions.setdefault(siid, []).append(entry)
-
-        def _get_rt_position(
-            siid: str, row_ts: datetime
-        ) -> tuple[float, datetime, datetime]:
-            revs = rt_revisions.get(siid)
-            if not revs:
-                return 0.0, _DATETIME_MIN, _DATETIME_MIN
-            rev_ts_keys = [r[0] for r in revs]
-            idx = bisect_right(rev_ts_keys, row_ts) - 1
-            if idx < 0:
-                return 0.0, _DATETIME_MIN, _DATETIME_MIN
-            _, bar_ts, position = revs[idx]
-            return position, bar_ts, rev_ts_keys[idx]
-
-    else:
-        # Prod/bt: bars in window, first revision per (strategy_table_name, bar_ts).
-        hist_sql = f"""\
-SELECT
-    strategy_table_name,
-    ts AS bar_ts,
-    argMin(row_json, revision_ts) AS row_json
-FROM {history_table}
-WHERE ts >= '{start_str}'::DateTime - INTERVAL 2 DAY
-  AND ts < '{ref_str}'
-GROUP BY strategy_table_name, ts
-ORDER BY strategy_table_name, ts
-"""
-        # Key on closing_ts (= bar_ts + cfg_bar_sec) so that a bar's position
-        # only becomes active at bar close, matching iter_compute_prod_pnl.
-        bar_positions: dict[str, list[tuple[datetime, float]]] = {}
-        for row in query_dicts(hist_sql):
-            stn = row["strategy_table_name"]
-            rj = json.loads(row["row_json"])
-            bar_sec = int(rj.get("cfg_bar_sec", 300))
-            closing_ts = row["bar_ts"] + timedelta(seconds=bar_sec)
-            bar_positions.setdefault(stn, []).append(
-                (closing_ts, float(rj.get("position", 0.0)))
+            rt_guard.setdefault(siid, []).append(
+                (row["revision_ts"], row["bar_ts"], row["revision_ts"])
             )
 
-        def _get_prod_position(stn: str, row_ts: datetime) -> float:
-            bars = bar_positions.get(stn)
-            if not bars:
-                return 0.0
-            ts_keys = [b[0] for b in bars]
-            idx = bisect_right(ts_keys, row_ts) - 1
-            return bars[idx][1] if idx >= 0 else 0.0
+    def _get_rt_guard(siid: str, row_ts: datetime) -> tuple[datetime, datetime]:
+        """Return (bar_ts, revision_ts) of latest revision with revision_ts <= row_ts."""
+        revs = rt_guard.get(siid)
+        if not revs:
+            return _DATETIME_MIN, _DATETIME_MIN
+        rev_ts_keys = [r[0] for r in revs]
+        idx = bisect_right(rev_ts_keys, row_ts) - 1
+        if idx < 0:
+            return _DATETIME_MIN, _DATETIME_MIN
+        _, bar_ts, rev_ts = revs[idx]
+        return bar_ts, rev_ts
 
     # ── Build WalkRow list ────────────────────────────────────────────────────
     result: list[WalkRow] = []
@@ -321,9 +285,8 @@ ORDER BY strategy_table_name, ts
         row_ts = row["ts"]
 
         if real_trade:
-            position, bar_ts, revision_ts = _get_rt_position(siid, row_ts)
+            bar_ts, revision_ts = _get_rt_guard(siid, row_ts)
         else:
-            position = _get_prod_position(stn, row_ts)
             bar_ts = _DATETIME_MIN
             revision_ts = _DATETIME_MIN
 
@@ -334,7 +297,7 @@ ORDER BY strategy_table_name, ts
                 ts=row_ts,
                 cumulative_pnl=float(row["cumulative_pnl"] or 0.0),
                 price=float(row["price"]),
-                position=position,
+                position=float(row["position"]),
                 bar_ts=bar_ts,
                 revision_ts=revision_ts,
             )

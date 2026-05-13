@@ -641,7 +641,7 @@ def test_fetch_bootstrap_seeds_real_trade_correct_position():
 
 @pytest.mark.unit
 def test_fetch_walk_rows_returns_walk_row_list_with_correct_fields():
-    """Returns WalkRow list with cumulative_pnl, price, position populated."""
+    """Returns WalkRow list with cumulative_pnl, price, position from stored pnl rows."""
     row_ts = datetime(2026, 5, 7, 1, 0, 0)
     pnl_rows = [
         {
@@ -651,19 +651,10 @@ def test_fetch_walk_rows_returns_walk_row_list_with_correct_fields():
             "cumulative_pnl": 7.2,
             "underlying": "BTC",
             "price": 95000.0,
+            "position": 0.5,
         }
     ]
-    # One bar before and at row_ts
-    bar_rows = [
-        {
-            "strategy_table_name": "strat_prod_1",
-            "bar_ts": datetime(2026, 5, 7, 0, 55, 0),
-            "row_json": json.dumps({"position": 0.5}),
-        }
-    ]
-    with patch(
-        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, bar_rows]
-    ):
+    with patch("libs.computation.bootstrap.query_dicts", return_value=pnl_rows):
         walk_rows = fetch_walk_rows(
             pnl_table="analytics.strategy_pnl_1min_prod_v2",
             history_table="analytics.strategy_output_history_v2",
@@ -681,7 +672,7 @@ def test_fetch_walk_rows_returns_walk_row_list_with_correct_fields():
 
 @pytest.mark.unit
 def test_fetch_walk_rows_price_from_price_field_not_cumulative_pnl():
-    """price comes from the joined futures_price_1min column, not cumulative_pnl."""
+    """price comes from the stored price column, not cumulative_pnl."""
     row_ts = datetime(2026, 5, 7, 2, 0, 0)
     pnl_rows = [
         {
@@ -690,13 +681,11 @@ def test_fetch_walk_rows_price_from_price_field_not_cumulative_pnl():
             "ts": row_ts,
             "cumulative_pnl": 999.0,  # large sentinel — should NOT appear as price
             "underlying": "BTC",
-            "price": 88000.0,  # this is the joined futures price
+            "price": 88000.0,
+            "position": 0.0,
         }
     ]
-    bar_rows: list = []
-    with patch(
-        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, bar_rows]
-    ):
+    with patch("libs.computation.bootstrap.query_dicts", return_value=pnl_rows):
         walk_rows = fetch_walk_rows(
             pnl_table="analytics.strategy_pnl_1min_prod_v2",
             history_table="analytics.strategy_output_history_v2",
@@ -709,42 +698,42 @@ def test_fetch_walk_rows_price_from_price_field_not_cumulative_pnl():
 
 
 @pytest.mark.unit
-def test_fetch_walk_rows_position_resolved_by_bisect_latest_bar_le_row_ts():
-    """Position for each walk row is the latest bar with bar_ts <= row.ts."""
+def test_fetch_walk_rows_position_comes_from_stored_pnl_rows():
+    """Position for each walk row comes directly from the stored pnl table, not history."""
     ts1 = datetime(2026, 5, 7, 1, 0, 0)
     ts2 = datetime(2026, 5, 7, 2, 0, 0)
     ts3 = datetime(2026, 5, 7, 3, 0, 0)
 
-    # Three PnL rows at ts1, ts2, ts3
     pnl_rows = [
         {
             "strategy_table_name": "strat_prod_1",
             "strategy_instance_id": "inst_001",
-            "ts": ts,
+            "ts": ts1,
             "cumulative_pnl": 1.0,
             "underlying": "BTC",
             "price": 90000.0,
-        }
-        for ts in [ts1, ts2, ts3]
-    ]
-    # Two bars: bar at ts1 (position=0.5) and bar at ts2 (position=1.0)
-    bar_ts_a = datetime(2026, 5, 7, 0, 55, 0)  # before ts1 — applies to ts1
-    bar_ts_b = datetime(2026, 5, 7, 1, 30, 0)  # between ts1 and ts2 — applies to ts2, ts3
-    bar_rows = [
-        {
-            "strategy_table_name": "strat_prod_1",
-            "bar_ts": bar_ts_a,
-            "row_json": json.dumps({"position": 0.5}),
+            "position": 0.5,
         },
         {
             "strategy_table_name": "strat_prod_1",
-            "bar_ts": bar_ts_b,
-            "row_json": json.dumps({"position": 1.0}),
+            "strategy_instance_id": "inst_001",
+            "ts": ts2,
+            "cumulative_pnl": 1.1,
+            "underlying": "BTC",
+            "price": 91000.0,
+            "position": 1.0,
+        },
+        {
+            "strategy_table_name": "strat_prod_1",
+            "strategy_instance_id": "inst_001",
+            "ts": ts3,
+            "cumulative_pnl": 1.2,
+            "underlying": "BTC",
+            "price": 92000.0,
+            "position": -0.5,
         },
     ]
-    with patch(
-        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, bar_rows]
-    ):
+    with patch("libs.computation.bootstrap.query_dicts", return_value=pnl_rows):
         walk_rows = fetch_walk_rows(
             pnl_table="analytics.strategy_pnl_1min_prod_v2",
             history_table="analytics.strategy_output_history_v2",
@@ -753,12 +742,9 @@ def test_fetch_walk_rows_position_resolved_by_bisect_latest_bar_le_row_ts():
             real_trade=False,
         )
     assert len(walk_rows) == 3
-    # ts1 (01:00): bar_ts_a (00:55) is latest bar <= 01:00, position=0.5
     assert walk_rows[0].position == pytest.approx(0.5)
-    # ts2 (02:00): bar_ts_b (01:30) is latest bar <= 02:00, position=1.0
     assert walk_rows[1].position == pytest.approx(1.0)
-    # ts3 (03:00): bar_ts_b (01:30) is still latest bar <= 03:00, position=1.0
-    assert walk_rows[2].position == pytest.approx(1.0)
+    assert walk_rows[2].position == pytest.approx(-0.5)
 
 
 @pytest.mark.unit
@@ -788,12 +774,10 @@ def test_fetch_walk_rows_bar_ts_revision_ts_are_datetime_min_for_prod():
             "cumulative_pnl": 1.0,
             "underlying": "BTC",
             "price": 90000.0,
+            "position": 0.0,
         }
     ]
-    bar_rows: list = []
-    with patch(
-        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, bar_rows]
-    ):
+    with patch("libs.computation.bootstrap.query_dicts", return_value=pnl_rows):
         walk_rows = fetch_walk_rows(
             pnl_table="analytics.strategy_pnl_1min_prod_v2",
             history_table="analytics.strategy_output_history_v2",
@@ -811,8 +795,8 @@ def test_fetch_walk_rows_bar_ts_revision_ts_are_datetime_min_for_prod():
 
 
 @pytest.mark.unit
-def test_fetch_walk_rows_real_trade_position_resolved_by_bisect_on_revision_ts():
-    """Real-trade walk uses revision_ts bisect (not bar_ts) to resolve position."""
+def test_fetch_walk_rows_real_trade_position_comes_from_stored_pnl_rows():
+    """Real-trade walk uses stored position from pnl table, not from history revisions."""
     ts1 = datetime(2026, 5, 7, 1, 0, 0)
     ts2 = datetime(2026, 5, 7, 1, 5, 0)
     ts3 = datetime(2026, 5, 7, 1, 10, 0)
@@ -821,31 +805,37 @@ def test_fetch_walk_rows_real_trade_position_resolved_by_bisect_on_revision_ts()
         {
             "strategy_table_name": "strat_rt",
             "strategy_instance_id": "inst_rt",
-            "ts": ts,
+            "ts": ts1,
             "cumulative_pnl": 2.0,
             "underlying": "BTC",
             "price": 90000.0,
-        }
-        for ts in [ts1, ts2, ts3]
+            "position": 0.0,
+        },
+        {
+            "strategy_table_name": "strat_rt",
+            "strategy_instance_id": "inst_rt",
+            "ts": ts2,
+            "cumulative_pnl": 2.1,
+            "underlying": "BTC",
+            "price": 90100.0,
+            "position": 1.0,
+        },
+        {
+            "strategy_table_name": "strat_rt",
+            "strategy_instance_id": "inst_rt",
+            "ts": ts3,
+            "cumulative_pnl": 2.2,
+            "underlying": "BTC",
+            "price": 90200.0,
+            "position": 1.0,
+        },
     ]
-    # Revision at 01:02 changes position to 1.0; applies to ts2 (01:05) and ts3 (01:10)
-    rev_ts_a = datetime(2026, 5, 7, 0, 58, 0)  # before ts1 — position=0.0
-    rev_ts_b = datetime(2026, 5, 7, 1, 2, 0)   # between ts1 and ts2 — position=1.0
+    rev_ts_a = datetime(2026, 5, 7, 0, 58, 0)
+    rev_ts_b = datetime(2026, 5, 7, 1, 2, 0)
     bar_ts_common = datetime(2026, 5, 7, 0, 55, 0)
-
     hist_rows = [
-        {
-            "strategy_instance_id": "inst_rt",
-            "bar_ts": bar_ts_common,
-            "revision_ts": rev_ts_a,
-            "row_json": json.dumps({"position": 0.0}),
-        },
-        {
-            "strategy_instance_id": "inst_rt",
-            "bar_ts": bar_ts_common,
-            "revision_ts": rev_ts_b,
-            "row_json": json.dumps({"position": 1.0}),
-        },
+        {"strategy_instance_id": "inst_rt", "bar_ts": bar_ts_common, "revision_ts": rev_ts_a},
+        {"strategy_instance_id": "inst_rt", "bar_ts": bar_ts_common, "revision_ts": rev_ts_b},
     ]
     with patch(
         "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, hist_rows]
@@ -858,17 +848,15 @@ def test_fetch_walk_rows_real_trade_position_resolved_by_bisect_on_revision_ts()
             real_trade=True,
         )
     assert len(walk_rows) == 3
-    # ts1=01:00: rev_ts_a (00:58) is latest revision <= 01:00, position=0.0
+    # position always from stored pnl rows, not derived from revision_ts bisect
     assert walk_rows[0].position == pytest.approx(0.0)
-    # ts2=01:05: rev_ts_b (01:02) is latest revision <= 01:05, position=1.0
     assert walk_rows[1].position == pytest.approx(1.0)
-    # ts3=01:10: rev_ts_b (01:02) still latest, position=1.0
     assert walk_rows[2].position == pytest.approx(1.0)
 
 
 @pytest.mark.unit
 def test_fetch_walk_rows_real_trade_bar_ts_revision_ts_populated():
-    """Real-trade walk rows have bar_ts and revision_ts populated."""
+    """Real-trade walk rows have bar_ts and revision_ts from history for the revision guard."""
     row_ts = datetime(2026, 5, 7, 1, 5, 0)
     expected_bar_ts = datetime(2026, 5, 7, 0, 55, 0)
     expected_rev_ts = datetime(2026, 5, 7, 1, 2, 0)
@@ -881,6 +869,7 @@ def test_fetch_walk_rows_real_trade_bar_ts_revision_ts_populated():
             "cumulative_pnl": 2.0,
             "underlying": "BTC",
             "price": 90000.0,
+            "position": 0.5,
         }
     ]
     hist_rows = [
@@ -888,7 +877,6 @@ def test_fetch_walk_rows_real_trade_bar_ts_revision_ts_populated():
             "strategy_instance_id": "inst_rt",
             "bar_ts": expected_bar_ts,
             "revision_ts": expected_rev_ts,
-            "row_json": json.dumps({"position": 0.5}),
         }
     ]
     with patch(
@@ -905,6 +893,7 @@ def test_fetch_walk_rows_real_trade_bar_ts_revision_ts_populated():
     wr = walk_rows[0]
     assert wr.bar_ts == expected_bar_ts
     assert wr.revision_ts == expected_rev_ts
+    assert wr.position == pytest.approx(0.5)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
