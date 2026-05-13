@@ -353,6 +353,7 @@ def process_candle(
     now = datetime.now(UTC).replace(tzinfo=None)
     rows: list[dict] = []
     prod_fetched = bt_fetched = real_trade_fetched = 0
+    candle_underlying = candle.instrument.removesuffix("USDT")
 
     if cfg.price:
         rows.append({
@@ -378,7 +379,7 @@ def process_candle(
             )})
         # Carry-forward: hold position for strategies in state that returned no bar.
         for stn in list(state_prod.keys()):
-            if stn not in fetched_prod_stns:
+            if stn not in fetched_prod_stns and state_prod.get(stn).underlying == candle_underlying:
                 row = _carry_forward_row(state_prod, stn, candle, "production", now)
                 if row is not None:
                     rows.append({"_sink": "pnl_prod", "_row": row})
@@ -393,7 +394,7 @@ def process_candle(
                 state_bt, bar.strategy_table_name, candle, bar, "backtest", now,
             )})
         for stn in list(state_bt.keys()):
-            if stn not in fetched_bt_stns:
+            if stn not in fetched_bt_stns and state_bt.get(stn).underlying == candle_underlying:
                 row = _carry_forward_row(state_bt, stn, candle, "backtest", now)
                 if row is not None:
                     rows.append({"_sink": "pnl_bt", "_row": row})
