@@ -233,21 +233,11 @@ SELECT
     cumulative_pnl,
     price,
     position
-FROM (
-    SELECT
-        strategy_table_name,
-        strategy_instance_id,
-        ts,
-        cumulative_pnl,
-        price,
-        position
-    FROM {pnl_table}
-    WHERE ts >= '{start_str}'
-      AND ts < '{ref_str}'
-    ORDER BY strategy_instance_id, ts ASC, updated_at DESC
-    LIMIT 1 BY strategy_instance_id, ts
-)
-ORDER BY strategy_table_name, ts ASC
+FROM {pnl_table}
+WHERE ts >= '{start_str}'
+  AND ts < '{ref_str}'
+ORDER BY strategy_instance_id, ts ASC, updated_at DESC
+LIMIT 1 BY strategy_instance_id, ts
 """
     pnl_rows = query_dicts(pnl_sql)
     if not pnl_rows:
