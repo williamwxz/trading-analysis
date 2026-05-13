@@ -11,33 +11,26 @@ All computation logic delegates to libs.computation. This file handles only:
 """
 
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 
 import boto3
-
 from dagster import (
     AssetExecutionContext,
     MaterializeResult,
     asset,
 )
 
-from ..utils.clickhouse_client import (
-    execute,
-    get_client,
-    insert_rows,
-    query_rows,
-    query_scalar,
-)
 from libs.computation import (
+    INSERT_COLUMNS,
     AnchorRecord,
     AnchorState,
-    INSERT_COLUMNS,
     active_prod_bar_at,
     active_rt_revision_at,
     build_carry_forward_row,
-    build_prod_lookup,
     build_pnl_row,
+    build_prod_lookup,
     build_rt_lookup,
     check_strategy_drop,
     compute_bt_pnl,
@@ -50,11 +43,20 @@ from libs.computation import (
     last_active_minute,
 )
 
+from ..utils.clickhouse_client import (
+    execute,
+    get_client,
+    insert_rows,
+    query_rows,
+    query_scalar,
+)
+
 PROD_REAL_TRADE_START_DATE = "2026-02-27"
 
 _log = logging.getLogger(__name__)
 _CHUNK_DAYS = 7
-_MAX_WORKERS = 2
+_CPU_COUNT = os.cpu_count() or 1
+_MAX_WORKERS = max(1, _CPU_COUNT - 1)
 _ECS_CLUSTER = "trading-analysis"
 _ECS_REGION = "ap-northeast-1"
 
@@ -87,7 +89,9 @@ def _get_underlyings(source_table: str) -> list[str]:
     return [str(r[0]) for r in rows]
 
 
-def _get_underlying_resume_dt(underlying: str, target_table: str, client) -> datetime | None:
+def _get_underlying_resume_dt(
+    underlying: str, target_table: str, client
+) -> datetime | None:
     result = query_scalar(
         f"SELECT max(ts) FROM analytics.{target_table} WHERE underlying = '{underlying}'",
         client=client,
@@ -107,14 +111,22 @@ def _get_underlying_resume_dt(underlying: str, target_table: str, client) -> dat
 
 def _pause_ecs_service(service_name: str, cluster: str, boto_client) -> None:
     boto_client.update_service(cluster=cluster, service=service_name, desiredCount=0)
-    boto_client.get_waiter("services_stable").wait(cluster=cluster, services=[service_name])
+    boto_client.get_waiter("services_stable").wait(
+        cluster=cluster, services=[service_name]
+    )
 
 
-def _resume_ecs_service(service_name: str, cluster: str, boto_client, desired_count: int = 1) -> None:
-    boto_client.update_service(cluster=cluster, service=service_name, desiredCount=desired_count)
+def _resume_ecs_service(
+    service_name: str, cluster: str, boto_client, desired_count: int = 1
+) -> None:
+    boto_client.update_service(
+        cluster=cluster, service=service_name, desiredCount=desired_count
+    )
 
 
-def _refresh_hour_table(min_table: str, hour_table: str, window_start_ts: str, log_fn=None) -> None:
+def _refresh_hour_table(
+    min_table: str, hour_table: str, window_start_ts: str, log_fn=None
+) -> None:
     """Re-aggregate 1hour rollup from the 1min table for the recomputed window."""
     _emit = log_fn or _log.info
     client = get_client()
@@ -124,7 +136,8 @@ def _refresh_hour_table(min_table: str, hour_table: str, window_start_ts: str, l
         client=client,
     )
     _emit(f"[1hour] deleted {hour_table} rows >= hour({window_start_ts})")
-    execute(f"""\
+    execute(
+        f"""\
 INSERT INTO analytics.{hour_table}
 SELECT
     strategy_table_name, strategy_id, strategy_name, underlying,
@@ -142,11 +155,15 @@ FROM (SELECT *, ts AS minute_ts FROM analytics.{min_table} FINAL
       WHERE ts >= toStartOfHour(toDateTime('{window_start_ts}')))
 GROUP BY strategy_table_name, strategy_id, strategy_name, underlying,
          config_timeframe, source, version, toStartOfHour(minute_ts)
-""", client=client)
+""",
+        client=client,
+    )
     _emit(f"[1hour] re-aggregated {hour_table} from {window_start_ts}")
 
 
-def _get_source_strategies(source_table: str, underlying: str, ts_start: str, ts_end: str, client) -> set[str]:
+def _get_source_strategies(
+    source_table: str, underlying: str, ts_start: str, ts_end: str, client
+) -> set[str]:
     """Return distinct strategy_table_names in source for the given window."""
     rows = query_rows(
         f"SELECT DISTINCT strategy_table_name FROM analytics.{source_table} "
@@ -206,6 +223,7 @@ def _check_output_completeness(
 # Per-underlying recent recompute (delete + recompute from anchor)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _process_underlying_recent(
     underlying: str,
     target_table: str,
@@ -237,8 +255,12 @@ def _process_underlying_recent(
     _emit(f"[{underlying}] window_start={window_start_ts}")
 
     # Snapshot source strategies before DELETE — used for post-write completeness check.
-    source_stns = _get_source_strategies(source_table, underlying, window_start_ts, end_ts, client)
-    _emit(f"[{underlying}] source has {len(source_stns)} strategies in [{window_start_ts}, {end_ts})")
+    source_stns = _get_source_strategies(
+        source_table, underlying, window_start_ts, end_ts, client
+    )
+    _emit(
+        f"[{underlying}] source has {len(source_stns)} strategies in [{window_start_ts}, {end_ts})"
+    )
 
     # Load anchors from the last committed row before window_start and seed AnchorState.
     anchors_raw: dict[str, tuple[float, float, float]] = fetch_anchors(
@@ -258,18 +280,26 @@ def _process_underlying_recent(
 
     # ── Fetch all bars/revisions and prices for the full window upfront ──────
     if mode == "prod":
-        all_bars = fetch_new_bars_prod(source_table, underlying, window_start_ts, end_ts, client)
+        all_bars = fetch_new_bars_prod(
+            source_table, underlying, window_start_ts, end_ts, client
+        )
     elif mode == "bt":
-        all_bars = fetch_new_bars_bt(source_table, underlying, window_start_ts, end_ts, client)
+        all_bars = fetch_new_bars_bt(
+            source_table, underlying, window_start_ts, end_ts, client
+        )
     else:
-        all_bars = fetch_new_bars_real_trade(source_table, underlying, window_start_ts, end_ts, client)
+        all_bars = fetch_new_bars_real_trade(
+            source_table, underlying, window_start_ts, end_ts, client
+        )
 
     if not all_bars:
         _emit(f"[{underlying}] no bars in window — skipping")
         return 0, window_start
 
     # Prices include expansion past end_ts (1d bars can expand 1440 min past their open).
-    prices_map = fetch_prices_multi([underlying], window_start_ts, end_ts, client, extend_minutes=1440)
+    prices_map = fetch_prices_multi(
+        [underlying], window_start_ts, end_ts, client, extend_minutes=1440
+    )
     prices = prices_map.pop(underlying, {})
 
     # ── Build per-strategy sorted lookup ─────────────────────────────────────
@@ -288,8 +318,10 @@ def _process_underlying_recent(
     minute_cur = max(minute_start, window_start)
     minute_end = min(minute_end, end_dt)
 
-    _emit(f"[{underlying}] iterating {int((minute_end - minute_cur).total_seconds() // 60)} minutes "
-          f"[{minute_cur}, {minute_end})")
+    _emit(
+        f"[{underlying}] iterating {int((minute_end - minute_cur).total_seconds() // 60)} minutes "
+        f"[{minute_cur}, {minute_end})"
+    )
 
     # ── Per-minute loop ───────────────────────────────────────────────────────
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -334,7 +366,9 @@ def _process_underlying_recent(
                 benchmark=bar["bar_benchmark"],
             )
             cpnl = state.compute_pnl(stn, price, bar["position"], meta=meta)
-            minute_rows.append(build_pnl_row(stn, bar, price, cpnl, label, ts_str, now_str))
+            minute_rows.append(
+                build_pnl_row(stn, bar, price, cpnl, label, ts_str, now_str)
+            )
 
         # Carry-forward: strategies previously seen (in state with bar metadata) but
         # with no active bar this minute hold their last known position until the next
@@ -346,16 +380,22 @@ def _process_underlying_recent(
             if not rec.strategy_instance_id:
                 continue  # never saw a bar with metadata — skip
             cpnl = state.compute_pnl(stn, price, rec.position)
-            minute_rows.append(build_carry_forward_row(stn, rec, price, cpnl, label, ts_str, now_str))
+            minute_rows.append(
+                build_carry_forward_row(stn, rec, price, cpnl, label, ts_str, now_str)
+            )
 
         # Fail if a strategy that had an active bar at M-1 has no bar at M
         # AND still has future lookup entries (indicates a data hole, not late arrival).
         if prev_active is not None:
-            check_strategy_drop(prev_active, curr_active, minute_cur, underlying, lookup, is_rt)
+            check_strategy_drop(
+                prev_active, curr_active, minute_cur, underlying, lookup, is_rt
+            )
 
         if minute_rows:
             _prepare_rows_for_clickhouse(minute_rows)
-            n = insert_rows(f"analytics.{target_table}", INSERT_COLUMNS, minute_rows, client)
+            n = insert_rows(
+                f"analytics.{target_table}", INSERT_COLUMNS, minute_rows, client
+            )
             total_rows += n
 
         if curr_active:
@@ -363,7 +403,9 @@ def _process_underlying_recent(
         minute_cur += timedelta(minutes=1)
 
     # Final completeness guard: every source strategy must appear in the output.
-    _check_output_completeness(target_table, underlying, window_start_ts, end_ts, source_stns, client, _emit)
+    _check_output_completeness(
+        target_table, underlying, window_start_ts, end_ts, source_stns, client, _emit
+    )
 
     _emit(f"[{underlying}] complete: {total_rows:,} rows")
     return total_rows, window_start
@@ -373,7 +415,7 @@ def _process_underlying_recent(
 # BT-specific recompute (parallel per-strategy, no minute-loop)
 # ─────────────────────────────────────────────────────────────────────────────
 
-_BT_STRATEGY_WORKERS = 8
+_BT_STRATEGY_WORKERS = _CPU_COUNT * 2
 
 
 def _compute_bt_strategy(
@@ -411,8 +453,12 @@ def _process_underlying_bt(
     end_ts = end_dt.strftime("%Y-%m-%d %H:%M:%S")
     _emit(f"[{underlying}] bt window_start={window_start_ts}")
 
-    source_stns = _get_source_strategies(source_table, underlying, window_start_ts, end_ts, client)
-    _emit(f"[{underlying}] bt source has {len(source_stns)} strategies in [{window_start_ts}, {end_ts})")
+    source_stns = _get_source_strategies(
+        source_table, underlying, window_start_ts, end_ts, client
+    )
+    _emit(
+        f"[{underlying}] bt source has {len(source_stns)} strategies in [{window_start_ts}, {end_ts})"
+    )
 
     execute(
         f"ALTER TABLE analytics.{target_table} DELETE "
@@ -421,12 +467,16 @@ def _process_underlying_bt(
     )
     _emit(f"[{underlying}] bt deleted rows >= {window_start_ts}")
 
-    all_bars = fetch_new_bars_bt(source_table, underlying, window_start_ts, end_ts, client)
+    all_bars = fetch_new_bars_bt(
+        source_table, underlying, window_start_ts, end_ts, client
+    )
     if not all_bars:
         _emit(f"[{underlying}] bt no bars in window — skipping")
         return 0, window_start
 
-    prices_map = fetch_prices_multi([underlying], window_start_ts, end_ts, client, extend_minutes=1440)
+    prices_map = fetch_prices_multi(
+        [underlying], window_start_ts, end_ts, client, extend_minutes=1440
+    )
     prices = prices_map.pop(underlying, {})
 
     # Split bars by strategy for parallel computation.
@@ -446,9 +496,13 @@ def _process_underlying_bt(
 
     total_rows = 0
     if all_rows:
-        total_rows = insert_rows(f"analytics.{target_table}", INSERT_COLUMNS, all_rows, client)
+        total_rows = insert_rows(
+            f"analytics.{target_table}", INSERT_COLUMNS, all_rows, client
+        )
 
-    _check_output_completeness(target_table, underlying, window_start_ts, end_ts, source_stns, client, _emit)
+    _check_output_completeness(
+        target_table, underlying, window_start_ts, end_ts, source_stns, client, _emit
+    )
     _emit(f"[{underlying}] bt complete: {total_rows:,} rows")
     return total_rows, window_start
 
@@ -460,7 +514,9 @@ def _recompute_bt_recent(
     max_workers: int = _MAX_WORKERS,
 ) -> MaterializeResult:
     end_dt = datetime.now(tz=UTC)
-    default_window_start = datetime.strptime(PROD_REAL_TRADE_START_DATE, "%Y-%m-%d").replace(tzinfo=UTC)
+    default_window_start = datetime.strptime(
+        PROD_REAL_TRADE_START_DATE, "%Y-%m-%d"
+    ).replace(tzinfo=UTC)
     underlyings = _get_underlyings(source_table)
     context.log.info(f"BT recompute: {len(underlyings)} underlyings")
 
@@ -468,8 +524,15 @@ def _recompute_bt_recent(
     earliest_window_start: datetime | None = None
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
-            pool.submit(_process_underlying_bt, u, target_table, source_table,
-                        default_window_start, end_dt, context.log.info): u
+            pool.submit(
+                _process_underlying_bt,
+                u,
+                target_table,
+                source_table,
+                default_window_start,
+                end_dt,
+                context.log.info,
+            ): u
             for u in underlyings
         }
         for future in as_completed(futures):
@@ -485,15 +548,18 @@ def _recompute_bt_recent(
         _refresh_hour_table(target_table, hour_table, ws_str, context.log.info)
 
     context.log.info(f"BT recompute complete: {total_rows:,} rows")
-    return MaterializeResult(metadata={
-        "rows_inserted": total_rows,
-        "end_ts": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
-    })
+    return MaterializeResult(
+        metadata={
+            "rows_inserted": total_rows,
+            "end_ts": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Asset drivers
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _recompute_pnl_recent(
     context: AssetExecutionContext,
@@ -506,9 +572,13 @@ def _recompute_pnl_recent(
     max_workers: int = _MAX_WORKERS,
 ) -> MaterializeResult:
     end_dt = datetime.now(tz=UTC)
-    default_window_start = datetime.strptime(PROD_REAL_TRADE_START_DATE, "%Y-%m-%d").replace(tzinfo=UTC)
+    default_window_start = datetime.strptime(
+        PROD_REAL_TRADE_START_DATE, "%Y-%m-%d"
+    ).replace(tzinfo=UTC)
     underlyings = _get_underlyings(source_table)
-    context.log.info(f"Recent recompute {label}: {len(underlyings)} underlyings, ecs={ecs_service}")
+    context.log.info(
+        f"Recent recompute {label}: {len(underlyings)} underlyings, ecs={ecs_service}"
+    )
 
     ecs = boto3.client("ecs", region_name=_ECS_REGION)
     total_rows = 0
@@ -518,8 +588,17 @@ def _recompute_pnl_recent(
         context.log.info(f"Paused ECS service {ecs_service}")
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {
-                pool.submit(_process_underlying_recent, u, target_table, source_table, label, mode,
-                            default_window_start, end_dt, context.log.info): u
+                pool.submit(
+                    _process_underlying_recent,
+                    u,
+                    target_table,
+                    source_table,
+                    label,
+                    mode,
+                    default_window_start,
+                    end_dt,
+                    context.log.info,
+                ): u
                 for u in underlyings
             }
             for future in as_completed(futures):
@@ -535,21 +614,28 @@ def _recompute_pnl_recent(
             _refresh_hour_table(target_table, hour_table, ws_str, context.log.info)
     finally:
         try:
-            _resume_ecs_service(ecs_service, _ECS_CLUSTER, ecs, desired_count=ecs_resume_count)
-            context.log.info(f"Resumed ECS service {ecs_service} (desiredCount={ecs_resume_count})")
+            _resume_ecs_service(
+                ecs_service, _ECS_CLUSTER, ecs, desired_count=ecs_resume_count
+            )
+            context.log.info(
+                f"Resumed ECS service {ecs_service} (desiredCount={ecs_resume_count})"
+            )
         except Exception as e:
             context.log.error(f"Failed to resume ECS service {ecs_service}: {e}")
 
     context.log.info(f"Recent recompute {label} complete: {total_rows:,} rows")
-    return MaterializeResult(metadata={
-        "rows_inserted": total_rows,
-        "end_ts": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
-    })
+    return MaterializeResult(
+        metadata={
+            "rows_inserted": total_rows,
+            "end_ts": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Dagster assets
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @asset(
     name="pnl_prod_v2_full",
@@ -576,7 +662,10 @@ def pnl_prod_v2_full_asset(context: AssetExecutionContext) -> MaterializeResult:
     group_name="strategy_pnl",
     deps=["binance_futures_backfill"],
     compute_kind="clickhouse",
-    op_tags={"dagster/timeout": 86400, "dagster/concurrency_limit": "pnl_real_trade_v2_full"},
+    op_tags={
+        "dagster/timeout": 86400,
+        "dagster/concurrency_limit": "pnl_real_trade_v2_full",
+    },
 )
 def pnl_real_trade_v2_full_asset(context: AssetExecutionContext) -> MaterializeResult:
     """Delete last chunk and recompute real_trade PnL from anchors, pausing the real-trade consumer."""
