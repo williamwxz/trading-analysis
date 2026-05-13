@@ -158,6 +158,34 @@ def peek_reference_ts(
         consumer.close()
 
 
+def _fetch_walk_anchors(
+    pnl_table: str,
+    walk_ts: datetime,
+) -> "tuple[dict[str, float], dict[str, float]]":
+    """Return (pnl, price) dicts keyed by strategy_table_name for the last row before walk_ts.
+
+    Used as the prev_pnl/prev_price baseline for the walk verification loop.
+    Queried at walk_ts (not seed_ts) so the anchor matches the stored rows written by Dagster,
+    not the potentially stale consumer output from 48h ago.
+    """
+    from libs.clickhouse_client import query_dicts
+    ts_str = walk_ts.strftime("%Y-%m-%d %H:%M:%S")
+    sql = f"""\
+SELECT strategy_table_name, cumulative_pnl, price
+FROM {pnl_table} FINAL
+WHERE ts < '{ts_str}'
+ORDER BY strategy_table_name, ts DESC
+LIMIT 1 BY strategy_table_name
+"""
+    pnl_map: dict[str, float] = {}
+    price_map: dict[str, float] = {}
+    for row in query_dicts(sql):
+        stn = row["strategy_table_name"]
+        pnl_map[stn] = float(row["cumulative_pnl"] or 0.0)
+        price_map[stn] = float(row["price"])
+    return pnl_map, price_map
+
+
 def _bootstrap_state(
     mode: str,
     reference_ts: "datetime | None",
@@ -166,13 +194,17 @@ def _bootstrap_state(
     cfg = _MODE_CONFIG[mode]
     now = datetime.now(UTC).replace(tzinfo=None)
     ref_ts = reference_ts if reference_ts is not None else now
-    # seed_ts: far enough back (48h) that all strategies have a pnl row before
+    # seed_ts: far enough back (48h) that all strategies have a position row before
     # this cutoff, including 4h/1d timeframe strategies inactive for 24h+.
-    # walk covers [ref_ts-2h, ref_ts) only — 576 × 120min = ~69K rows — to
-    # advance the anchor's price/position/pnl to present without OOM.
+    # walk_ts: start of the walk window (2h). Walk covers [walk_ts, ref_ts).
+    # walk_anchor_ts: the pnl/price baseline for the walk — last pnl row just before
+    # walk_ts. This must come from walk_ts, NOT seed_ts, because Dagster may have
+    # refreshed rows in the 46h gap between seed_ts and walk_ts, producing a different
+    # PnL chain than the old consumer output at seed_ts.
     seed_ts = ref_ts - timedelta(hours=_SEED_HOURS)
     walk_ts = ref_ts - timedelta(hours=_WALK_HOURS)
 
+    # Position seeds: read from seed_ts so 4h/1d strategies with no recent bar are found.
     seeds: list[BootstrapSeed] = fetch_bootstrap_seeds(
         pnl_table=cfg["pnl_table"],
         history_table=cfg["history_table"],
@@ -180,13 +212,20 @@ def _bootstrap_state(
         real_trade=cfg["real_trade"],
     )
 
+    # Walk pnl/price anchors: last pnl row per strategy just before walk_ts.
+    # This ensures prev_pnl and prev_price agree with the stored rows in [walk_ts, ref_ts),
+    # preventing mismatch when Dagster refreshed rows in the 46h gap between seed_ts and walk_ts.
+    walk_anchor_pnl, walk_anchor_price = _fetch_walk_anchors(cfg["pnl_table"], walk_ts)
+
     state = AnchorState()
     for seed in seeds:
+        # Use walk anchor pnl/price if available; fall back to seed pnl/price for strategies
+        # with no pnl row before walk_ts (e.g. brand-new or long-inactive strategies).
         state.set(
             seed.strategy_table_name,
             AnchorRecord(
-                pnl=seed.pnl,
-                price=seed.price,
+                pnl=walk_anchor_pnl.get(seed.strategy_table_name, seed.pnl),
+                price=walk_anchor_price.get(seed.strategy_table_name, seed.price),
                 position=seed.position,
                 bar_ts=seed.bar_ts,
                 revision_ts=seed.revision_ts,
@@ -202,12 +241,18 @@ def _bootstrap_state(
     )
 
     logger.info(
-        "Bootstrap [%s]: seed_ts=%s walk_ts=%s ref_ts=%s seeds=%d walk_rows=%d",
-        mode, seed_ts, walk_ts, ref_ts, len(seeds), len(walk_rows),
+        "Bootstrap [%s]: seed_ts=%s walk_ts=%s ref_ts=%s seeds=%d walk_anchors=%d walk_rows=%d",
+        mode, seed_ts, walk_ts, ref_ts, len(seeds), len(walk_anchor_pnl), len(walk_rows),
     )
 
-    prev_pnl: dict[str, float] = {s.strategy_table_name: s.pnl for s in seeds}
-    prev_price: dict[str, float] = {s.strategy_table_name: s.price for s in seeds}
+    prev_pnl: dict[str, float] = {
+        s.strategy_table_name: walk_anchor_pnl.get(s.strategy_table_name, s.pnl)
+        for s in seeds
+    }
+    prev_price: dict[str, float] = {
+        s.strategy_table_name: walk_anchor_price.get(s.strategy_table_name, s.price)
+        for s in seeds
+    }
 
     for wr in walk_rows:
         stn = wr.strategy_table_name
