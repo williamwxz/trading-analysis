@@ -355,11 +355,12 @@ def process_candle(
     fetched counts are the number of strategy instances returned by each
     candle lookup query — used by the caller to validate flush completeness.
 
-    For prod/bt: strategies in state that return no active bar (next bar not yet
-    arrived) receive a carry-forward row using their last known position. This
-    prevents gaps when source bars arrive late (e.g. sid=11 arriving 2+ hours late).
-    Real_trade does not use carry-forward — its revision guard already handles late
-    arrivals by holding the last accepted revision until a new one appears.
+    For prod/bt: strategies in state that return no active bar receive a
+    carry-forward row using their last known position. For real_trade:
+    strategies whose revision guard returns False (revision already applied)
+    also get a carry-forward row, ensuring continuous per-minute coverage.
+    Strategies in state that weren't returned by the candle query also get
+    carry-forward rows (for their matching underlying).
     """
     now = datetime.now(UTC).replace(tzinfo=None)
     rows: list[dict] = []
@@ -414,16 +415,29 @@ def process_candle(
 
     if cfg.real_trade:
         rt_revs = fetch_real_trade_for_candle(candle.instrument, candle.ts)
+        fetched_rt_stns: set[str] = set()
         for rev in rt_revs:
+            fetched_rt_stns.add(rev.strategy_table_name)
             if not state_real_trade.should_apply_revision(
                 rev.strategy_table_name, rev.bar_ts, rev.revision_ts
             ):
+                # Revision already applied — carry forward with same position/anchor.
+                row = _carry_forward_row(state_real_trade, rev.strategy_table_name, candle, "real_trade", now)
+                if row is not None:
+                    rows.append({"_sink": "pnl_real_trade", "_row": row})
                 continue
             real_trade_fetched += 1
             rows.append({"_sink": "pnl_real_trade", "_row": _compute_pnl_row(
                 state_real_trade, rev.strategy_table_name, candle, rev,
                 "real_trade", now, rev.bar_ts, rev.revision_ts,
             )})
+        # Carry-forward for real_trade strategies not returned by the candle query
+        # (e.g. strategies whose lookback window expired or had no recent bar).
+        for stn in list(state_real_trade.keys()):
+            if stn not in fetched_rt_stns and state_real_trade.get(stn).underlying == candle_underlying:
+                row = _carry_forward_row(state_real_trade, stn, candle, "real_trade", now)
+                if row is not None:
+                    rows.append({"_sink": "pnl_real_trade", "_row": row})
 
     return rows, prod_fetched, bt_fetched, real_trade_fetched
 
