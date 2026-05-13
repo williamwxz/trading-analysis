@@ -172,9 +172,9 @@ def _fetch_walk_anchors(
     ts_str = walk_ts.strftime("%Y-%m-%d %H:%M:%S")
     sql = f"""\
 SELECT strategy_table_name, cumulative_pnl, price
-FROM {pnl_table} FINAL
+FROM {pnl_table}
 WHERE ts < '{ts_str}'
-ORDER BY strategy_table_name, ts DESC
+ORDER BY strategy_table_name, ts DESC, updated_at DESC
 LIMIT 1 BY strategy_table_name
 """
     pnl_map: dict[str, float] = {}
