@@ -378,6 +378,8 @@ def process_candle(
                 state_prod, bar.strategy_table_name, candle, bar, "production", now,
             )})
         # Carry-forward: hold position for strategies in state that returned no bar.
+        # Only fire for strategies whose underlying matches this candle's instrument —
+        # otherwise a SOL candle would carry-forward FET/ETH strategies at SOL's price.
         for stn in list(state_prod.keys()):
             if stn not in fetched_prod_stns and state_prod.get(stn).underlying == candle_underlying:
                 row = _carry_forward_row(state_prod, stn, candle, "production", now)

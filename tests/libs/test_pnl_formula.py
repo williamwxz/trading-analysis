@@ -723,29 +723,32 @@ class TestBtPnlFormula:
         for row in rows:
             assert row[_CPNL] == pytest.approx(0.05)
 
-    def test_anchor_overrides_bar_cumulative_pnl(self):
-        """When anchor provided, anchor_pnl takes priority over bar's cumulative_pnl."""
-        bar = _bt_bar(cumulative_pnl=99.0, position=0.0)
+    def test_anchor_ignored_bar_cumulative_pnl_always_wins(self):
+        """anchors parameter is accepted but ignored — bar's cumulative_pnl is always authoritative."""
+        bar = _bt_bar(cumulative_pnl=0.05, position=0.0)
         prices = _prices("2024-01-01 00:05:00", 5, base=100.0)
         anchors = {"S1": (0.10, 100.0, 0.0)}
         rows = compute_bt_pnl([bar], prices, anchors=anchors)
         for row in rows:
-            assert row[_CPNL] == pytest.approx(0.10)
+            assert row[_CPNL] == pytest.approx(0.05)
 
-    def test_two_bars_chain_pnl_not_reset(self):
-        """Second bar chains from first bar's last pnl, ignores its own cumulative_pnl."""
+    def test_two_bars_each_reset_to_own_cumulative_pnl(self):
+        """Each bar resets running_pnl to its own cumulative_pnl — no cross-bar chaining."""
         bars = [
             _bt_bar(ts="2024-01-01 00:00:00", execution_ts="2024-01-01 00:05:00",
                     position=1.0, cumulative_pnl=0.0),
             _bt_bar(ts="2024-01-01 00:05:00", execution_ts="2024-01-01 00:10:00",
-                    position=1.0, cumulative_pnl=999.0),  # bogus — must be ignored
+                    position=1.0, cumulative_pnl=0.05),
         ]
-        prices = _prices("2024-01-01 00:05:00", 10, base=100.0)  # flat
+        prices = _prices("2024-01-01 00:05:00", 10, base=100.0)  # flat prices
         rows = compute_bt_pnl(bars, prices)
         assert len(rows) == 10
-        # All rows should have cpnl ≈ 0 (flat prices, chained from first bar's 0.0)
-        for row in rows:
+        # First 5 rows: base from bar1's cumulative_pnl=0.0, flat prices → pnl stays 0.0
+        for row in rows[:5]:
             assert row[_CPNL] == pytest.approx(0.0, abs=1e-10)
+        # Second 5 rows: base resets to bar2's cumulative_pnl=0.05, flat prices → pnl stays 0.05
+        for row in rows[5:]:
+            assert row[_CPNL] == pytest.approx(0.05, abs=1e-10)
 
     def test_bt_pnl_arithmetic_minute_by_minute(self):
         """Verify exact pnl values for 3 rising price minutes."""
@@ -983,34 +986,26 @@ class TestRealTradeStaleRevision:
 
 
 @pytest.mark.unit
-class TestBtEqualsProdFormula:
-    """BT with an anchor uses the same formula as prod — results must be identical."""
+class TestBtRawJsonPnlSeeding:
+    """BT always seeds from bar's raw_json cumulative_pnl — no cross-bar anchor chaining."""
 
-    def test_bt_matches_prod_flat_prices(self):
-        """Flat prices: bt and prod both hold pnl = anchor_pnl."""
-        anchor_pnl, anchor_price = 0.05, 100.0
-        prod_bar = _prod_bar(ts="2024-01-01 00:00:00", position=1.0, tf="5m")
+    def test_bt_uses_raw_json_pnl_as_base_flat_prices(self):
+        """Flat prices: each bar's pnl stays at its own cumulative_pnl throughout."""
         bt_bar_obj = _bt_bar(
             ts="2024-01-01 00:00:00", execution_ts="2024-01-01 00:05:00",
-            position=1.0, cumulative_pnl=0.0,
+            position=1.0, cumulative_pnl=0.05,
         )
-        prices = _prices("2024-01-01 00:05:00", 5, base=anchor_price)
-        anchors = {"S1": (anchor_pnl, anchor_price, 1.0)}
+        prices = _prices("2024-01-01 00:05:00", 5, base=100.0)
+        rows = compute_bt_pnl([bt_bar_obj], prices)
+        assert len(rows) == 5
+        for row in rows:
+            assert row[_CPNL] == pytest.approx(0.05)
 
-        prod_rows = compute_prod_pnl([prod_bar], anchors, prices)
-        bt_rows = compute_bt_pnl([bt_bar_obj], prices, anchors=anchors)
-
-        assert len(prod_rows) == len(bt_rows)
-        for p, b in zip(prod_rows, bt_rows):
-            assert p[_CPNL] == pytest.approx(b[_CPNL])
-
-    def test_bt_matches_prod_rising_prices(self):
-        """Rising prices: per-minute pnl chain is identical between bt and prod."""
-        anchor_pnl, anchor_price = 0.0, 100.0
-        prod_bar = _prod_bar(ts="2024-01-01 00:00:00", position=1.0, tf="5m")
+    def test_bt_uses_raw_json_pnl_as_base_rising_prices(self):
+        """Rising prices: pnl rolls from bar's cumulative_pnl, not from any prior anchor."""
         bt_bar_obj = _bt_bar(
             ts="2024-01-01 00:00:00", execution_ts="2024-01-01 00:05:00",
-            position=1.0, cumulative_pnl=0.0,
+            position=1.0, cumulative_pnl=0.05,
         )
         prices = {
             "2024-01-01 00:05:00": 100.0,
@@ -1019,44 +1014,31 @@ class TestBtEqualsProdFormula:
             "2024-01-01 00:08:00": 108.0,
             "2024-01-01 00:09:00": 110.0,
         }
-        anchors = {"S1": (anchor_pnl, anchor_price, 1.0)}
+        rows = compute_bt_pnl([bt_bar_obj], prices)
+        assert len(rows) == 5
+        # Minute 0: first price seen — cpnl = 0.05 (bar base), no change
+        assert rows[0][_CPNL] == pytest.approx(0.05)
+        # Minute 1: 0.05 + 1*(102-100)/100 = 0.07
+        assert rows[1][_CPNL] == pytest.approx(0.05 + 1.0 * (102.0 - 100.0) / 100.0, rel=1e-9)
+        assert rows[1][_PRC] == pytest.approx(102.0)
 
-        prod_rows = compute_prod_pnl([prod_bar], anchors, prices)
-        bt_rows = compute_bt_pnl([bt_bar_obj], prices, anchors=anchors)
-
-        assert len(prod_rows) == len(bt_rows)
-        for p, b in zip(prod_rows, bt_rows):
-            assert p[_CPNL] == pytest.approx(b[_CPNL], rel=1e-9)
-            assert p[_PRC] == pytest.approx(b[_PRC])
-
-    def test_bt_matches_prod_with_missing_prices(self):
-        """Carry-forward behavior is identical between bt and prod."""
-        anchors = {"S1": (0.0, 100.0, 1.0)}
-        prices = {
-            "2024-01-01 00:05:00": 100.0,
-            # 00:06 missing
-            "2024-01-01 00:07:00": 102.0,
-        }
-        prod_bar = _prod_bar(ts="2024-01-01 00:00:00", position=1.0, tf="5m")
+    def test_bt_missing_price_carry_forward_uses_prev_minute_price(self):
+        """Missing minute emits with previous minute's price as carry-forward."""
         bt_bar_obj = _bt_bar(
             ts="2024-01-01 00:00:00", execution_ts="2024-01-01 00:05:00",
             position=1.0, cumulative_pnl=0.0,
         )
-        prod_rows = compute_prod_pnl([prod_bar], anchors, prices)
-        bt_rows = compute_bt_pnl([bt_bar_obj], prices, anchors=anchors)
-
-        # Both must emit 00:06 as carry-forward
-        prod_ts = [r[_TS] for r in prod_rows]
-        bt_ts = [r[_TS] for r in bt_rows]
-        assert "2024-01-01 00:06:00" in prod_ts
-        assert "2024-01-01 00:06:00" in bt_ts
-
-        # Pnl values must match at every emitted minute
-        prod_by_ts = {r[_TS]: r[_CPNL] for r in prod_rows}
-        bt_by_ts = {r[_TS]: r[_CPNL] for r in bt_rows}
-        for ts in prod_by_ts:
-            if ts in bt_by_ts:
-                assert prod_by_ts[ts] == pytest.approx(bt_by_ts[ts], rel=1e-9)
+        prices = {
+            "2024-01-01 00:05:00": 100.0,
+            # 00:06 missing — carry-forward from 100.0
+            "2024-01-01 00:07:00": 102.0,
+        }
+        rows = compute_bt_pnl([bt_bar_obj], prices)
+        ts_values = [r[_TS] for r in rows]
+        assert "2024-01-01 00:06:00" in ts_values
+        row_06 = next(r for r in rows if r[_TS] == "2024-01-01 00:06:00")
+        assert row_06[_PRC] == pytest.approx(100.0)
+        assert row_06[_CPNL] == pytest.approx(0.0)  # flat carry, pnl unchanged
 
 
 # ═════════════════════════════════════════════════════════════════════════════

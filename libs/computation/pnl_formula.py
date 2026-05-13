@@ -231,12 +231,11 @@ def compute_bt_pnl(
 ) -> List[list]:
     """Expand bt bars to 1-min rows starting from execution_ts (= ts + tf_minutes).
 
-    Anchor priority per strategy:
-      1. anchors dict (previous day's tail from target table) — used when present.
-      2. bar["cumulative_pnl"] from source JSON — genuine cold-start only (no prior anchor).
+    At the start of each bar, cumulative_pnl resets to bar["cumulative_pnl"] from
+    raw_json and prev_price resets to the price at execution_ts. Each minute then rolls:
+        cpnl = prev_cpnl + position * (current_price - prev_price) / prev_price
+    No cross-bar anchor chaining — the raw_json cumulative_pnl is always authoritative.
     """
-    if anchors is None:
-        anchors = {}
     by_strategy: Dict[str, List[dict]] = defaultdict(list)
     for bar in bars:
         by_strategy[bar["strategy_table_name"]].append(bar)
@@ -247,13 +246,6 @@ def compute_bt_pnl(
     for stn, strategy_bars in by_strategy.items():
         strategy_bars.sort(key=lambda b: b["execution_ts"])
 
-        if stn in anchors:
-            running_pnl: Optional[float] = anchors[stn][0]
-            running_price: Optional[float] = anchors[stn][1]
-        else:
-            running_pnl = None
-            running_price = None
-
         for i, bar in enumerate(strategy_bars):
             exec_ts = _parse_ts(bar["execution_ts"])
             if i + 1 < len(strategy_bars):
@@ -262,27 +254,31 @@ def compute_bt_pnl(
                 tf_minutes = TIMEFRAME_MAP.get(bar["config_timeframe"], 5)
                 next_exec_ts = exec_ts + timedelta(minutes=tf_minutes)
 
-            anchor_pnl = bar["cumulative_pnl"] if running_pnl is None else running_pnl
-            anchor_price = prices.get(bar["execution_ts"]) if running_price is None else running_price
+            # Reset to this bar's raw_json cumulative_pnl; price anchors at execution_ts.
+            running_pnl: float = bar["cumulative_pnl"]
+            running_price: Optional[float] = prices.get(bar["execution_ts"])
 
             ts_cur = exec_ts
             while ts_cur < next_exec_ts:
                 ts_str = ts_cur.strftime("%Y-%m-%d %H:%M:%S")
                 live_price = (
-                    prices.get(ts_str, anchor_price)
-                    if anchor_price is not None
+                    prices.get(ts_str, running_price)
+                    if running_price is not None
                     else prices.get(ts_str)
                 )
                 if live_price is None:
                     ts_cur += timedelta(minutes=1)
                     continue
-                if anchor_price is None:
-                    anchor_price = live_price
-                cpnl = (
-                    anchor_pnl + bar["position"] * (live_price - anchor_price) / anchor_price
-                    if anchor_price != 0.0
-                    else anchor_pnl
-                )
+                if running_price is None:
+                    # First price seen — anchor here, emit with no pnl change.
+                    running_price = live_price
+                    cpnl = running_pnl
+                else:
+                    cpnl = (
+                        running_pnl + bar["position"] * (live_price - running_price) / running_price
+                        if running_price != 0.0
+                        else running_pnl
+                    )
                 output.append([
                     stn,
                     bar["strategy_id"],
@@ -301,12 +297,9 @@ def compute_bt_pnl(
                     now_str,
                     bar.get("strategy_instance_id", ""),
                 ])
-                anchor_pnl = cpnl
-                anchor_price = live_price
+                running_pnl = cpnl
+                running_price = live_price
                 ts_cur += timedelta(minutes=1)
-
-            running_pnl = anchor_pnl
-            running_price = anchor_price
 
     return output
 

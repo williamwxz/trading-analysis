@@ -40,6 +40,7 @@ from libs.computation import (
     build_pnl_row,
     build_rt_lookup,
     check_strategy_drop,
+    compute_bt_pnl,
     fetch_anchors,
     fetch_new_bars_bt,
     fetch_new_bars_prod,
@@ -369,6 +370,128 @@ def _process_underlying_recent(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# BT-specific recompute (parallel per-strategy, no minute-loop)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_BT_STRATEGY_WORKERS = 8
+
+
+def _compute_bt_strategy(
+    stn: str,
+    bars: list[dict],
+    prices: dict[str, float],
+) -> list[list]:
+    """Compute and prepare rows for a single BT strategy. Safe to run in parallel."""
+    rows = compute_bt_pnl(bars, prices)
+    _prepare_rows_for_clickhouse(rows)
+    return rows
+
+
+def _process_underlying_bt(
+    underlying: str,
+    target_table: str,
+    source_table: str,
+    default_window_start: datetime,
+    end_dt: datetime,
+    log_fn=None,
+) -> tuple[int, datetime]:
+    """BT recompute for one underlying: parallel per-strategy, single bulk insert.
+
+    Since BT bars are independent (no cross-bar anchor chaining), each strategy
+    can be computed concurrently. All rows are bulk-inserted in one call per underlying.
+    """
+    _emit = log_fn or _log.info
+    client = get_client()
+
+    resume_dt = _get_underlying_resume_dt(underlying, target_table, client)
+    window_start = resume_dt if resume_dt is not None else default_window_start
+    window_start = window_start.replace(tzinfo=None)
+    end_dt = end_dt.replace(tzinfo=None)
+    window_start_ts = window_start.strftime("%Y-%m-%d %H:%M:%S")
+    end_ts = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+    _emit(f"[{underlying}] bt window_start={window_start_ts}")
+
+    source_stns = _get_source_strategies(source_table, underlying, window_start_ts, end_ts, client)
+    _emit(f"[{underlying}] bt source has {len(source_stns)} strategies in [{window_start_ts}, {end_ts})")
+
+    execute(
+        f"ALTER TABLE analytics.{target_table} DELETE "
+        f"WHERE underlying = '{underlying}' AND ts >= toDateTime('{window_start_ts}')",
+        client=client,
+    )
+    _emit(f"[{underlying}] bt deleted rows >= {window_start_ts}")
+
+    all_bars = fetch_new_bars_bt(source_table, underlying, window_start_ts, end_ts, client)
+    if not all_bars:
+        _emit(f"[{underlying}] bt no bars in window — skipping")
+        return 0, window_start
+
+    prices_map = fetch_prices_multi([underlying], window_start_ts, end_ts, client, extend_minutes=1440)
+    prices = prices_map.pop(underlying, {})
+
+    # Split bars by strategy for parallel computation.
+    by_strategy: dict[str, list[dict]] = {}
+    for bar in all_bars:
+        by_strategy.setdefault(bar["strategy_table_name"], []).append(bar)
+
+    _emit(f"[{underlying}] bt computing {len(by_strategy)} strategies in parallel")
+    all_rows: list[list] = []
+    with ThreadPoolExecutor(max_workers=_BT_STRATEGY_WORKERS) as pool:
+        futures = {
+            pool.submit(_compute_bt_strategy, stn, bars, prices): stn
+            for stn, bars in by_strategy.items()
+        }
+        for future in as_completed(futures):
+            all_rows.extend(future.result())
+
+    total_rows = 0
+    if all_rows:
+        total_rows = insert_rows(f"analytics.{target_table}", INSERT_COLUMNS, all_rows, client)
+
+    _check_output_completeness(target_table, underlying, window_start_ts, end_ts, source_stns, client, _emit)
+    _emit(f"[{underlying}] bt complete: {total_rows:,} rows")
+    return total_rows, window_start
+
+
+def _recompute_bt_recent(
+    context: AssetExecutionContext,
+    target_table: str,
+    source_table: str,
+    max_workers: int = _MAX_WORKERS,
+) -> MaterializeResult:
+    end_dt = datetime.now(tz=UTC)
+    default_window_start = datetime.strptime(PROD_REAL_TRADE_START_DATE, "%Y-%m-%d").replace(tzinfo=UTC)
+    underlyings = _get_underlyings(source_table)
+    context.log.info(f"BT recompute: {len(underlyings)} underlyings")
+
+    total_rows = 0
+    earliest_window_start: datetime | None = None
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(_process_underlying_bt, u, target_table, source_table,
+                        default_window_start, end_dt, context.log.info): u
+            for u in underlyings
+        }
+        for future in as_completed(futures):
+            rows, ws = future.result()
+            total_rows += rows
+            if earliest_window_start is None or ws < earliest_window_start:
+                earliest_window_start = ws
+
+    hour_table = _HOUR_TABLE.get(target_table)
+    if hour_table and earliest_window_start is not None:
+        ws_str = earliest_window_start.strftime("%Y-%m-%d %H:%M:%S")
+        context.log.info(f"Refreshing {hour_table} from {ws_str}")
+        _refresh_hour_table(target_table, hour_table, ws_str, context.log.info)
+
+    context.log.info(f"BT recompute complete: {total_rows:,} rows")
+    return MaterializeResult(metadata={
+        "rows_inserted": total_rows,
+        "end_ts": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+    })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Asset drivers
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -477,13 +600,9 @@ def pnl_real_trade_v2_full_asset(context: AssetExecutionContext) -> MaterializeR
     op_tags={"dagster/timeout": 86400, "dagster/concurrency_limit": "pnl_bt_v2_full"},
 )
 def pnl_bt_v2_full_asset(context: AssetExecutionContext) -> MaterializeResult:
-    """Delete last chunk and recompute bt PnL from anchors."""
-    return _recompute_pnl_recent(
+    """Recompute bt PnL in parallel per strategy — no anchor chaining, no ECS pause needed."""
+    return _recompute_bt_recent(
         context,
         target_table="strategy_pnl_1min_bt_v2",
         source_table="strategy_output_history_bt_v2",
-        label="backtest",
-        mode="bt",
-        ecs_service="trading-analysis-pnl-consumer-bt",
-        ecs_resume_count=0,
     )

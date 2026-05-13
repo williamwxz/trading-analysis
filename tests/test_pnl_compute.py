@@ -423,32 +423,39 @@ class TestComputeBtPnl:
         # source label is "backtest"
         assert rows[0][5] == "backtest"
 
-    def test_two_consecutive_bars_chain_pnl(self):
-        """Second bar's PnL chains from the computed end of the first bar."""
+    def test_two_consecutive_bars_each_reset_to_own_cumulative_pnl(self):
+        """Each bar resets to its own raw_json cumulative_pnl — no cross-bar chaining."""
         bars = [
             self._make_bar("2024-01-01 00:00:00", "2024-01-01 00:05:00", 1.0, 100.0, 0.0),
-            # cumulative_pnl=99.0 is a bogus value — must be ignored in favour of chaining
-            self._make_bar("2024-01-01 00:05:00", "2024-01-01 00:10:00", -1.0, 105.0, 99.0),
+            self._make_bar("2024-01-01 00:05:00", "2024-01-01 00:10:00", -1.0, 105.0, 0.05),
         ]
-        # Flat prices so first bar ends at cpnl=0.0; second bar should continue from there
-        prices = {f"2024-01-01 00:0{i}:00": 100.0 for i in range(10)}
+        # Flat prices covering both bars' expansion windows (00:05–00:14)
+        prices = {
+            **{f"2024-01-01 00:0{i}:00": 100.0 for i in range(5, 10)},
+            **{f"2024-01-01 00:1{i}:00": 100.0 for i in range(5)},
+        }
 
         rows = compute_bt_pnl(bars, prices)
 
         assert len(rows) == 10
-        # The 6th row (first minute of bar 2) must NOT jump to 99.0; must be ~0.0
-        assert abs(rows[5][8]) < 1e-6, f"Expected ~0.0 but got {rows[5][8]} — bar 2 is not chaining correctly"
+        # First 5 rows: base = 0.0, flat prices → all ~0.0
+        for row in rows[:5]:
+            assert abs(row[8]) < 1e-6, f"Expected ~0.0 but got {row[8]}"
+        # Second 5 rows: base resets to 0.05, flat prices → all ~0.05
+        for row in rows[5:]:
+            assert abs(row[8] - 0.05) < 1e-6, f"Expected ~0.05 but got {row[8]}"
 
-    def test_cross_day_anchor_used_instead_of_source_cumulative_pnl(self):
-        """When an anchor is provided from the previous day, it takes priority over bar cumulative_pnl."""
-        bar = self._make_bar("2024-01-02 00:00:00", "2024-01-02 00:05:00", 1.0, 100.0, 99.0)
+    def test_anchors_parameter_ignored_bar_cumulative_pnl_always_wins(self):
+        """anchors parameter is accepted but ignored — bar's cumulative_pnl is authoritative."""
+        bar = self._make_bar("2024-01-02 00:00:00", "2024-01-02 00:05:00", 1.0, 100.0, 0.07)
         prices = {"2024-01-02 00:05:00": 100.0}
         anchors = {"test_bt": (0.05, 100.0, 1.0)}
 
         rows = compute_bt_pnl([bar], prices, anchors=anchors)
 
         assert len(rows) == 5
-        assert abs(rows[0][8] - 0.05) < 1e-6, f"Expected 0.05 but got {rows[0][8]}"
+        # bar's cumulative_pnl=0.07 wins over anchor=0.05
+        assert abs(rows[0][8] - 0.07) < 1e-6, f"Expected 0.07 but got {rows[0][8]}"
 
     def test_output_row_has_correct_column_count(self):
         """Output row must have exactly 16 columns matching INSERT_COLUMNS."""
