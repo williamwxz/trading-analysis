@@ -50,8 +50,8 @@ logger = logging.getLogger(__name__)
 TOPIC = "binance.price.ticks"
 _DEFAULT_GROUP_ID = "flink-pnl-consumer"
 
-_COLD_START_HOURS = 4   # seed anchor from last row before ref_ts - 4h
-_WALK_MINUTES = 30      # verify walk window: last 30 min before ref_ts
+_SEED_HOURS = 48    # seed anchor from last row before ref_ts - 48h (covers all timeframes incl 1d bars)
+_WALK_HOURS = 2     # walk [ref_ts - 2h, ref_ts) to advance anchor price/position to present
 _PNL_WARN_TOLERANCE = 1e-6
 _PNL_CRASH_TOLERANCE = 2e-3  # 0.2%
 
@@ -166,11 +166,12 @@ def _bootstrap_state(
     cfg = _MODE_CONFIG[mode]
     now = datetime.now(UTC).replace(tzinfo=None)
     ref_ts = reference_ts if reference_ts is not None else now
-    # Seed anchor from full history up to ref_ts - _COLD_START_HOURS.
-    # Walk only the last _WALK_MINUTES to verify chain integrity — small window
-    # avoids OOM on large tables (576 strategies × 1440 min/day).
-    seed_ts = ref_ts - timedelta(hours=_COLD_START_HOURS)
-    walk_ts = ref_ts - timedelta(minutes=_WALK_MINUTES)
+    # seed_ts: far enough back (48h) that all strategies have a pnl row before
+    # this cutoff, including 4h/1d timeframe strategies inactive for 24h+.
+    # walk covers [ref_ts-2h, ref_ts) only — 576 × 120min = ~69K rows — to
+    # advance the anchor's price/position/pnl to present without OOM.
+    seed_ts = ref_ts - timedelta(hours=_SEED_HOURS)
+    walk_ts = ref_ts - timedelta(hours=_WALK_HOURS)
 
     seeds: list[BootstrapSeed] = fetch_bootstrap_seeds(
         pnl_table=cfg["pnl_table"],
@@ -198,6 +199,11 @@ def _bootstrap_state(
         start_ts=walk_ts,
         reference_ts=ref_ts,
         real_trade=cfg["real_trade"],
+    )
+
+    logger.info(
+        "Bootstrap [%s]: seed_ts=%s walk_ts=%s ref_ts=%s seeds=%d walk_rows=%d",
+        mode, seed_ts, walk_ts, ref_ts, len(seeds), len(walk_rows),
     )
 
     prev_pnl: dict[str, float] = {s.strategy_table_name: s.pnl for s in seeds}
