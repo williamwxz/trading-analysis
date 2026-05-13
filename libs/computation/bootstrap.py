@@ -88,9 +88,9 @@ SELECT
     strategy_instance_id,
     cumulative_pnl,
     price
-FROM {pnl_table}
+FROM {pnl_table} FINAL
 WHERE ts < '{start_str}'
-ORDER BY strategy_instance_id, ts DESC, updated_at DESC
+ORDER BY strategy_instance_id, ts DESC
 LIMIT 1 BY strategy_instance_id
 """
     pnl_seeds: dict[str, dict] = {}
@@ -231,11 +231,10 @@ SELECT
     ts,
     cumulative_pnl,
     price
-FROM {pnl_table}
+FROM {pnl_table} FINAL
 WHERE ts >= '{start_str}'
   AND ts < '{ref_str}'
-ORDER BY strategy_table_name, ts ASC, updated_at DESC
-LIMIT 1 BY strategy_table_name, ts
+ORDER BY strategy_table_name, ts ASC
 """
     pnl_rows = query_dicts(pnl_sql)
     if not pnl_rows:
