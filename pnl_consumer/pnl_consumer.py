@@ -50,7 +50,8 @@ logger = logging.getLogger(__name__)
 TOPIC = "binance.price.ticks"
 _DEFAULT_GROUP_ID = "flink-pnl-consumer"
 
-_COLD_START_HOURS = 4
+_COLD_START_HOURS = 4   # seed anchor from last row before ref_ts - 4h
+_WALK_MINUTES = 30      # verify walk window: last 30 min before ref_ts
 _PNL_WARN_TOLERANCE = 1e-6
 _PNL_CRASH_TOLERANCE = 2e-3  # 0.2%
 
@@ -165,12 +166,16 @@ def _bootstrap_state(
     cfg = _MODE_CONFIG[mode]
     now = datetime.now(UTC).replace(tzinfo=None)
     ref_ts = reference_ts if reference_ts is not None else now
-    start_ts = ref_ts - timedelta(hours=_COLD_START_HOURS)
+    # Seed anchor from full history up to ref_ts - _COLD_START_HOURS.
+    # Walk only the last _WALK_MINUTES to verify chain integrity — small window
+    # avoids OOM on large tables (576 strategies × 1440 min/day).
+    seed_ts = ref_ts - timedelta(hours=_COLD_START_HOURS)
+    walk_ts = ref_ts - timedelta(minutes=_WALK_MINUTES)
 
     seeds: list[BootstrapSeed] = fetch_bootstrap_seeds(
         pnl_table=cfg["pnl_table"],
         history_table=cfg["history_table"],
-        start_ts=start_ts,
+        start_ts=seed_ts,
         real_trade=cfg["real_trade"],
     )
 
@@ -190,7 +195,7 @@ def _bootstrap_state(
     walk_rows: list[WalkRow] = fetch_walk_rows(
         pnl_table=cfg["pnl_table"],
         history_table=cfg["history_table"],
-        start_ts=start_ts,
+        start_ts=walk_ts,
         reference_ts=ref_ts,
         real_trade=cfg["real_trade"],
     )
