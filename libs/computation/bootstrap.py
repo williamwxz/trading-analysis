@@ -20,7 +20,7 @@ import json
 import logging
 from bisect import bisect_right
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from libs.clickhouse_client import query_dicts
 
@@ -80,19 +80,21 @@ def fetch_bootstrap_seeds(
         real_trade:    True to use revision_ts-based position resolution
     """
     start_str = start_ts.strftime("%Y-%m-%d %H:%M:%S")
+    # 7-day lookback window: avoids full-table aggregation on 45M+ row tables.
+    # All active strategies appear within 7 days; retired ones have no active anchor.
+    seed_window_start = (start_ts - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
 
     # ── PnL + price baseline ──────────────────────────────────────────────────
     # Keyed by strategy_instance_id — each instance is an independent tracking unit.
     pnl_sql = f"""\
 SELECT
-    strategy_table_name,
+    argMax(strategy_table_name, (ts, updated_at)) AS strategy_table_name,
     strategy_instance_id,
-    cumulative_pnl,
-    price
+    argMax(cumulative_pnl, (ts, updated_at)) AS cumulative_pnl,
+    argMax(price, (ts, updated_at)) AS price
 FROM {pnl_table}
-WHERE ts < '{start_str}'
-ORDER BY strategy_instance_id, ts DESC, updated_at DESC
-LIMIT 1 BY strategy_instance_id
+WHERE ts >= '{seed_window_start}' AND ts < '{start_str}'
+GROUP BY strategy_instance_id
 """
     pnl_seeds: dict[str, dict] = {}
     for row in query_dicts(pnl_sql):
