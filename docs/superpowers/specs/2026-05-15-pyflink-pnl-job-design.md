@@ -29,15 +29,14 @@ Redpanda
  │       ▼                                                              │
  │  PnlProcessFunction  (parallelism=1, non-keyed)                      │
  │    open():                                                           │
- │      bootstrap prod/bt/real_trade state from ClickHouse              │
+ │      read SinkConfig from env (price/prod/bt/real_trade flags)       │
+ │      bootstrap only enabled PnL modes from ClickHouse               │
  │    processElement(candle):                                           │
  │      underlying = candle.instrument.removesuffix("USDT")  # "BTC"   │
- │      for each mode (prod, bt, real_trade):                           │
- │        new_bars = fetch_*_for_candle(underlying, candle.ts)          │
- │        update anchors for strategies with new bars                   │
- │        carry-forward anchors for strategies with no new bar          │
- │        emit PnlOutputRow per strategy                                │
- │      emit PriceRow                                                   │
+ │      if cfg.price: emit PriceRow                                     │
+ │      if cfg.prod:  fetch, carry-forward, emit PnlRows (prod)         │
+ │      if cfg.bt:    fetch, carry-forward, emit PnlRows (bt)           │
+ │      if cfg.real_trade: fetch, revision guard, emit PnlRows          │
  │       ▼                                                              │
  │  ClickHouseSinkFunction                                              │
  │    invoke(): buffer rows in-memory                                   │
@@ -230,7 +229,24 @@ boto3>=1.34
 | Task role | `trading-analysis-flink-pnl-task` (S3 read/write for checkpoints) |
 | Log stream prefix | `flink-pnl` |
 
-Env vars: same ClickHouse secrets as `pnl_consumer`, plus `REDPANDA_BROKERS`, `AWS_REGION`.
+**Environment variables:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `CLICKHOUSE_HOST` | (required, from secret) | ClickHouse host |
+| `CLICKHOUSE_PASSWORD` | (required, from secret) | ClickHouse password |
+| `CLICKHOUSE_PORT` | `8443` | ClickHouse port |
+| `CLICKHOUSE_USER` | `dev_ro3` | ClickHouse user |
+| `CLICKHOUSE_SECURE` | `true` | TLS |
+| `REDPANDA_BROKERS` | (required) | Redpanda broker address |
+| `AWS_REGION` | `ap-northeast-1` | AWS region for CloudWatch metrics |
+| `KAFKA_GROUP_ID` | `flink-pnl-consumer-v2` | Kafka consumer group |
+| `ENABLE_PRICE_SINK` | `true` | Write to `futures_price_1min` |
+| `ENABLE_PROD_SINK` | `false` | Write prod PnL |
+| `ENABLE_BT_SINK` | `false` | Write backtest PnL |
+| `ENABLE_REAL_TRADE_SINK` | `false` | Write real-trade PnL |
+
+Sink flags default to `false` for all PnL modes — price sink only by default, matching the current `pnl_consumer` default. Enable modes explicitly per ECS task definition to avoid running all three modes in one task (keeps memory footprint and ClickHouse query load predictable).
 
 **Logs:** PyFlink embedded mode writes to stdout → CloudWatch. No `/opt/flink/log/` black hole.
 
