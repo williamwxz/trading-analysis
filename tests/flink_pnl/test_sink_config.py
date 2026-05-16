@@ -44,3 +44,19 @@ def test_case_insensitive():
 def test_false_string():
     cfg = SinkConfig.from_env({"ENABLE_PROD_SINK": "false"})
     assert cfg.prod is False
+
+
+@pytest.mark.unit
+def test_from_env_reads_os_environ(monkeypatch):
+    monkeypatch.setenv("ENABLE_PROD_SINK", "true")
+    cfg = SinkConfig.from_env()
+    assert cfg.prod is True
+    assert cfg.price is False
+
+
+@pytest.mark.unit
+def test_invalid_values_default_to_false():
+    cfg = SinkConfig.from_env({"ENABLE_PRICE_SINK": "yes", "ENABLE_PROD_SINK": "1", "ENABLE_BT_SINK": ""})
+    assert cfg.price is False
+    assert cfg.prod is False
+    assert cfg.bt is False

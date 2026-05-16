@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Mapping
 
 
 @dataclass
@@ -12,9 +13,9 @@ class SinkConfig:
     real_trade: bool
 
     @classmethod
-    def from_env(cls, env: dict[str, str] | None = None) -> SinkConfig:
+    def from_env(cls, env: Mapping[str, str] | None = None) -> SinkConfig:
         if env is None:
-            env = os.environ  # type: ignore[assignment]
+            env = os.environ
 
         def _flag(key: str) -> bool:
             return env.get(key, "false").lower() == "true"
