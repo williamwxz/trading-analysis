@@ -34,7 +34,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-where = [".", "flink_pnl/src"]
+where = ["."]
 
 [tool.black]
 line-length = 88
@@ -54,7 +54,7 @@ warn_unused_configs = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "flink_pnl/tests"]
-pythonpath = [".", "flink_pnl/src"]
+pythonpath = ["."]
 markers = [
     "unit: Unit tests (fast, no external dependencies)",
     "integration: Integration tests (require ClickHouse/S3)",
