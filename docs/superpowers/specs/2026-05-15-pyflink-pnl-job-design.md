@@ -241,12 +241,12 @@ boto3>=1.34
 | `REDPANDA_BROKERS` | (required) | Redpanda broker address |
 | `AWS_REGION` | `ap-northeast-1` | AWS region for CloudWatch metrics |
 | `KAFKA_GROUP_ID` | `flink-pnl-consumer-v2` | Kafka consumer group |
-| `ENABLE_PRICE_SINK` | `true` | Write to `futures_price_1min` |
+| `ENABLE_PRICE_SINK` | `false` | Write to `futures_price_1min` |
 | `ENABLE_PROD_SINK` | `false` | Write prod PnL |
 | `ENABLE_BT_SINK` | `false` | Write backtest PnL |
 | `ENABLE_REAL_TRADE_SINK` | `false` | Write real-trade PnL |
 
-Sink flags default to `false` for all PnL modes — price sink only by default, matching the current `pnl_consumer` default. Enable modes explicitly per ECS task definition to avoid running all three modes in one task (keeps memory footprint and ClickHouse query load predictable).
+All sink flags default to `false` — the job does nothing unless sinks are explicitly enabled in the ECS task definition. This makes misconfigured deployments safe (no silent writes) and keeps each task's memory footprint and ClickHouse query load predictable.
 
 **Logs:** PyFlink embedded mode writes to stdout → CloudWatch. No `/opt/flink/log/` black hole.
 
