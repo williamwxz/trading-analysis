@@ -29,6 +29,25 @@ class CandleEvent:
         )
 
     @classmethod
+    def from_dict(cls, data: dict) -> "CandleEvent":
+        """Deserialise from a plain dict (inverse of to_json / JSON round-trip)."""
+        ts_raw = data["ts"]
+        if isinstance(ts_raw, datetime):
+            ts = ts_raw.replace(tzinfo=None)
+        else:
+            ts = datetime.fromisoformat(ts_raw).replace(tzinfo=None)
+        return cls(
+            exchange=data["exchange"],
+            instrument=data["instrument"],
+            ts=ts,
+            open=float(data["open"]),
+            high=float(data["high"]),
+            low=float(data["low"]),
+            close=float(data["close"]),
+            volume=float(data["volume"]),
+        )
+
+    @classmethod
     def from_binance_kline(cls, stream_data: dict) -> "CandleEvent":
         """Parse a Binance raw kline message.
 
