@@ -1396,6 +1396,115 @@ resource "aws_cloudwatch_metric_alarm" "pnl_consumer_crash" {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Flink PnL — ECR, IAM task role, CloudWatch log group, ECS task + service
+# Runs alongside pnl_consumer during evaluation. desired_count=0 until validated.
+# ─────────────────────────────────────────────────────────────────────────────
+
+resource "aws_ecr_repository" "flink_pnl" {
+  name                 = "trading-analysis-flink-pnl"
+  image_tag_mutability = "MUTABLE"
+  tags                 = local.common_tags
+}
+
+resource "aws_iam_role" "flink_pnl_task" {
+  name = "${local.name_prefix}-flink-pnl-task"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ecs-tasks.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy" "flink_pnl_s3" {
+  name = "flink-pnl-s3-checkpoints"
+  role = aws_iam_role.flink_pnl_task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
+      Resource = [
+        "arn:aws:s3:::trading-analysis-data-v2",
+        "arn:aws:s3:::trading-analysis-data-v2/flink-pnl-checkpoints/*",
+      ]
+    }]
+  })
+}
+
+resource "aws_cloudwatch_log_group" "flink_pnl" {
+  name              = "/ecs/${local.name_prefix}-flink-pnl"
+  retention_in_days = 7
+  tags              = local.common_tags
+}
+
+resource "aws_ecs_task_definition" "flink_pnl" {
+  family                   = "${local.name_prefix}-flink-pnl"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = 1024
+  memory                   = 3072
+  execution_role_arn       = aws_iam_role.ecs_execution.arn
+  task_role_arn            = aws_iam_role.flink_pnl_task.arn
+
+  container_definitions = jsonencode([{
+    name      = "flink-pnl"
+    image     = "${aws_ecr_repository.flink_pnl.repository_url}:latest"
+    essential = true
+    secrets = [
+      { name = "CLICKHOUSE_HOST",     valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
+      { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
+    ]
+    environment = [
+      { name = "CLICKHOUSE_PORT",        value = "8443" },
+      { name = "CLICKHOUSE_USER",        value = "dev_ro3" },
+      { name = "CLICKHOUSE_SECURE",      value = "true" },
+      { name = "REDPANDA_BROKERS",       value = "redpanda.${local.name_prefix}.local:9092" },
+      { name = "KAFKA_GROUP_ID",         value = "flink-pnl-consumer-v2" },
+      { name = "AWS_REGION",             value = var.aws_region },
+      { name = "ENABLE_PRICE_SINK",      value = "false" },
+      { name = "ENABLE_PROD_SINK",       value = "false" },
+      { name = "ENABLE_BT_SINK",         value = "false" },
+      { name = "ENABLE_REAL_TRADE_SINK", value = "false" },
+    ]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.flink_pnl.name
+        "awslogs-region"        = var.aws_region
+        "awslogs-stream-prefix" = "flink-pnl"
+      }
+    }
+  }])
+
+  tags = local.common_tags
+}
+
+resource "aws_ecs_service" "flink_pnl" {
+  name            = "${local.name_prefix}-flink-pnl"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.flink_pnl.arn
+  desired_count   = 0
+
+  capacity_provider_strategy {
+    capacity_provider = "FARGATE_SPOT"
+    weight            = 1
+  }
+
+  network_configuration {
+    subnets          = [aws_subnet.private.id]
+    security_groups  = [aws_security_group.ecs_tasks.id]
+    assign_public_ip = false
+  }
+
+  tags = local.common_tags
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Outputs
 # ─────────────────────────────────────────────────────────────────────────────
 
