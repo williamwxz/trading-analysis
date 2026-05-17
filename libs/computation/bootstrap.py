@@ -86,15 +86,18 @@ def fetch_bootstrap_seeds(
 
     # ── PnL + price baseline ──────────────────────────────────────────────────
     # Keyed by strategy_instance_id — each instance is an independent tracking unit.
+    # LIMIT 1 BY uses the sort index (strategy_instance_id, ts, updated_at DESC) to
+    # pick the latest row per strategy without an in-memory sort of the full window.
     pnl_sql = f"""\
 SELECT
-    argMax(strategy_table_name, (ts, updated_at)) AS strategy_table_name,
+    strategy_table_name,
     strategy_instance_id,
-    argMax(cumulative_pnl, (ts, updated_at)) AS cumulative_pnl,
-    argMax(price, (ts, updated_at)) AS price
+    cumulative_pnl,
+    price
 FROM {pnl_table}
 WHERE ts >= '{seed_window_start}' AND ts < '{start_str}'
-GROUP BY strategy_instance_id
+ORDER BY strategy_instance_id, ts DESC, updated_at DESC
+LIMIT 1 BY strategy_instance_id
 """
     pnl_seeds: dict[str, dict] = {}
     for row in query_dicts(pnl_sql):
