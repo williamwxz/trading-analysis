@@ -107,6 +107,9 @@ GROUP BY strategy_instance_id
     # ── Position ──────────────────────────────────────────────────────────────
     if real_trade:
         # Latest revision whose revision_ts <= start_ts per strategy_instance_id.
+        # ts >= seed_window_start prunes partitions via the primary key so ClickHouse
+        # doesn't scan the full table. revision_ts always trails ts by at most a few
+        # minutes, so no active strategy's latest bar falls outside the 7-day window.
         pos_sql = f"""\
 SELECT
     strategy_table_name,
@@ -115,7 +118,8 @@ SELECT
     max(revision_ts) AS max_revision_ts,
     argMax(row_json, revision_ts) AS row_json
 FROM {history_table}
-WHERE revision_ts <= '{start_str}'
+WHERE ts >= '{seed_window_start}'
+  AND revision_ts <= '{start_str}'
 GROUP BY strategy_table_name, strategy_instance_id, ts
 ORDER BY strategy_instance_id, ts DESC
 LIMIT 1 BY strategy_instance_id
@@ -251,13 +255,20 @@ LIMIT 1 BY strategy_instance_id, ts
     rt_guard: dict[str, list[tuple[datetime, datetime, datetime]]] = {}
     if real_trade:
         # All revisions in the walk window, sorted by revision_ts per siid.
+        # ts lower-bound prunes partitions via primary key (revision_ts is not the
+        # primary key so filtering on it alone causes a full-table scan).
+        # revision_ts never lags ts by more than a few minutes, so ts >= start - 3d
+        # safely covers the same window as revision_ts >= start - 2d.
+        ts_floor_str = (start_ts - timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+        rev_floor_str = (start_ts - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
         hist_sql = f"""\
 SELECT
     strategy_instance_id,
     revision_ts,
     argMax(ts, ts) AS bar_ts
 FROM {history_table}
-WHERE revision_ts >= '{start_str}'::DateTime - INTERVAL 2 DAY
+WHERE ts >= '{ts_floor_str}'
+  AND revision_ts >= '{rev_floor_str}'
   AND revision_ts < '{ref_str}'
 GROUP BY strategy_instance_id, revision_ts
 ORDER BY strategy_instance_id, revision_ts
