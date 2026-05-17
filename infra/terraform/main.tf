@@ -1498,7 +1498,7 @@ resource "aws_ecs_task_definition" "flink_pnl" {
       { name = "ENABLE_PRICE_SINK",      value = "false" },
       { name = "ENABLE_PROD_SINK",       value = "false" },
       { name = "ENABLE_BT_SINK",         value = "false" },
-      { name = "ENABLE_REAL_TRADE_SINK", value = "false" },
+      { name = "ENABLE_REAL_TRADE_SINK", value = "true" },
     ]
     logConfiguration = {
       logDriver = "awslogs"
@@ -1517,7 +1517,7 @@ resource "aws_ecs_service" "flink_pnl" {
   name            = "${local.name_prefix}-flink-pnl"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.flink_pnl.arn
-  desired_count   = 0
+  desired_count   = 1
 
   capacity_provider_strategy {
     capacity_provider = "FARGATE_SPOT"
