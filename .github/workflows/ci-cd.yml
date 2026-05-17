@@ -75,7 +75,9 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Run tests
-        run: pytest tests/ flink_pnl/tests/ -v --tb=short -m "not integration"
+        run: |
+          pytest tests/ -v --tb=short -m "not integration"
+          pytest flink_pnl/tests/ -v --tb=short -m "not integration"
 
   integration-test:
     runs-on: ubuntu-latest
