@@ -48,3 +48,5 @@ docker-compose.override.yml
 flink_job/connectors/*.jar
 
 .telemetry/
+
+.claude/settings.json
