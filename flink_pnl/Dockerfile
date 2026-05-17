@@ -5,10 +5,12 @@
 # Update both together when upgrading — a mismatch fails job startup with a version error.
 FROM apache/flink:2.2.1-java21
 
+USER root
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
         python3-pip \
     && rm -rf /var/lib/apt/lists/*
+USER flink
 
 COPY flink_pnl/requirements.txt /tmp/requirements.txt
 RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
