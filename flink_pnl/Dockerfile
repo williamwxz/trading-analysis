@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 USER flink
 
 COPY flink_pnl/requirements.txt /tmp/requirements.txt
-RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r /tmp/requirements.txt
 
 WORKDIR /opt/flink/usrlib
 
