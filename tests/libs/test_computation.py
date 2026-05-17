@@ -364,9 +364,9 @@ def test_fetch_real_trade_returns_empty_when_no_rows():
 @pytest.mark.unit
 def test_fetch_bootstrap_seeds_returns_bootstrap_seed_with_correct_fields():
     """Returns BootstrapSeed with pnl, price, position from mocked rows."""
+    stn_rows = [{"strategy_table_name": "strat_prod_1"}]
     pnl_rows = [
         {
-            "strategy_table_name": "strat_prod_1",
             "strategy_instance_id": "inst_001",
             "cumulative_pnl": 5.5,
             "price": 93000.0,
@@ -374,13 +374,14 @@ def test_fetch_bootstrap_seeds_returns_bootstrap_seed_with_correct_fields():
     ]
     pos_rows = [
         {
-            "strategy_table_name": "strat_prod_1",
             "strategy_instance_id": "inst_001",
             "row_json": json.dumps({"position": 1.0}),
         }
     ]
+    # call order: DISTINCT stns, pnl per stn, pos per stn, completeness check
     with patch(
-        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, pos_rows, [{"cnt": 0}]]
+        "libs.computation.bootstrap.query_dicts",
+        side_effect=[stn_rows, pnl_rows, pos_rows, [{"cnt": 1}]],
     ):
         seeds = fetch_bootstrap_seeds(
             pnl_table="analytics.strategy_pnl_1min_prod_v2",
@@ -401,23 +402,12 @@ def test_fetch_bootstrap_seeds_returns_bootstrap_seed_with_correct_fields():
 @pytest.mark.unit
 def test_fetch_bootstrap_seeds_bar_ts_revision_ts_are_datetime_min_for_prod():
     """For prod/bt mode, bar_ts and revision_ts default to datetime.min."""
-    pnl_rows = [
-        {
-            "strategy_table_name": "strat_prod_1",
-            "strategy_instance_id": "inst_001",
-            "cumulative_pnl": 1.0,
-            "price": 50000.0,
-        }
-    ]
-    pos_rows = [
-        {
-            "strategy_table_name": "strat_prod_1",
-            "strategy_instance_id": "inst_001",
-            "row_json": json.dumps({"position": 0.5}),
-        }
-    ]
+    stn_rows = [{"strategy_table_name": "strat_prod_1"}]
+    pnl_rows = [{"strategy_instance_id": "inst_001", "cumulative_pnl": 1.0, "price": 50000.0}]
+    pos_rows = [{"strategy_instance_id": "inst_001", "row_json": json.dumps({"position": 0.5})}]
     with patch(
-        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, pos_rows, [{"cnt": 0}]]
+        "libs.computation.bootstrap.query_dicts",
+        side_effect=[stn_rows, pnl_rows, pos_rows, [{"cnt": 1}]],
     ):
         seeds = fetch_bootstrap_seeds(
             pnl_table="analytics.strategy_pnl_1min_prod_v2",
@@ -432,15 +422,17 @@ def test_fetch_bootstrap_seeds_bar_ts_revision_ts_are_datetime_min_for_prod():
 @pytest.mark.unit
 def test_fetch_bootstrap_seeds_position_sql_uses_argmin_revision_ts():
     """Prod/bt mode position SQL uses argMin(row_json, revision_ts) — first revision."""
-    pnl_rows: list = []
-    pos_rows: list = []
+    stn_rows = [{"strategy_table_name": "strat_prod_1"}]
     captured = []
 
     def capture(sql):
         captured.append(sql)
-        return captured_results.pop(0)
+        if "DISTINCT strategy_table_name" in sql:
+            return stn_rows
+        if "count(DISTINCT strategy_instance_id)" in sql:
+            return [{"cnt": 0}]
+        return []
 
-    captured_results = [pnl_rows, pos_rows, [{"cnt": 0}]]
     with patch("libs.computation.bootstrap.query_dicts", side_effect=capture):
         fetch_bootstrap_seeds(
             pnl_table="analytics.strategy_pnl_1min_prod_v2",
@@ -448,26 +440,20 @@ def test_fetch_bootstrap_seeds_position_sql_uses_argmin_revision_ts():
             start_ts=_START_TS,
             real_trade=False,
         )
-    # Second call is the position SQL; third is completeness check
-    assert len(captured) == 3
-    pos_sql = captured[1]
-    assert "argMin(row_json, revision_ts)" in pos_sql
-    assert "ts <=" in pos_sql
+    # position SQL must appear somewhere in captured calls (threading: order not guaranteed)
+    assert any("argMin(row_json, revision_ts)" in sql for sql in captured)
+    assert any("ts <=" in sql for sql in captured)
 
 
 @pytest.mark.unit
 def test_fetch_bootstrap_seeds_strategy_in_history_but_not_pnl_gets_zero_pnl_price():
     """Strategy present in history but not in pnl table gets pnl=0.0, price=0.0."""
-    pnl_rows: list = []  # no pnl data
-    pos_rows = [
-        {
-            "strategy_table_name": "strat_new",
-            "strategy_instance_id": "inst_new",
-            "row_json": json.dumps({"position": 0.3}),
-        }
-    ]
+    stn_rows = [{"strategy_table_name": "strat_new"}]
+    pnl_rows: list = []
+    pos_rows = [{"strategy_instance_id": "inst_new", "row_json": json.dumps({"position": 0.3})}]
     with patch(
-        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, pos_rows, [{"cnt": 0}]]
+        "libs.computation.bootstrap.query_dicts",
+        side_effect=[stn_rows, pnl_rows, pos_rows, [{"cnt": 1}]],
     ):
         seeds = fetch_bootstrap_seeds(
             pnl_table="analytics.strategy_pnl_1min_prod_v2",
@@ -485,17 +471,12 @@ def test_fetch_bootstrap_seeds_strategy_in_history_but_not_pnl_gets_zero_pnl_pri
 @pytest.mark.unit
 def test_fetch_bootstrap_seeds_strategy_in_pnl_but_not_history_gets_zero_position():
     """Strategy in pnl table but not in history gets position=0.0."""
-    pnl_rows = [
-        {
-            "strategy_table_name": "strat_old",
-            "strategy_instance_id": "inst_old",
-            "cumulative_pnl": 10.0,
-            "price": 80000.0,
-        }
-    ]
-    pos_rows: list = []  # no position data
+    stn_rows = [{"strategy_table_name": "strat_old"}]
+    pnl_rows = [{"strategy_instance_id": "inst_old", "cumulative_pnl": 10.0, "price": 80000.0}]
+    pos_rows: list = []
     with patch(
-        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, pos_rows, [{"cnt": 0}]]
+        "libs.computation.bootstrap.query_dicts",
+        side_effect=[stn_rows, pnl_rows, pos_rows, [{"cnt": 1}]],
     ):
         seeds = fetch_bootstrap_seeds(
             pnl_table="analytics.strategy_pnl_1min_prod_v2",
@@ -513,24 +494,29 @@ def test_fetch_bootstrap_seeds_strategy_in_pnl_but_not_history_gets_zero_positio
 @pytest.mark.unit
 def test_fetch_bootstrap_seeds_all_keys_union_of_both_sources():
     """all_keys = union of pnl table keys and history table keys."""
-    pnl_rows = [
-        {
-            "strategy_table_name": "strat_A",
-            "strategy_instance_id": "inst_A",
-            "cumulative_pnl": 1.0,
-            "price": 90000.0,
-        }
-    ]
-    pos_rows = [
-        {
-            "strategy_table_name": "strat_B",
-            "strategy_instance_id": "inst_B",
-            "row_json": json.dumps({"position": 0.5}),
-        }
-    ]
-    with patch(
-        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, pos_rows, [{"cnt": 0}]]
-    ):
+    # Two strategies: strat_A appears only in pnl, strat_B only in history.
+    # Each gets its own DISTINCT + per-stn query cycle.
+    stn_rows_a = [{"strategy_table_name": "strat_A"}]
+    pnl_rows_a = [{"strategy_instance_id": "inst_A", "cumulative_pnl": 1.0, "price": 90000.0}]
+    pos_rows_a: list = []
+    stn_rows_b = [{"strategy_table_name": "strat_B"}]
+    pnl_rows_b: list = []
+    pos_rows_b = [{"strategy_instance_id": "inst_B", "row_json": json.dumps({"position": 0.5})}]
+
+    stn_rows = [{"strategy_table_name": "strat_A"}, {"strategy_table_name": "strat_B"}]
+
+    def capture(sql):
+        if "DISTINCT strategy_table_name" in sql:
+            return stn_rows
+        if "count(DISTINCT strategy_instance_id)" in sql:
+            return [{"cnt": 2}]
+        if "strat_A" in sql:
+            return pnl_rows_a if "cumulative_pnl" in sql else pos_rows_a
+        if "strat_B" in sql:
+            return pnl_rows_b if "cumulative_pnl" in sql else pos_rows_b
+        return []
+
+    with patch("libs.computation.bootstrap.query_dicts", side_effect=capture):
         seeds = fetch_bootstrap_seeds(
             pnl_table="analytics.strategy_pnl_1min_prod_v2",
             history_table="analytics.strategy_output_history_v2",
@@ -549,15 +535,16 @@ def test_fetch_bootstrap_seeds_all_keys_union_of_both_sources():
 @pytest.mark.unit
 def test_fetch_bootstrap_seeds_real_trade_position_sql_uses_argmax_revision_ts():
     """Real-trade mode position SQL uses argMax(row_json, revision_ts) — latest revision."""
-    pnl_rows: list = []
-    pos_rows: list = []
+    stn_rows = [{"strategy_table_name": "strat_rt"}]
     captured = []
-
-    captured_results = [pnl_rows, pos_rows, [{"cnt": 0}]]
 
     def capture(sql):
         captured.append(sql)
-        return captured_results.pop(0)
+        if "DISTINCT strategy_table_name" in sql:
+            return stn_rows
+        if "count(DISTINCT strategy_instance_id)" in sql:
+            return [{"cnt": 0}]
+        return []
 
     with patch("libs.computation.bootstrap.query_dicts", side_effect=capture):
         fetch_bootstrap_seeds(
@@ -566,9 +553,8 @@ def test_fetch_bootstrap_seeds_real_trade_position_sql_uses_argmax_revision_ts()
             start_ts=_START_TS,
             real_trade=True,
         )
-    pos_sql = captured[1]
-    assert "argMax(row_json, revision_ts)" in pos_sql
-    assert "revision_ts <=" in pos_sql
+    assert any("argMax(row_json, revision_ts)" in sql for sql in captured)
+    assert any("revision_ts <=" in sql for sql in captured)
 
 
 @pytest.mark.unit
@@ -576,10 +562,10 @@ def test_fetch_bootstrap_seeds_real_trade_bar_ts_revision_ts_populated():
     """For real_trade mode, bar_ts and revision_ts are populated from position query."""
     expected_bar_ts = datetime(2026, 5, 9, 23, 55, 0)
     expected_rev_ts = datetime(2026, 5, 9, 23, 57, 30)
+    stn_rows = [{"strategy_table_name": "strat_rt"}]
     pnl_rows: list = []
     pos_rows = [
         {
-            "strategy_table_name": "strat_rt",
             "strategy_instance_id": "inst_rt",
             "bar_ts": expected_bar_ts,
             "max_revision_ts": expected_rev_ts,
@@ -587,7 +573,8 @@ def test_fetch_bootstrap_seeds_real_trade_bar_ts_revision_ts_populated():
         }
     ]
     with patch(
-        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, pos_rows, [{"cnt": 0}]]
+        "libs.computation.bootstrap.query_dicts",
+        side_effect=[stn_rows, pnl_rows, pos_rows, [{"cnt": 1}]],
     ):
         seeds = fetch_bootstrap_seeds(
             pnl_table="analytics.strategy_pnl_1min_real_trade_v2",
@@ -605,17 +592,10 @@ def test_fetch_bootstrap_seeds_real_trade_bar_ts_revision_ts_populated():
 @pytest.mark.unit
 def test_fetch_bootstrap_seeds_real_trade_correct_position():
     """Real-trade mode returns correct position from argMax revision."""
-    pnl_rows = [
-        {
-            "strategy_table_name": "strat_rt",
-            "strategy_instance_id": "inst_rt",
-            "cumulative_pnl": 3.0,
-            "price": 70000.0,
-        }
-    ]
+    stn_rows = [{"strategy_table_name": "strat_rt"}]
+    pnl_rows = [{"strategy_instance_id": "inst_rt", "cumulative_pnl": 3.0, "price": 70000.0}]
     pos_rows = [
         {
-            "strategy_table_name": "strat_rt",
             "strategy_instance_id": "inst_rt",
             "bar_ts": datetime(2026, 5, 9, 22, 0, 0),
             "max_revision_ts": datetime(2026, 5, 9, 22, 5, 0),
@@ -623,7 +603,8 @@ def test_fetch_bootstrap_seeds_real_trade_correct_position():
         }
     ]
     with patch(
-        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, pos_rows, [{"cnt": 0}]]
+        "libs.computation.bootstrap.query_dicts",
+        side_effect=[stn_rows, pnl_rows, pos_rows, [{"cnt": 1}]],
     ):
         seeds = fetch_bootstrap_seeds(
             pnl_table="analytics.strategy_pnl_1min_real_trade_v2",
@@ -643,18 +624,20 @@ def test_fetch_bootstrap_seeds_real_trade_correct_position():
 def test_fetch_walk_rows_returns_walk_row_list_with_correct_fields():
     """Returns WalkRow list with cumulative_pnl, price, position from stored pnl rows."""
     row_ts = datetime(2026, 5, 7, 1, 0, 0)
+    stn_rows = [{"strategy_table_name": "strat_prod_1"}]
     pnl_rows = [
         {
-            "strategy_table_name": "strat_prod_1",
             "strategy_instance_id": "inst_001",
             "ts": row_ts,
             "cumulative_pnl": 7.2,
-            "underlying": "BTC",
             "price": 95000.0,
             "position": 0.5,
         }
     ]
-    with patch("libs.computation.bootstrap.query_dicts", return_value=pnl_rows):
+    # call order: DISTINCT stns, pnl per stn
+    with patch(
+        "libs.computation.bootstrap.query_dicts", side_effect=[stn_rows, pnl_rows]
+    ):
         walk_rows = fetch_walk_rows(
             pnl_table="analytics.strategy_pnl_1min_prod_v2",
             history_table="analytics.strategy_output_history_v2",
@@ -674,18 +657,19 @@ def test_fetch_walk_rows_returns_walk_row_list_with_correct_fields():
 def test_fetch_walk_rows_price_from_price_field_not_cumulative_pnl():
     """price comes from the stored price column, not cumulative_pnl."""
     row_ts = datetime(2026, 5, 7, 2, 0, 0)
+    stn_rows = [{"strategy_table_name": "strat_prod_1"}]
     pnl_rows = [
         {
-            "strategy_table_name": "strat_prod_1",
             "strategy_instance_id": "inst_001",
             "ts": row_ts,
             "cumulative_pnl": 999.0,  # large sentinel — should NOT appear as price
-            "underlying": "BTC",
             "price": 88000.0,
             "position": 0.0,
         }
     ]
-    with patch("libs.computation.bootstrap.query_dicts", return_value=pnl_rows):
+    with patch(
+        "libs.computation.bootstrap.query_dicts", side_effect=[stn_rows, pnl_rows]
+    ):
         walk_rows = fetch_walk_rows(
             pnl_table="analytics.strategy_pnl_1min_prod_v2",
             history_table="analytics.strategy_output_history_v2",
@@ -703,37 +687,15 @@ def test_fetch_walk_rows_position_comes_from_stored_pnl_rows():
     ts1 = datetime(2026, 5, 7, 1, 0, 0)
     ts2 = datetime(2026, 5, 7, 2, 0, 0)
     ts3 = datetime(2026, 5, 7, 3, 0, 0)
-
+    stn_rows = [{"strategy_table_name": "strat_prod_1"}]
     pnl_rows = [
-        {
-            "strategy_table_name": "strat_prod_1",
-            "strategy_instance_id": "inst_001",
-            "ts": ts1,
-            "cumulative_pnl": 1.0,
-            "underlying": "BTC",
-            "price": 90000.0,
-            "position": 0.5,
-        },
-        {
-            "strategy_table_name": "strat_prod_1",
-            "strategy_instance_id": "inst_001",
-            "ts": ts2,
-            "cumulative_pnl": 1.1,
-            "underlying": "BTC",
-            "price": 91000.0,
-            "position": 1.0,
-        },
-        {
-            "strategy_table_name": "strat_prod_1",
-            "strategy_instance_id": "inst_001",
-            "ts": ts3,
-            "cumulative_pnl": 1.2,
-            "underlying": "BTC",
-            "price": 92000.0,
-            "position": -0.5,
-        },
+        {"strategy_instance_id": "inst_001", "ts": ts1, "cumulative_pnl": 1.0, "price": 90000.0, "position": 0.5},
+        {"strategy_instance_id": "inst_001", "ts": ts2, "cumulative_pnl": 1.1, "price": 91000.0, "position": 1.0},
+        {"strategy_instance_id": "inst_001", "ts": ts3, "cumulative_pnl": 1.2, "price": 92000.0, "position": -0.5},
     ]
-    with patch("libs.computation.bootstrap.query_dicts", return_value=pnl_rows):
+    with patch(
+        "libs.computation.bootstrap.query_dicts", side_effect=[stn_rows, pnl_rows]
+    ):
         walk_rows = fetch_walk_rows(
             pnl_table="analytics.strategy_pnl_1min_prod_v2",
             history_table="analytics.strategy_output_history_v2",
@@ -750,8 +712,7 @@ def test_fetch_walk_rows_position_comes_from_stored_pnl_rows():
 @pytest.mark.unit
 def test_fetch_walk_rows_returns_empty_when_no_pnl_rows():
     """Returns empty list when there are no PnL rows in the window."""
-    pnl_rows: list = []
-    with patch("libs.computation.bootstrap.query_dicts", return_value=pnl_rows):
+    with patch("libs.computation.bootstrap.query_dicts", return_value=[]):
         walk_rows = fetch_walk_rows(
             pnl_table="analytics.strategy_pnl_1min_prod_v2",
             history_table="analytics.strategy_output_history_v2",
@@ -766,18 +727,13 @@ def test_fetch_walk_rows_returns_empty_when_no_pnl_rows():
 def test_fetch_walk_rows_bar_ts_revision_ts_are_datetime_min_for_prod():
     """For prod/bt mode walk rows, bar_ts and revision_ts are datetime.min."""
     row_ts = datetime(2026, 5, 7, 1, 0, 0)
+    stn_rows = [{"strategy_table_name": "strat_prod_1"}]
     pnl_rows = [
-        {
-            "strategy_table_name": "strat_prod_1",
-            "strategy_instance_id": "inst_001",
-            "ts": row_ts,
-            "cumulative_pnl": 1.0,
-            "underlying": "BTC",
-            "price": 90000.0,
-            "position": 0.0,
-        }
+        {"strategy_instance_id": "inst_001", "ts": row_ts, "cumulative_pnl": 1.0, "price": 90000.0, "position": 0.0}
     ]
-    with patch("libs.computation.bootstrap.query_dicts", return_value=pnl_rows):
+    with patch(
+        "libs.computation.bootstrap.query_dicts", side_effect=[stn_rows, pnl_rows]
+    ):
         walk_rows = fetch_walk_rows(
             pnl_table="analytics.strategy_pnl_1min_prod_v2",
             history_table="analytics.strategy_output_history_v2",
@@ -800,35 +756,11 @@ def test_fetch_walk_rows_real_trade_position_comes_from_stored_pnl_rows():
     ts1 = datetime(2026, 5, 7, 1, 0, 0)
     ts2 = datetime(2026, 5, 7, 1, 5, 0)
     ts3 = datetime(2026, 5, 7, 1, 10, 0)
-
+    stn_rows = [{"strategy_table_name": "strat_rt"}]
     pnl_rows = [
-        {
-            "strategy_table_name": "strat_rt",
-            "strategy_instance_id": "inst_rt",
-            "ts": ts1,
-            "cumulative_pnl": 2.0,
-            "underlying": "BTC",
-            "price": 90000.0,
-            "position": 0.0,
-        },
-        {
-            "strategy_table_name": "strat_rt",
-            "strategy_instance_id": "inst_rt",
-            "ts": ts2,
-            "cumulative_pnl": 2.1,
-            "underlying": "BTC",
-            "price": 90100.0,
-            "position": 1.0,
-        },
-        {
-            "strategy_table_name": "strat_rt",
-            "strategy_instance_id": "inst_rt",
-            "ts": ts3,
-            "cumulative_pnl": 2.2,
-            "underlying": "BTC",
-            "price": 90200.0,
-            "position": 1.0,
-        },
+        {"strategy_instance_id": "inst_rt", "ts": ts1, "cumulative_pnl": 2.0, "price": 90000.0, "position": 0.0},
+        {"strategy_instance_id": "inst_rt", "ts": ts2, "cumulative_pnl": 2.1, "price": 90100.0, "position": 1.0},
+        {"strategy_instance_id": "inst_rt", "ts": ts3, "cumulative_pnl": 2.2, "price": 90200.0, "position": 1.0},
     ]
     rev_ts_a = datetime(2026, 5, 7, 0, 58, 0)
     rev_ts_b = datetime(2026, 5, 7, 1, 2, 0)
@@ -837,8 +769,9 @@ def test_fetch_walk_rows_real_trade_position_comes_from_stored_pnl_rows():
         {"strategy_instance_id": "inst_rt", "bar_ts": bar_ts_common, "revision_ts": rev_ts_a},
         {"strategy_instance_id": "inst_rt", "bar_ts": bar_ts_common, "revision_ts": rev_ts_b},
     ]
+    # call order: DISTINCT stns, pnl per stn, hist per stn
     with patch(
-        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, hist_rows]
+        "libs.computation.bootstrap.query_dicts", side_effect=[stn_rows, pnl_rows, hist_rows]
     ):
         walk_rows = fetch_walk_rows(
             pnl_table="analytics.strategy_pnl_1min_real_trade_v2",
@@ -848,7 +781,6 @@ def test_fetch_walk_rows_real_trade_position_comes_from_stored_pnl_rows():
             real_trade=True,
         )
     assert len(walk_rows) == 3
-    # position always from stored pnl rows, not derived from revision_ts bisect
     assert walk_rows[0].position == pytest.approx(0.0)
     assert walk_rows[1].position == pytest.approx(1.0)
     assert walk_rows[2].position == pytest.approx(1.0)
@@ -860,27 +792,15 @@ def test_fetch_walk_rows_real_trade_bar_ts_revision_ts_populated():
     row_ts = datetime(2026, 5, 7, 1, 5, 0)
     expected_bar_ts = datetime(2026, 5, 7, 0, 55, 0)
     expected_rev_ts = datetime(2026, 5, 7, 1, 2, 0)
-
+    stn_rows = [{"strategy_table_name": "strat_rt"}]
     pnl_rows = [
-        {
-            "strategy_table_name": "strat_rt",
-            "strategy_instance_id": "inst_rt",
-            "ts": row_ts,
-            "cumulative_pnl": 2.0,
-            "underlying": "BTC",
-            "price": 90000.0,
-            "position": 0.5,
-        }
+        {"strategy_instance_id": "inst_rt", "ts": row_ts, "cumulative_pnl": 2.0, "price": 90000.0, "position": 0.5}
     ]
     hist_rows = [
-        {
-            "strategy_instance_id": "inst_rt",
-            "bar_ts": expected_bar_ts,
-            "revision_ts": expected_rev_ts,
-        }
+        {"strategy_instance_id": "inst_rt", "bar_ts": expected_bar_ts, "revision_ts": expected_rev_ts}
     ]
     with patch(
-        "libs.computation.bootstrap.query_dicts", side_effect=[pnl_rows, hist_rows]
+        "libs.computation.bootstrap.query_dicts", side_effect=[stn_rows, pnl_rows, hist_rows]
     ):
         walk_rows = fetch_walk_rows(
             pnl_table="analytics.strategy_pnl_1min_real_trade_v2",
