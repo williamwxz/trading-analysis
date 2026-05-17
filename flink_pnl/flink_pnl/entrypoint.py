@@ -5,6 +5,7 @@ import os
 
 from pyflink.common.serialization import SimpleStringSchema
 from pyflink.datastream import CheckpointingMode, StreamExecutionEnvironment
+from pyflink.datastream.checkpoint_storage import FileSystemCheckpointStorage
 from pyflink.datastream.connectors.kafka import FlinkKafkaConsumer
 
 from flink_pnl.pnl_job import PnlProcessFunction
@@ -23,7 +24,7 @@ def build_env() -> StreamExecutionEnvironment:
     # Checkpoint every 60s to S3.
     # At-least-once + idempotent CH upsert = effectively exactly-once.
     env.enable_checkpointing(CHECKPOINT_INTERVAL_MS, CheckpointingMode.AT_LEAST_ONCE)
-    env.get_checkpoint_config().set_checkpoint_storage_uri(CHECKPOINT_URI)
+    env.get_checkpoint_config().set_checkpoint_storage(FileSystemCheckpointStorage(CHECKPOINT_URI))
 
     return env
 
