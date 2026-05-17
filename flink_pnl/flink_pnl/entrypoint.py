@@ -5,7 +5,8 @@ import os
 
 from pyflink.common.configuration import Configuration
 from pyflink.common.serialization import SimpleStringSchema
-from pyflink.datastream import CheckpointingMode, StreamExecutionEnvironment, WatermarkStrategy
+from pyflink.common import WatermarkStrategy
+from pyflink.datastream import CheckpointingMode, StreamExecutionEnvironment
 from pyflink.datastream.connectors.kafka import KafkaOffsetsInitializer, KafkaSource
 
 from flink_pnl.pnl_job import PnlProcessFunction
