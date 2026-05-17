@@ -3,9 +3,9 @@
 import logging
 import os
 
+from pyflink.common.configuration import Configuration
 from pyflink.common.serialization import SimpleStringSchema
 from pyflink.datastream import CheckpointingMode, StreamExecutionEnvironment
-from pyflink.datastream.checkpoint_storage import FileSystemCheckpointStorage
 from pyflink.datastream.connectors.kafka import FlinkKafkaConsumer
 
 from flink_pnl.pnl_job import PnlProcessFunction
@@ -18,13 +18,16 @@ CHECKPOINT_URI = "s3://trading-analysis-flink-checkpoints-068704208855/checkpoin
 
 
 def build_env() -> StreamExecutionEnvironment:
-    env = StreamExecutionEnvironment.get_execution_environment()
+    config = Configuration()
+    config.set_string("execution.checkpointing.storage", "filesystem")
+    config.set_string("execution.checkpointing.dir", CHECKPOINT_URI)
+
+    env = StreamExecutionEnvironment.get_execution_environment(config)
     env.set_parallelism(1)
 
     # Checkpoint every 60s to S3.
     # At-least-once + idempotent CH upsert = effectively exactly-once.
     env.enable_checkpointing(CHECKPOINT_INTERVAL_MS, CheckpointingMode.AT_LEAST_ONCE)
-    env.get_checkpoint_config().set_checkpoint_storage(FileSystemCheckpointStorage(CHECKPOINT_URI))
 
     return env
 
