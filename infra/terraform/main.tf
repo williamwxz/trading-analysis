@@ -1400,6 +1400,35 @@ resource "aws_cloudwatch_metric_alarm" "pnl_consumer_crash" {
 # Runs alongside pnl_consumer during evaluation. desired_count=0 until validated.
 # ─────────────────────────────────────────────────────────────────────────────
 
+resource "aws_s3_bucket" "flink_pnl_checkpoints" {
+  bucket = "trading-analysis-data-v2"
+  tags   = local.common_tags
+}
+
+resource "aws_s3_bucket_versioning" "flink_pnl_checkpoints" {
+  bucket = aws_s3_bucket.flink_pnl_checkpoints.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "flink_pnl_checkpoints" {
+  bucket = aws_s3_bucket.flink_pnl_checkpoints.id
+
+  rule {
+    id     = "expire-old-checkpoints"
+    status = "Enabled"
+
+    filter {
+      prefix = "flink-pnl-checkpoints/"
+    }
+
+    expiration {
+      days = 7
+    }
+  }
+}
+
 resource "aws_ecr_repository" "flink_pnl" {
   name                 = "trading-analysis-flink-pnl"
   image_tag_mutability = "MUTABLE"
@@ -1429,8 +1458,8 @@ resource "aws_iam_role_policy" "flink_pnl_s3" {
       Effect = "Allow"
       Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
       Resource = [
-        "arn:aws:s3:::trading-analysis-data-v2",
-        "arn:aws:s3:::trading-analysis-data-v2/flink-pnl-checkpoints/*",
+        aws_s3_bucket.flink_pnl_checkpoints.arn,
+        "${aws_s3_bucket.flink_pnl_checkpoints.arn}/flink-pnl-checkpoints/*",
       ]
     }]
   })
@@ -1507,6 +1536,11 @@ resource "aws_ecs_service" "flink_pnl" {
 # ─────────────────────────────────────────────────────────────────────────────
 # Outputs
 # ─────────────────────────────────────────────────────────────────────────────
+
+output "flink_pnl_checkpoint_bucket" {
+  value       = aws_s3_bucket.flink_pnl_checkpoints.bucket
+  description = "S3 bucket used for Flink PnL job checkpoints"
+}
 
 output "ecs_cluster_name" {
   value = aws_ecs_cluster.main.name
