@@ -30,10 +30,10 @@ from confluent_kafka import (
 
 from libs.clickhouse_client import insert_rows
 from libs.computation import (
+    INSERT_COLUMNS,
     AnchorRecord,
     AnchorState,
     BootstrapSeed,
-    INSERT_COLUMNS,
     WalkRow,
     build_carry_forward_row,
     build_pnl_row,
@@ -50,12 +50,23 @@ logger = logging.getLogger(__name__)
 TOPIC = "binance.price.ticks"
 _DEFAULT_GROUP_ID = "flink-pnl-consumer"
 
-_SEED_HOURS = 48    # seed anchor from last row before ref_ts - 48h (covers all timeframes incl 1d bars)
-_WALK_HOURS = 2     # walk [ref_ts - 2h, ref_ts) to advance anchor price/position to present
+_SEED_HOURS = 48  # seed anchor from last row before ref_ts - 48h (covers all timeframes incl 1d bars)
+_WALK_HOURS = (
+    2  # walk [ref_ts - 2h, ref_ts) to advance anchor price/position to present
+)
 _PNL_WARN_TOLERANCE = 1e-6
 _PNL_CRASH_TOLERANCE = 2e-3  # 0.2%
 
-PRICE_COLUMNS = ["exchange", "instrument", "ts", "open", "high", "low", "close", "volume"]
+PRICE_COLUMNS = [
+    "exchange",
+    "instrument",
+    "ts",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+]
 
 # Table config per mode.
 _MODE_CONFIG = {
@@ -116,15 +127,21 @@ def peek_reference_ts(
     timeout: float = 5.0,
 ) -> "datetime | None":
     """Return min candle ts at this group's committed offsets. Falls back to latest offset."""
-    consumer = Consumer({
-        "bootstrap.servers": brokers,
-        "group.id": group_id,
-        "enable.auto.commit": False,
-    })
+    consumer = Consumer(
+        {
+            "bootstrap.servers": brokers,
+            "group.id": group_id,
+            "enable.auto.commit": False,
+        }
+    )
     try:
         try:
             meta = consumer.list_topics(topic, timeout=timeout)
-            partitions = [TopicPartition(topic, p) for p in meta.topics[topic].partitions] if topic in meta.topics else []
+            partitions = (
+                [TopicPartition(topic, p) for p in meta.topics[topic].partitions]
+                if topic in meta.topics
+                else []
+            )
         except Exception:
             partitions = []
 
@@ -134,7 +151,9 @@ def peek_reference_ts(
             offset = tp.offset
             use_watermark = False
             if offset == OFFSET_INVALID:
-                low, high = consumer.get_watermark_offsets(TopicPartition(topic, tp.partition), timeout=timeout)
+                low, high = consumer.get_watermark_offsets(
+                    TopicPartition(topic, tp.partition), timeout=timeout
+                )
                 offset = max(high - 1, low)
                 if offset < 0:
                     continue
@@ -152,7 +171,9 @@ def peek_reference_ts(
 
         return min(timestamps) if timestamps else None
     except Exception:
-        logger.warning("peek_reference_ts failed — falling back to now()", exc_info=True)
+        logger.warning(
+            "peek_reference_ts failed — falling back to now()", exc_info=True
+        )
         return None
     finally:
         consumer.close()
@@ -169,11 +190,16 @@ def _fetch_walk_anchors(
     not the potentially stale consumer output from 48h ago.
     """
     from libs.clickhouse_client import query_dicts
+
     ts_str = walk_ts.strftime("%Y-%m-%d %H:%M:%S")
+    # 2-day lower bound keeps the scan narrow. LIMIT 1 BY picks the latest row per
+    # strategy_table_name within the window; any strategy with no row in the past 2 days
+    # has no active anchor and will be seeded from zero during the walk.
+    window_start_str = (walk_ts - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
     sql = f"""\
 SELECT strategy_table_name, cumulative_pnl, price
 FROM {pnl_table}
-WHERE ts < '{ts_str}'
+WHERE ts >= '{window_start_str}' AND ts < '{ts_str}'
 ORDER BY strategy_table_name, ts DESC, updated_at DESC
 LIMIT 1 BY strategy_table_name
 """
@@ -242,7 +268,13 @@ def _bootstrap_state(
 
     logger.info(
         "Bootstrap [%s]: seed_ts=%s walk_ts=%s ref_ts=%s seeds=%d walk_anchors=%d walk_rows=%d",
-        mode, seed_ts, walk_ts, ref_ts, len(seeds), len(walk_anchor_pnl), len(walk_rows),
+        mode,
+        seed_ts,
+        walk_ts,
+        ref_ts,
+        len(seeds),
+        len(walk_anchor_pnl),
+        len(walk_rows),
     )
 
     prev_pnl: dict[str, float] = {
@@ -273,22 +305,31 @@ def _bootstrap_state(
             if deviation > _PNL_WARN_TOLERANCE:
                 logger.warning(
                     "Cold-start PnL drift %s ts=%s stored=%.8f recomputed=%.8f delta=%.2e",
-                    stn, wr.ts, wr.cumulative_pnl, recomputed, deviation,
+                    stn,
+                    wr.ts,
+                    wr.cumulative_pnl,
+                    recomputed,
+                    deviation,
                 )
 
         prev_pnl[stn] = wr.cumulative_pnl
         prev_price[stn] = effective_price
-        state.set(stn, AnchorRecord(
-            pnl=wr.cumulative_pnl,
-            price=effective_price,
-            position=wr.position,
-            bar_ts=wr.bar_ts,
-            revision_ts=wr.revision_ts,
-        ))
+        state.set(
+            stn,
+            AnchorRecord(
+                pnl=wr.cumulative_pnl,
+                price=effective_price,
+                position=wr.position,
+                bar_ts=wr.bar_ts,
+                revision_ts=wr.revision_ts,
+            ),
+        )
 
     logger.info(
         "Bootstrap [%s]: seeded %d strategies, walked %d rows",
-        mode, len(state), len(walk_rows),
+        mode,
+        len(state),
+        len(walk_rows),
     )
     return state
 
@@ -309,9 +350,15 @@ def _compute_pnl_row(
     if the next bar arrives late.
     """
     if not state.has(strategy_table_name):
-        logger.info("New strategy '%s' — seeding from zero at price=%.4f ts=%s",
-                    strategy_table_name, candle.open, candle.ts)
-        state.set(strategy_table_name, AnchorRecord(pnl=0.0, price=candle.open, position=0.0))
+        logger.info(
+            "New strategy '%s' — seeding from zero at price=%.4f ts=%s",
+            strategy_table_name,
+            candle.open,
+            candle.ts,
+        )
+        state.set(
+            strategy_table_name, AnchorRecord(pnl=0.0, price=candle.open, position=0.0)
+        )
     meta = AnchorRecord(
         strategy_id=bar.strategy_id,
         strategy_name=bar.strategy_name,
@@ -413,17 +460,19 @@ def process_candle(
     candle_underlying = candle.instrument.removesuffix("USDT")
 
     if cfg.price:
-        rows.append({
-            "_sink": "price",
-            "exchange": candle.exchange,
-            "instrument": candle.instrument,
-            "ts": candle.ts,
-            "open": candle.open,
-            "high": candle.high,
-            "low": candle.low,
-            "close": candle.close,
-            "volume": candle.volume,
-        })
+        rows.append(
+            {
+                "_sink": "price",
+                "exchange": candle.exchange,
+                "instrument": candle.instrument,
+                "ts": candle.ts,
+                "open": candle.open,
+                "high": candle.high,
+                "low": candle.low,
+                "close": candle.close,
+                "volume": candle.volume,
+            }
+        )
 
     if cfg.prod:
         prod_bars = fetch_strategies_for_candle(candle.instrument, candle.ts)
@@ -431,14 +480,27 @@ def process_candle(
         fetched_prod_stns: set[str] = set()
         for bar in prod_bars:
             fetched_prod_stns.add(bar.strategy_table_name)
-            rows.append({"_sink": "pnl_prod", "_row": _compute_pnl_row(
-                state_prod, bar.strategy_table_name, candle, bar, "production", now,
-            )})
+            rows.append(
+                {
+                    "_sink": "pnl_prod",
+                    "_row": _compute_pnl_row(
+                        state_prod,
+                        bar.strategy_table_name,
+                        candle,
+                        bar,
+                        "production",
+                        now,
+                    ),
+                }
+            )
         # Carry-forward: hold position for strategies in state that returned no bar.
         # Only fire for strategies whose underlying matches this candle's instrument —
         # otherwise a SOL candle would carry-forward FET/ETH strategies at SOL's price.
         for stn in list(state_prod.keys()):
-            if stn not in fetched_prod_stns and state_prod.get(stn).underlying == candle_underlying:
+            if (
+                stn not in fetched_prod_stns
+                and state_prod.get(stn).underlying == candle_underlying
+            ):
                 row = _carry_forward_row(state_prod, stn, candle, "production", now)
                 if row is not None:
                     rows.append({"_sink": "pnl_prod", "_row": row})
@@ -449,11 +511,24 @@ def process_candle(
         fetched_bt_stns: set[str] = set()
         for bar in bt_bars:
             fetched_bt_stns.add(bar.strategy_table_name)
-            rows.append({"_sink": "pnl_bt", "_row": _compute_pnl_row(
-                state_bt, bar.strategy_table_name, candle, bar, "backtest", now,
-            )})
+            rows.append(
+                {
+                    "_sink": "pnl_bt",
+                    "_row": _compute_pnl_row(
+                        state_bt,
+                        bar.strategy_table_name,
+                        candle,
+                        bar,
+                        "backtest",
+                        now,
+                    ),
+                }
+            )
         for stn in list(state_bt.keys()):
-            if stn not in fetched_bt_stns and state_bt.get(stn).underlying == candle_underlying:
+            if (
+                stn not in fetched_bt_stns
+                and state_bt.get(stn).underlying == candle_underlying
+            ):
                 row = _carry_forward_row(state_bt, stn, candle, "backtest", now)
                 if row is not None:
                     rows.append({"_sink": "pnl_bt", "_row": row})
@@ -467,20 +542,38 @@ def process_candle(
                 rev.strategy_table_name, rev.bar_ts, rev.revision_ts
             ):
                 # Revision already applied — carry forward with same position/anchor.
-                row = _carry_forward_row(state_real_trade, rev.strategy_table_name, candle, "real_trade", now)
+                row = _carry_forward_row(
+                    state_real_trade, rev.strategy_table_name, candle, "real_trade", now
+                )
                 if row is not None:
                     rows.append({"_sink": "pnl_real_trade", "_row": row})
                 continue
             real_trade_fetched += 1
-            rows.append({"_sink": "pnl_real_trade", "_row": _compute_pnl_row(
-                state_real_trade, rev.strategy_table_name, candle, rev,
-                "real_trade", now, rev.bar_ts, rev.revision_ts,
-            )})
+            rows.append(
+                {
+                    "_sink": "pnl_real_trade",
+                    "_row": _compute_pnl_row(
+                        state_real_trade,
+                        rev.strategy_table_name,
+                        candle,
+                        rev,
+                        "real_trade",
+                        now,
+                        rev.bar_ts,
+                        rev.revision_ts,
+                    ),
+                }
+            )
         # Carry-forward for real_trade strategies not returned by the candle query
         # (e.g. strategies whose lookback window expired or had no recent bar).
         for stn in list(state_real_trade.keys()):
-            if stn not in fetched_rt_stns and state_real_trade.get(stn).underlying == candle_underlying:
-                row = _carry_forward_row(state_real_trade, stn, candle, "real_trade", now)
+            if (
+                stn not in fetched_rt_stns
+                and state_real_trade.get(stn).underlying == candle_underlying
+            ):
+                row = _carry_forward_row(
+                    state_real_trade, stn, candle, "real_trade", now
+                )
                 if row is not None:
                     rows.append({"_sink": "pnl_real_trade", "_row": row})
 
@@ -527,9 +620,15 @@ def _flush_candle(
     if price_row:
         insert_rows("analytics.futures_price_1min", PRICE_COLUMNS, [price_row])
     if pnl_prod_rows:
-        insert_rows("analytics.strategy_pnl_1min_prod_v2", INSERT_COLUMNS, pnl_prod_rows)
+        insert_rows(
+            "analytics.strategy_pnl_1min_prod_v2", INSERT_COLUMNS, pnl_prod_rows
+        )
     if pnl_real_trade_rows:
-        insert_rows("analytics.strategy_pnl_1min_real_trade_v2", INSERT_COLUMNS, pnl_real_trade_rows)
+        insert_rows(
+            "analytics.strategy_pnl_1min_real_trade_v2",
+            INSERT_COLUMNS,
+            pnl_real_trade_rows,
+        )
     if pnl_bt_rows:
         insert_rows("analytics.strategy_pnl_1min_bt_v2", INSERT_COLUMNS, pnl_bt_rows)
 
@@ -548,8 +647,18 @@ def emit_candle_lag(candle_ts: datetime, cw_client: Any, sink: str) -> None:
         cw_client.put_metric_data(
             Namespace="trading-analysis",
             MetricData=[
-                {"MetricName": "CandleLagSeconds", "Value": lag, "Unit": "Seconds", "Dimensions": dims},
-                {"MetricName": "CandleProcessingTs", "Value": candle_ts.timestamp(), "Unit": "None", "Dimensions": dims},
+                {
+                    "MetricName": "CandleLagSeconds",
+                    "Value": lag,
+                    "Unit": "Seconds",
+                    "Dimensions": dims,
+                },
+                {
+                    "MetricName": "CandleProcessingTs",
+                    "Value": candle_ts.timestamp(),
+                    "Unit": "None",
+                    "Dimensions": dims,
+                },
             ],
         )
     except Exception:
@@ -559,8 +668,13 @@ def emit_candle_lag(candle_ts: datetime, cw_client: Any, sink: str) -> None:
 def run() -> None:
     logging.basicConfig(level=logging.INFO)
     sink_cfg = SinkConfig.from_env()
-    logger.info("Sink config: price=%s prod=%s real_trade=%s bt=%s",
-                sink_cfg.price, sink_cfg.prod, sink_cfg.real_trade, sink_cfg.bt)
+    logger.info(
+        "Sink config: price=%s prod=%s real_trade=%s bt=%s",
+        sink_cfg.price,
+        sink_cfg.prod,
+        sink_cfg.real_trade,
+        sink_cfg.bt,
+    )
 
     reference_ts = peek_reference_ts(os.environ["REDPANDA_BROKERS"], resolve_group_id())
     if reference_ts is not None:
@@ -583,16 +697,20 @@ def run() -> None:
         logger.exception("Fatal error during bootstrap — exiting")
         sys.exit(1)
 
-    cw_client = boto3.client("cloudwatch", region_name=os.environ.get("AWS_REGION", "ap-northeast-1"))
+    cw_client = boto3.client(
+        "cloudwatch", region_name=os.environ.get("AWS_REGION", "ap-northeast-1")
+    )
     group_id = resolve_group_id()
     sink_label = group_id.removeprefix("pnl-consumer-") or group_id
 
-    consumer = Consumer({
-        "bootstrap.servers": os.environ["REDPANDA_BROKERS"],
-        "group.id": group_id,
-        "auto.offset.reset": "earliest",
-        "enable.auto.commit": False,
-    })
+    consumer = Consumer(
+        {
+            "bootstrap.servers": os.environ["REDPANDA_BROKERS"],
+            "group.id": group_id,
+            "auto.offset.reset": "earliest",
+            "enable.auto.commit": False,
+        }
+    )
     consumer.subscribe([TOPIC])
     logger.info("Subscribed to %s as group %s", TOPIC, group_id)
 
@@ -630,16 +748,22 @@ def run() -> None:
                 close=data["close"],
                 volume=data["volume"],
             )
-            logger.info("Candle %s open=%.2f ts=%s", candle.instrument, candle.open, candle.ts)
+            logger.info(
+                "Candle %s open=%.2f ts=%s", candle.instrument, candle.open, candle.ts
+            )
 
             # Compute all rows for this candle. Any exception here (ClickHouse fetch
             # failure, computation error) leaves the offset uncommitted — the consumer
             # restarts from the same Kafka position and replays with the original price.
             rows, prod_fetched, bt_fetched, rt_fetched = process_candle(
-                candle, state_prod, state_real_trade, state_bt, sink_cfg,
+                candle,
+                state_prod,
+                state_real_trade,
+                state_bt,
+                sink_cfg,
             )
 
-            price_row: "list | None" = None
+            price_row: list | None = None
             pnl_prod_rows: list[list] = []
             pnl_real_trade_rows: list[list] = []
             pnl_bt_rows: list[list] = []
@@ -647,8 +771,16 @@ def run() -> None:
             for row in rows:
                 sink = row["_sink"]
                 if sink == "price":
-                    price_row = [row["exchange"], row["instrument"], row["ts"],
-                                 row["open"], row["high"], row["low"], row["close"], row["volume"]]
+                    price_row = [
+                        row["exchange"],
+                        row["instrument"],
+                        row["ts"],
+                        row["open"],
+                        row["high"],
+                        row["low"],
+                        row["close"],
+                        row["volume"],
+                    ]
                 elif sink == "pnl_prod":
                     pnl_prod_rows.append(row["_row"])
                 elif sink == "pnl_real_trade":
@@ -660,7 +792,11 @@ def run() -> None:
             # If any insert fails the exception propagates here — consumer exits and
             # restarts from this candle's offset, replaying with the live Kafka price.
             _flush_candle(
-                consumer, price_row, pnl_prod_rows, pnl_real_trade_rows, pnl_bt_rows,
+                consumer,
+                price_row,
+                pnl_prod_rows,
+                pnl_real_trade_rows,
+                pnl_bt_rows,
                 expected_prod=prod_fetched,
                 expected_bt=bt_fetched,
                 expected_real_trade=rt_fetched,
@@ -668,8 +804,12 @@ def run() -> None:
             emit_candle_lag(candle.ts, cw_client, sink_label)
             logger.info(
                 "Flushed candle %s ts=%s price=%s prod=%d rt=%d bt=%d",
-                candle.instrument, candle.ts,
-                price_row is not None, len(pnl_prod_rows), len(pnl_real_trade_rows), len(pnl_bt_rows),
+                candle.instrument,
+                candle.ts,
+                price_row is not None,
+                len(pnl_prod_rows),
+                len(pnl_real_trade_rows),
+                len(pnl_bt_rows),
             )
 
     except Exception:
