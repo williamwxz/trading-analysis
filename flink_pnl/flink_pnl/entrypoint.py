@@ -5,8 +5,8 @@ import os
 
 from pyflink.common.configuration import Configuration
 from pyflink.common.serialization import SimpleStringSchema
-from pyflink.datastream import CheckpointingMode, StreamExecutionEnvironment
-from pyflink.datastream.connectors.kafka import FlinkKafkaConsumer
+from pyflink.datastream import CheckpointingMode, StreamExecutionEnvironment, WatermarkStrategy
+from pyflink.datastream.connectors.kafka import KafkaOffsetsInitializer, KafkaSource
 
 from flink_pnl.pnl_job import PnlProcessFunction
 
@@ -32,22 +32,19 @@ def build_env() -> StreamExecutionEnvironment:
     return env
 
 
-def build_kafka_source(env: StreamExecutionEnvironment) -> FlinkKafkaConsumer:
+def build_kafka_source() -> KafkaSource:
     brokers = os.environ["REDPANDA_BROKERS"]
     group_id = os.environ.get("KAFKA_GROUP_ID", "flink-pnl-consumer-v2")
 
-    props = {
-        "bootstrap.servers": brokers,
-        "group.id": group_id,
-        "auto.offset.reset": "latest",
-    }
-
-    source = FlinkKafkaConsumer(
-        topics=TOPIC,
-        deserialization_schema=SimpleStringSchema(),
-        properties=props,
+    return (
+        KafkaSource.builder()
+        .set_bootstrap_servers(brokers)
+        .set_topics(TOPIC)
+        .set_group_id(group_id)
+        .set_starting_offsets(KafkaOffsetsInitializer.latest())
+        .set_value_only_deserializer(SimpleStringSchema())
+        .build()
     )
-    return source
 
 
 def main() -> None:
@@ -56,8 +53,8 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     env = build_env()
-    source = build_kafka_source(env)
-    stream = env.add_source(source)
+    source = build_kafka_source()
+    stream = env.from_source(source, WatermarkStrategy.no_watermarks(), "Kafka Source")
     stream.process(PnlProcessFunction())
     env.execute("flink-pnl-job")
 
