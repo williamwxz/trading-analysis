@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 TOPIC = "binance.price.ticks"
 CHECKPOINT_INTERVAL_MS = 60_000
-CHECKPOINT_URI = "s3://trading-analysis-data-v2/flink-pnl-checkpoints/"
+CHECKPOINT_URI = "s3://trading-analysis-flink-checkpoints-068704208855/checkpoints/"
 
 
 def build_env() -> StreamExecutionEnvironment:

@@ -1401,7 +1401,7 @@ resource "aws_cloudwatch_metric_alarm" "pnl_consumer_crash" {
 # ─────────────────────────────────────────────────────────────────────────────
 
 resource "aws_s3_bucket" "flink_pnl_checkpoints" {
-  bucket = "trading-analysis-data-v2"
+  bucket = "trading-analysis-flink-checkpoints-068704208855"
   tags   = local.common_tags
 }
 
@@ -1459,7 +1459,7 @@ resource "aws_iam_role_policy" "flink_pnl_s3" {
       Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
       Resource = [
         aws_s3_bucket.flink_pnl_checkpoints.arn,
-        "${aws_s3_bucket.flink_pnl_checkpoints.arn}/flink-pnl-checkpoints/*",
+        "${aws_s3_bucket.flink_pnl_checkpoints.arn}/checkpoints/*",
       ]
     }]
   })
