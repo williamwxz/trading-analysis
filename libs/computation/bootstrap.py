@@ -57,6 +57,20 @@ class WalkRow:
     revision_ts: datetime = field(default_factory=lambda: _DATETIME_MIN)
 
 
+def _fetch_active_strategy_table_names(
+    history_table: str,
+    window_start_str: str,
+    end_str: str,
+) -> list[str]:
+    """Return distinct strategy_table_names active in [window_start, end]."""
+    sql = f"""\
+SELECT DISTINCT strategy_table_name
+FROM {history_table}
+WHERE ts >= '{window_start_str}' AND ts <= '{end_str}'
+"""
+    return [r["strategy_table_name"] for r in query_dicts(sql)]
+
+
 def fetch_bootstrap_seeds(
     pnl_table: str,
     history_table: str,
@@ -73,94 +87,97 @@ def fetch_bootstrap_seeds(
           real_trade:  latest revision with revision_ts <= start_ts
       - bar_ts / revision_ts: populated for real_trade (used by revision guard); datetime.min for prod/bt
 
+    Queries are issued per strategy_table_name to keep each query small and avoid
+    large in-memory aggregations across all strategies at once.
+
     Args:
         pnl_table:     e.g. 'analytics.strategy_pnl_1min_prod_v2'
         history_table: e.g. 'analytics.strategy_output_history_v2'
-        start_ts:      reference_ts - 3 days
+        start_ts:      reference_ts - 48h
         real_trade:    True to use revision_ts-based position resolution
     """
     start_str = start_ts.strftime("%Y-%m-%d %H:%M:%S")
     # 1-day lookback: covers the longest bar timeframe (1d), so the previous bar for
     # any active strategy always falls within this window. Retired strategies have no
     # active anchor regardless of window size.
-    seed_window_start = (start_ts - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+    seed_window_start = start_ts - timedelta(days=1)
+    seed_window_start_str = seed_window_start.strftime("%Y-%m-%d %H:%M:%S")
 
-    # ── PnL + price baseline ──────────────────────────────────────────────────
-    # Keyed by strategy_instance_id — each instance is an independent tracking unit.
-    # LIMIT 1 BY uses the sort index (strategy_instance_id, ts, updated_at DESC) to
-    # pick the latest row per strategy without an in-memory sort of the full window.
-    pnl_sql = f"""\
+    strategy_table_names = _fetch_active_strategy_table_names(
+        history_table, seed_window_start_str, start_str
+    )
+
+    pnl_seeds: dict[str, dict] = {}
+    pos_rows: dict[str, dict] = {}
+
+    for stn in strategy_table_names:
+        # ── PnL + price baseline per strategy_table_name ─────────────────────
+        pnl_sql = f"""\
 SELECT
-    strategy_table_name,
     strategy_instance_id,
     cumulative_pnl,
     price
 FROM {pnl_table}
-WHERE ts >= '{seed_window_start}' AND ts < '{start_str}'
+WHERE strategy_table_name = '{stn}'
+  AND ts >= '{seed_window_start_str}'
+  AND ts < '{start_str}'
 ORDER BY strategy_instance_id, ts DESC, updated_at DESC
 LIMIT 1 BY strategy_instance_id
 """
-    pnl_seeds: dict[str, dict] = {}
-    for row in query_dicts(pnl_sql):
-        pnl_seeds[row["strategy_instance_id"]] = {
-            "strategy_table_name": row["strategy_table_name"],
-            "pnl": float(row["cumulative_pnl"] or 0.0),
-            "price": float(row["price"]),
-        }
+        for row in query_dicts(pnl_sql):
+            pnl_seeds[row["strategy_instance_id"]] = {
+                "strategy_table_name": stn,
+                "pnl": float(row["cumulative_pnl"] or 0.0),
+                "price": float(row["price"]),
+            }
 
-    # ── Position ──────────────────────────────────────────────────────────────
-    if real_trade:
-        # Latest revision whose revision_ts <= start_ts per strategy_instance_id.
-        # ts >= seed_window_start prunes partitions via the primary key so ClickHouse
-        # doesn't scan the full table. revision_ts always trails ts by at most a few
-        # minutes, so no active strategy's latest bar falls outside the 7-day window.
-        pos_sql = f"""\
+        # ── Position per strategy_table_name ─────────────────────────────────
+        if real_trade:
+            pos_sql = f"""\
 SELECT
-    strategy_table_name,
     strategy_instance_id,
     ts AS bar_ts,
     max(revision_ts) AS max_revision_ts,
     argMax(row_json, revision_ts) AS row_json
 FROM {history_table}
-WHERE ts >= '{seed_window_start}'
+WHERE strategy_table_name = '{stn}'
+  AND ts >= '{seed_window_start_str}'
   AND ts <= '{start_str}'
   AND revision_ts <= '{start_str}'
-GROUP BY strategy_table_name, strategy_instance_id, ts
+GROUP BY strategy_instance_id, ts
 ORDER BY strategy_instance_id, ts DESC
 LIMIT 1 BY strategy_instance_id
 """
-        pos_rows: dict[str, dict] = {}
-        for row in query_dicts(pos_sql):
-            rj = json.loads(row["row_json"])
-            pos_rows[row["strategy_instance_id"]] = {
-                "strategy_table_name": row["strategy_table_name"],
-                "position": float(rj.get("position", 0.0)),
-                "bar_ts": row["bar_ts"],
-                "revision_ts": row["max_revision_ts"],
-            }
-    else:
-        # Prod/bt: latest bar ts <= start_ts, first revision only, per strategy_instance_id.
-        pos_sql = f"""\
+            for row in query_dicts(pos_sql):
+                rj = json.loads(row["row_json"])
+                pos_rows[row["strategy_instance_id"]] = {
+                    "strategy_table_name": stn,
+                    "position": float(rj.get("position", 0.0)),
+                    "bar_ts": row["bar_ts"],
+                    "revision_ts": row["max_revision_ts"],
+                }
+        else:
+            pos_sql = f"""\
 SELECT
-    strategy_table_name,
     strategy_instance_id,
     argMin(row_json, revision_ts) AS row_json,
     max(ts) AS max_ts
 FROM {history_table}
-WHERE ts <= '{start_str}'
-GROUP BY strategy_table_name, strategy_instance_id
+WHERE strategy_table_name = '{stn}'
+  AND ts >= '{seed_window_start_str}'
+  AND ts <= '{start_str}'
+GROUP BY strategy_instance_id
 ORDER BY strategy_instance_id, max_ts DESC
 LIMIT 1 BY strategy_instance_id
 """
-        pos_rows = {}
-        for row in query_dicts(pos_sql):
-            rj = json.loads(row["row_json"])
-            pos_rows[row["strategy_instance_id"]] = {
-                "strategy_table_name": row["strategy_table_name"],
-                "position": float(rj.get("position", 0.0)),
-                "bar_ts": _DATETIME_MIN,
-                "revision_ts": _DATETIME_MIN,
-            }
+            for row in query_dicts(pos_sql):
+                rj = json.loads(row["row_json"])
+                pos_rows[row["strategy_instance_id"]] = {
+                    "strategy_table_name": stn,
+                    "position": float(rj.get("position", 0.0)),
+                    "bar_ts": _DATETIME_MIN,
+                    "revision_ts": _DATETIME_MIN,
+                }
 
     # ── Merge — keyed by strategy_instance_id ─────────────────────────────────
     all_siids = set(pnl_seeds) | set(pos_rows)
@@ -182,20 +199,19 @@ LIMIT 1 BY strategy_instance_id
         )
 
     # ── Completeness check ────────────────────────────────────────────────────
-    # Every strategy_instance_id with history before start_ts must appear in seeds.
-    # Brand-new instances (first bar after start_ts) are excluded — they'll be
-    # lazy-seeded on first appearance in the live loop.
+    # Count distinct strategy_instance_ids active in the seed window — scoped to
+    # the same 1-day window so this doesn't scan the full table.
     expected_sql = f"""\
 SELECT count(DISTINCT strategy_instance_id) AS cnt
 FROM {history_table}
-WHERE ts < '{start_str}'
+WHERE ts >= '{seed_window_start_str}' AND ts <= '{start_str}'
 """
     expected_count = int((query_dicts(expected_sql) or [{"cnt": 0}])[0]["cnt"])
     seed_count = len(seeds)
     if seed_count < expected_count:
         raise RuntimeError(
             f"Bootstrap completeness check failed: {seed_count} seeds < "
-            f"{expected_count} strategy_instance_ids with history before {start_str} in {history_table}. "
+            f"{expected_count} strategy_instance_ids active in seed window in {history_table}. "
             "Some strategies have no pnl rows in the walk window — cannot safely resume."
         )
 
@@ -235,22 +251,34 @@ def fetch_walk_rows(
     start_str = start_ts.strftime("%Y-%m-%d %H:%M:%S")
     ref_str = reference_ts.strftime("%Y-%m-%d %H:%M:%S")
 
-    # ── Fetch stored PnL rows — use stored price and position for chain consistency ──
-    pnl_sql = f"""\
+    # ── Discover active strategy_table_names in the walk window ──────────────
+    strategy_table_names = _fetch_active_strategy_table_names(
+        history_table, start_str, ref_str
+    )
+    if not strategy_table_names:
+        return []
+
+    # ── Fetch stored PnL rows per strategy_table_name ────────────────────────
+    pnl_rows: list[dict] = []
+    for stn in strategy_table_names:
+        stn_sql = f"""\
 SELECT
-    strategy_table_name,
     strategy_instance_id,
     ts,
     cumulative_pnl,
     price,
     position
 FROM {pnl_table}
-WHERE ts >= '{start_str}'
+WHERE strategy_table_name = '{stn}'
+  AND ts >= '{start_str}'
   AND ts < '{ref_str}'
 ORDER BY strategy_instance_id, ts ASC, updated_at DESC
 LIMIT 1 BY strategy_instance_id, ts
 """
-    pnl_rows = query_dicts(pnl_sql)
+        for row in query_dicts(stn_sql):
+            row["strategy_table_name"] = stn
+            pnl_rows.append(row)
+
     if not pnl_rows:
         return []
 
@@ -259,30 +287,28 @@ LIMIT 1 BY strategy_instance_id, ts
     # Only real_trade needs bar_ts/revision_ts to seed AnchorState's revision guard.
     rt_guard: dict[str, list[tuple[datetime, datetime, datetime]]] = {}
     if real_trade:
-        # All revisions in the walk window, sorted by revision_ts per siid.
-        # ts lower-bound prunes partitions via primary key (revision_ts is not the
-        # primary key so filtering on it alone causes a full-table scan).
-        # revision_ts never lags ts by more than a few minutes, so ts >= start - 3d
-        # safely covers the same window as revision_ts >= start - 2d.
-        ts_floor_str = (start_ts - timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
-        rev_floor_str = (start_ts - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
-        hist_sql = f"""\
+        # Queried per strategy_table_name to keep each query small.
+        # ts bounds use the walk window directly since strategy_table_name is the
+        # sort key prefix — no extra floor needed for partition pruning.
+        for stn in strategy_table_names:
+            hist_sql = f"""\
 SELECT
     strategy_instance_id,
     revision_ts,
     argMax(ts, ts) AS bar_ts
 FROM {history_table}
-WHERE ts >= '{ts_floor_str}'
-  AND revision_ts >= '{rev_floor_str}'
+WHERE strategy_table_name = '{stn}'
+  AND ts >= '{start_str}'
+  AND ts <= '{ref_str}'
   AND revision_ts < '{ref_str}'
 GROUP BY strategy_instance_id, revision_ts
 ORDER BY strategy_instance_id, revision_ts
 """
-        for row in query_dicts(hist_sql):
-            siid = row["strategy_instance_id"]
-            rt_guard.setdefault(siid, []).append(
-                (row["revision_ts"], row["bar_ts"], row["revision_ts"])
-            )
+            for row in query_dicts(hist_sql):
+                siid = row["strategy_instance_id"]
+                rt_guard.setdefault(siid, []).append(
+                    (row["revision_ts"], row["bar_ts"], row["revision_ts"])
+                )
 
     def _get_rt_guard(siid: str, row_ts: datetime) -> tuple[datetime, datetime]:
         """Return (bar_ts, revision_ts) of latest revision with revision_ts <= row_ts."""
