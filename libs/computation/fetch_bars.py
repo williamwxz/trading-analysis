@@ -29,6 +29,9 @@ def _parse_ts(s: str) -> datetime:
     return datetime.strptime(str(s)[:19], "%Y-%m-%d %H:%M:%S")
 
 
+_ANCHOR_LOOKBACK_DAYS = 1
+
+
 def fetch_anchors(
     target_table: str,
     underlying: str,
@@ -39,11 +42,20 @@ def fetch_anchors(
 
     Returns {strategy_table_name: (anchor_pnl, anchor_price, anchor_position)}.
     before_ts: if provided, only rows with ts < before_ts are considered.
+
+    A 1-day lower bound on ts is always applied so ClickHouse can prune partitions
+    via the (strategy_table_name, ts) sort key rather than scanning the full table.
+    Strategies inactive for >1 day have no active position and will be zero-seeded
+    by the caller's lazy-seed path when they reappear.
     """
-    ts_filter = ""
+    upper_ts = before_ts if before_ts is not None else datetime.utcnow()
+    lower_ts = upper_ts - timedelta(days=_ANCHOR_LOOKBACK_DAYS)
+    lower_str = lower_ts.strftime("%Y-%m-%d %H:%M:%S")
+
+    ts_filter = f"  AND ts >= toDateTime('{lower_str}')\n"
     if before_ts is not None:
         ts_str = before_ts.strftime("%Y-%m-%d %H:%M:%S")
-        ts_filter = f"  AND ts < toDateTime('{ts_str}')\n"
+        ts_filter += f"  AND ts < toDateTime('{ts_str}')\n"
     sql = f"""\
 SELECT
     strategy_table_name,

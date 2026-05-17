@@ -64,7 +64,7 @@ Binance WebSocket (1m closed candles)
     → analytics.strategy_pnl_1hour_prod_v2  (hourly snapshot upsert on each flush)
 ```
 
-**Batch path** (Dagster, every ~5 min or daily):
+**Batch path** (Dagster, every ~5 min):
 ```
 Binance Futures REST API (every 5 min, CCXT)
     → analytics.futures_price_1min
@@ -72,7 +72,7 @@ Binance Futures REST API (every 5 min, CCXT)
 External strategy service (push)
     → analytics.strategy_output_history_v2 / _bt_v2
 
-PnL refresh assets (live: every ~5 min, daily: partitioned backfill)
+PnL refresh assets (full recompute, every ~5 min, rolling 7-day window)
     → analytics.strategy_pnl_1min_{prod,bt,real_trade}_v2
 
 Rollup asset (hourly, argMax aggregation)
@@ -89,32 +89,25 @@ Rollup asset (hourly, argMax aggregation)
 
 **Active assets** (registered in `definitions/__init__.py`):
 - `binance_futures_backfill` — daily partitioned market data
-- `pnl_prod_v2_daily` — production PnL daily backfill
-- `pnl_real_trade_v2_daily` — real trade PnL daily backfill
-- `pnl_bt_v2_daily` — backtest PnL daily backfill
+- `pnl_prod_v2_full` — production PnL full recompute (rolling 7-day window)
+- `pnl_real_trade_v2_full` — real trade PnL full recompute (rolling 7-day window)
+- `pnl_bt_v2_full` — backtest PnL full recompute (rolling 7-day window)
 - `clickhouse_connectivity_check` — infra health check
 - `postgres_cleanup` — Dagster metadata DB cleanup
 
-**Not registered** (defined in `pnl_strategy_v2.py` but inactive): `pnl_bt_v2_live_asset`, `pnl_prod_v2_live_asset`, `pnl_real_trade_v2_live_asset` — live paths not currently active.
+### PnL Refresh Pattern (Full Recompute Assets)
 
-### Dual Asset Strategy
+Each `pnl_*_v2_full` asset runs every ~5 min and recomputes a rolling window ending at now:
 
-Every data source has two complementary assets:
-- **Partitioned (backfill)**: `DailyPartitionsDefinition`, idempotent DELETE+INSERT, triggered manually or via backfill UI
-- **Unpartitioned (full recompute)**: `pnl_*_v2_full` assets, process all underlyings from start date to now in `_CHUNK_DAYS=7` day chunks
+1. **Compute window**: `window_start = max(ts) - 7 days` (truncated to midnight); `end = now`
+2. **Fetch anchors**: `fetch_anchors()` reads the last committed row per strategy from the target table just before `window_start` (1-day lookback)
+3. **Delete window**: idempotent DELETE WHERE ts >= window_start AND underlying = X
+4. **Fetch bars**: `fetch_new_bars_*()` queries `strategy_output_history_v2` for bars in the window
+5. **Fetch prices**: `fetch_prices_multi()` reads `analytics.futures_price_1min` — prices ALWAYS come from here, never from `row_json`
+6. **Compute PnL**: `compute_*_pnl()` expands each bar into 1-min rows, chaining anchors forward
+7. **Insert rows**: `insert_rows()` writes to the target table
 
-Example: `binance_futures_backfill` (daily partitions from 2024-01-01).
-
-### PnL Refresh Pattern (Daily Partitioned Assets)
-
-1. **Delete partition**: idempotent DELETE WHERE ts in [start, end) AND source=label
-2. **Fetch anchors**: `fetch_anchors()` reads the last committed row per strategy from the target table (previous day's tail)
-3. **Fetch bars**: `fetch_new_bars_*()` queries `strategy_output_history_v2` for bars in the partition window
-4. **Fetch prices**: `fetch_prices_multi()` reads `analytics.futures_price_1min` — prices ALWAYS come from here, never from `row_json`
-5. **Compute PnL**: `compute_*_pnl()` expands each bar into 1-min rows, chaining anchors forward
-6. **Insert rows**: `insert_rows()` writes to the target table
-
-`_CHUNK_DAYS = 7` in `pnl_strategy_v2.py` controls how many days the full-recompute path processes per chunk. The daily partitioned path processes exactly one day per run.
+`_CHUNK_DAYS = 7` in `pnl_strategy_v2.py` controls the rolling window size.
 
 ### Why Python for PnL (not SQL)
 

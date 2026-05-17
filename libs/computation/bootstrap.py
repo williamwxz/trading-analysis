@@ -80,9 +80,10 @@ def fetch_bootstrap_seeds(
         real_trade:    True to use revision_ts-based position resolution
     """
     start_str = start_ts.strftime("%Y-%m-%d %H:%M:%S")
-    # 7-day lookback window: avoids full-table aggregation on 45M+ row tables.
-    # All active strategies appear within 7 days; retired ones have no active anchor.
-    seed_window_start = (start_ts - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+    # 1-day lookback: covers the longest bar timeframe (1d), so the previous bar for
+    # any active strategy always falls within this window. Retired strategies have no
+    # active anchor regardless of window size.
+    seed_window_start = (start_ts - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
 
     # ── PnL + price baseline ──────────────────────────────────────────────────
     # Keyed by strategy_instance_id — each instance is an independent tracking unit.
@@ -122,6 +123,7 @@ SELECT
     argMax(row_json, revision_ts) AS row_json
 FROM {history_table}
 WHERE ts >= '{seed_window_start}'
+  AND ts <= '{start_str}'
   AND revision_ts <= '{start_str}'
 GROUP BY strategy_table_name, strategy_instance_id, ts
 ORDER BY strategy_instance_id, ts DESC

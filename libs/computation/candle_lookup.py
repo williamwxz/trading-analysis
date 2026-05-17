@@ -196,9 +196,10 @@ SELECT
     max(revision_ts) AS max_revision_ts,
     argMax(row_json, revision_ts) AS row_json
 FROM analytics.strategy_output_history_v2
-WHERE underlying = '{underlying}'
+PREWHERE underlying = '{underlying}'
+WHERE ts >= '{ts_str}'::DateTime - INTERVAL {_LOOKBACK}
+  AND ts <= '{ts_str}'::DateTime
   AND revision_ts <= '{ts_str}'
-  AND ts >= '{ts_str}'::DateTime - INTERVAL {_LOOKBACK}
 GROUP BY
     strategy_table_name, strategy_instance_id, strategy_id, strategy_name,
     underlying, config_timeframe, weighting, ts
