@@ -295,7 +295,7 @@ def _bootstrap_state(
         # Use previous price as fallback when current price is missing (0.0 from coalesce).
         effective_price = wr.price if wr.price != 0.0 else pp
 
-        if pp != 0.0 and effective_price != 0.0:
+        if pp != 0.0 and effective_price != 0.0 and wr.cumulative_pnl != 0.0:
             recomputed = pp_pnl + wr.position * (effective_price - pp) / pp
             deviation = abs(recomputed - wr.cumulative_pnl)
             if deviation > _PNL_CRASH_TOLERANCE:
