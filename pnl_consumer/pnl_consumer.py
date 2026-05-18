@@ -43,11 +43,13 @@ from libs.computation import (
     fetch_strategies_for_candle,
     fetch_walk_rows,
 )
+from streaming.binance_ws_consumer import INSTRUMENTS
 from streaming.models import CandleEvent
 
 logger = logging.getLogger(__name__)
 
 TOPIC = "binance.price.ticks"
+_UNDERLYINGS = [inst.removesuffix("USDT") for inst in INSTRUMENTS]
 _DEFAULT_GROUP_ID = "flink-pnl-consumer"
 
 _SEED_HOURS = 48  # seed anchor from last row before ref_ts - 48h (covers all timeframes incl 1d bars)
@@ -182,33 +184,33 @@ def peek_reference_ts(
 def _fetch_walk_anchors(
     pnl_table: str,
     walk_ts: datetime,
+    underlyings: "list[str]",
 ) -> "tuple[dict[str, float], dict[str, float]]":
     """Return (pnl, price) dicts keyed by strategy_table_name for the last row before walk_ts.
 
-    Used as the prev_pnl/prev_price baseline for the walk verification loop.
-    Queried at walk_ts (not seed_ts) so the anchor matches the stored rows written by Dagster,
-    not the potentially stale consumer output from 48h ago.
+    Queries per underlying so ClickHouse prunes to one instrument's rows at a time
+    (each scan ~30-50K rows, well under 50MB). The 2-day window covers 1d-bar strategies
+    whose last bar may be up to 24h+ ago. underlyings comes from the seeds already
+    discovered by fetch_bootstrap_seeds so no extra discovery query is needed.
     """
     from libs.clickhouse_client import query_dicts
 
     ts_str = walk_ts.strftime("%Y-%m-%d %H:%M:%S")
-    # 2-day lower bound keeps the scan narrow. LIMIT 1 BY picks the latest row per
-    # strategy_table_name within the window; any strategy with no row in the past 2 days
-    # has no active anchor and will be seeded from zero during the walk.
     window_start_str = (walk_ts - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
-    sql = f"""\
+    pnl_map: dict[str, float] = {}
+    price_map: dict[str, float] = {}
+    for underlying in underlyings:
+        sql = f"""\
 SELECT strategy_table_name, cumulative_pnl, price
 FROM {pnl_table}
-WHERE ts >= '{window_start_str}' AND ts < '{ts_str}'
+WHERE underlying = '{underlying}'
+  AND ts >= '{window_start_str}' AND ts < '{ts_str}'
 ORDER BY strategy_table_name, ts DESC, updated_at DESC
 LIMIT 1 BY strategy_table_name
 """
-    pnl_map: dict[str, float] = {}
-    price_map: dict[str, float] = {}
-    for row in query_dicts(sql):
-        stn = row["strategy_table_name"]
-        pnl_map[stn] = float(row["cumulative_pnl"] or 0.0)
-        price_map[stn] = float(row["price"])
+        for row in query_dicts(sql):
+            pnl_map[row["strategy_table_name"]] = float(row["cumulative_pnl"] or 0.0)
+            price_map[row["strategy_table_name"]] = float(row["price"])
     return pnl_map, price_map
 
 
@@ -241,7 +243,7 @@ def _bootstrap_state(
     # Walk pnl/price anchors: last pnl row per strategy just before walk_ts.
     # This ensures prev_pnl and prev_price agree with the stored rows in [walk_ts, ref_ts),
     # preventing mismatch when Dagster refreshed rows in the 46h gap between seed_ts and walk_ts.
-    walk_anchor_pnl, walk_anchor_price = _fetch_walk_anchors(cfg["pnl_table"], walk_ts)
+    walk_anchor_pnl, walk_anchor_price = _fetch_walk_anchors(cfg["pnl_table"], walk_ts, _UNDERLYINGS)
 
     state = AnchorState()
     for seed in seeds:
