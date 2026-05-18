@@ -969,14 +969,29 @@ resource "aws_iam_role_policy" "ecs_task_policy" {
 # Does NOT grant Cost Explorer (ce:*) access — billing data comes from CloudWatch.
 # ─────────────────────────────────────────────────────────────────────────────
 
-resource "aws_iam_user" "grafana_cloudwatch" {
+# Grafana Cloud assumes this role via cross-account trust (Grafana Labs AWS account: 008923505280).
+# In Grafana UI: Connections → CloudWatch datasource → Auth: AssumeRole → ARN: output below.
+resource "aws_iam_role" "grafana_cloudwatch" {
   name = "${local.name_prefix}-grafana-cloudwatch"
   tags = local.common_tags
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::008923505280:user/hg-aws-plugins-creds_prod-ap-northeast-0"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
 }
 
-resource "aws_iam_user_policy" "grafana_cloudwatch" {
-  name = "cloudwatch-billing-read"
-  user = aws_iam_user.grafana_cloudwatch.name
+resource "aws_iam_role_policy" "grafana_cloudwatch" {
+  name = "cloudwatch-read"
+  role = aws_iam_role.grafana_cloudwatch.id
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -987,43 +1002,26 @@ resource "aws_iam_user_policy" "grafana_cloudwatch" {
           "cloudwatch:GetMetricStatistics",
           "cloudwatch:ListMetrics",
           "cloudwatch:GetMetricData",
+          "cloudwatch:DescribeAlarmsForMetric",
+          "cloudwatch:DescribeAlarmHistory",
+          "cloudwatch:DescribeAlarms",
+          "cloudwatch:ListTagsForResource",
+          "cloudwatch:GetInsightRuleReport",
+          "logs:DescribeLogGroups",
+          "logs:DescribeLogStreams",
+          "logs:GetLogEvents",
+          "logs:StartQuery",
+          "logs:StopQuery",
+          "logs:GetQueryResults",
+          "logs:GetLogGroupFields",
+          "ec2:DescribeTags",
+          "ec2:DescribeInstances",
+          "ec2:DescribeRegions",
+          "tag:GetResources",
         ]
         Resource = "*"
-        Condition = {
-          StringEquals = {
-            "cloudwatch:namespace" = ["AWS/Billing", "ECS/ContainerInsights", "trading-analysis"]
-          }
-        }
       }
     ]
-  })
-}
-
-resource "aws_iam_access_key" "grafana_cloudwatch" {
-  user = aws_iam_user.grafana_cloudwatch.name
-}
-
-# Store credentials in Secrets Manager so they are never exposed as Terraform outputs.
-# Retrieve after terraform apply:
-#   aws secretsmanager get-secret-value \
-#     --secret-id trading-analysis/grafana-cloudwatch \
-#     --region ap-northeast-1 \
-#     --query SecretString --output text
-resource "aws_secretsmanager_secret" "grafana_cloudwatch" {
-  name        = "${local.name_prefix}/grafana-cloudwatch"
-  description = "Grafana Cloud CloudWatch datasource credentials (access key ID + secret)"
-  tags        = local.common_tags
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-resource "aws_secretsmanager_secret_version" "grafana_cloudwatch" {
-  secret_id = aws_secretsmanager_secret.grafana_cloudwatch.id
-  secret_string = jsonencode({
-    access_key_id     = aws_iam_access_key.grafana_cloudwatch.id
-    secret_access_key = aws_iam_access_key.grafana_cloudwatch.secret
   })
 }
 
@@ -1560,7 +1558,7 @@ output "nat_static_ip" {
   description = "Static IP (outbound ClickHouse allowlist)"
 }
 
-output "grafana_cloudwatch_secret_arn" {
-  value       = aws_secretsmanager_secret.grafana_cloudwatch.arn
-  description = "ARN of the Secrets Manager secret holding Grafana CloudWatch datasource credentials"
+output "grafana_cloudwatch_role_arn" {
+  value       = aws_iam_role.grafana_cloudwatch.arn
+  description = "ARN of the IAM role Grafana Cloud assumes for CloudWatch datasource access"
 }
