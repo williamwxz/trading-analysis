@@ -578,12 +578,15 @@ jobs:
           set -eu
           [ -n "$IMAGE_TAG" ] || { echo "ERROR: IMAGE_TAG is empty — build job output missing"; exit 1; }
           IMAGE_URI=$REGISTRY/trading-analysis-flink-pnl:$IMAGE_TAG
-          TASK_DEF=$(aws ecs describe-task-definition \
-            --task-definition trading-analysis-flink-pnl \
-            --region $DEPLOY_REGION \
-            --query taskDefinition \
-            --output json)
-          NEW_TASK=$(echo "$TASK_DEF" | python3 -c "
+          for CURVE in price prod real-trade bt; do
+            TASK_FAMILY="trading-analysis-flink-pnl-${CURVE}"
+            echo "==> Deploying $TASK_FAMILY"
+            TASK_DEF=$(aws ecs describe-task-definition \
+              --task-definition "$TASK_FAMILY" \
+              --region $DEPLOY_REGION \
+              --query taskDefinition \
+              --output json)
+            NEW_TASK=$(echo "$TASK_DEF" | python3 -c "
           import sys, json
           img = sys.argv[1]
           td = json.load(sys.stdin)
@@ -593,22 +596,23 @@ jobs:
           for k in ('taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy'):
               td.pop(k, None)
           print(json.dumps(td))
-          " "$IMAGE_URI")
-          NEW_ARN=$(aws ecs register-task-definition \
-            --cli-input-json "$NEW_TASK" \
-            --region $DEPLOY_REGION \
-            --query taskDefinition.taskDefinitionArn \
-            --output text)
-          [ -n "$NEW_ARN" ] || { echo "ERROR: register-task-definition returned empty ARN"; exit 1; }
-          echo "Registered: $NEW_ARN"
-          aws ecs update-service \
-            --cluster $ECS_CLUSTER \
-            --service trading-analysis-flink-pnl \
-            --task-definition "$NEW_ARN" \
-            --force-new-deployment \
-            --region $DEPLOY_REGION \
-            --output json > /dev/null
-          echo "flink-pnl deploy triggered (desired_count=0 by default — service update queued)"
+            " "$IMAGE_URI")
+            NEW_ARN=$(aws ecs register-task-definition \
+              --cli-input-json "$NEW_TASK" \
+              --region $DEPLOY_REGION \
+              --query taskDefinition.taskDefinitionArn \
+              --output text)
+            [ -n "$NEW_ARN" ] || { echo "ERROR: register-task-definition returned empty ARN for $TASK_FAMILY"; exit 1; }
+            echo "Registered: $NEW_ARN"
+            aws ecs update-service \
+              --cluster $ECS_CLUSTER \
+              --service "trading-analysis-flink-pnl-${CURVE}" \
+              --task-definition "$NEW_ARN" \
+              --force-new-deployment \
+              --region $DEPLOY_REGION \
+              --output json > /dev/null
+            echo "flink-pnl-${CURVE} deploy triggered"
+          done
 
   terraform:
     runs-on: ubuntu-latest

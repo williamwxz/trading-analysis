@@ -55,7 +55,47 @@ locals {
     Environment = var.environment
     ManagedBy   = "terraform"
   }
+
+  flink_pnl_sinks = {
+    price = {
+      enable_price      = "false"
+      enable_prod       = "false"
+      enable_real_trade = "false"
+      enable_bt         = "false"
+      group_id          = "flink-pnl-consumer-price"
+      desired_count     = 0
+      dry_run           = "true"
+    }
+    prod = {
+      enable_price      = "false"
+      enable_prod       = "true"
+      enable_real_trade = "false"
+      enable_bt         = "false"
+      group_id          = "flink-pnl-consumer-prod"
+      desired_count     = 0
+      dry_run           = "true"
+    }
+    real-trade = {
+      enable_price      = "false"
+      enable_prod       = "false"
+      enable_real_trade = "true"
+      enable_bt         = "false"
+      group_id          = "flink-pnl-consumer-v2"
+      desired_count     = 1
+      dry_run           = "true"
+    }
+    bt = {
+      enable_price      = "false"
+      enable_prod       = "false"
+      enable_real_trade = "false"
+      enable_bt         = "true"
+      group_id          = "flink-pnl-consumer-bt"
+      desired_count     = 0
+      dry_run           = "true"
+    }
+  }
 }
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1464,13 +1504,15 @@ resource "aws_iam_role_policy" "flink_pnl_s3" {
 }
 
 resource "aws_cloudwatch_log_group" "flink_pnl" {
-  name              = "/ecs/${local.name_prefix}-flink-pnl"
+  for_each          = local.flink_pnl_sinks
+  name              = "/ecs/${local.name_prefix}-flink-pnl-${each.key}"
   retention_in_days = 7
   tags              = local.common_tags
 }
 
 resource "aws_ecs_task_definition" "flink_pnl" {
-  family                   = "${local.name_prefix}-flink-pnl"
+  for_each                 = local.flink_pnl_sinks
+  family                   = "${local.name_prefix}-flink-pnl-${each.key}"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = 1024
@@ -1491,20 +1533,20 @@ resource "aws_ecs_task_definition" "flink_pnl" {
       { name = "CLICKHOUSE_USER",        value = "dev_ro3" },
       { name = "CLICKHOUSE_SECURE",      value = "true" },
       { name = "REDPANDA_BROKERS",       value = "redpanda.${local.name_prefix}.local:9092" },
-      { name = "KAFKA_GROUP_ID",         value = "flink-pnl-consumer-v2" },
+      { name = "KAFKA_GROUP_ID",         value = each.value.group_id },
       { name = "AWS_REGION",             value = var.aws_region },
-      { name = "ENABLE_PRICE_SINK",      value = "false" },
-      { name = "ENABLE_PROD_SINK",       value = "false" },
-      { name = "ENABLE_BT_SINK",         value = "false" },
-      { name = "ENABLE_REAL_TRADE_SINK", value = "true" },
-      { name = "DRY_RUN",                value = "true" },
+      { name = "ENABLE_PRICE_SINK",      value = each.value.enable_price },
+      { name = "ENABLE_PROD_SINK",       value = each.value.enable_prod },
+      { name = "ENABLE_BT_SINK",         value = each.value.enable_bt },
+      { name = "ENABLE_REAL_TRADE_SINK", value = each.value.enable_real_trade },
+      { name = "DRY_RUN",                value = each.value.dry_run },
     ]
     logConfiguration = {
       logDriver = "awslogs"
       options = {
-        "awslogs-group"         = aws_cloudwatch_log_group.flink_pnl.name
+        "awslogs-group"         = aws_cloudwatch_log_group.flink_pnl[each.key].name
         "awslogs-region"        = var.aws_region
-        "awslogs-stream-prefix" = "flink-pnl"
+        "awslogs-stream-prefix" = "flink-pnl-${each.key}"
       }
     }
   }])
@@ -1513,10 +1555,11 @@ resource "aws_ecs_task_definition" "flink_pnl" {
 }
 
 resource "aws_ecs_service" "flink_pnl" {
-  name            = "${local.name_prefix}-flink-pnl"
+  for_each        = local.flink_pnl_sinks
+  name            = "${local.name_prefix}-flink-pnl-${each.key}"
   cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.flink_pnl.arn
-  desired_count   = 1
+  task_definition = aws_ecs_task_definition.flink_pnl[each.key].arn
+  desired_count   = each.value.desired_count
 
   capacity_provider_strategy {
     capacity_provider = "FARGATE_SPOT"
@@ -1528,6 +1571,27 @@ resource "aws_ecs_service" "flink_pnl" {
     security_groups  = [aws_security_group.ecs_tasks.id]
     assign_public_ip = false
   }
+
+  tags = local.common_tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "flink_pnl_crash" {
+  for_each = local.flink_pnl_sinks
+
+  alarm_name          = "${local.name_prefix}-flink-pnl-${each.key}-crash-loop"
+  alarm_description   = "flink-pnl-${each.key} stopped >= 3 times in 10 min (crash loop)"
+  namespace           = "ECS/ContainerInsights"
+  metric_name         = "StoppedTaskCount"
+  dimensions = {
+    ClusterName = aws_ecs_cluster.main.name
+    ServiceName = aws_ecs_service.flink_pnl[each.key].name
+  }
+  statistic           = "Sum"
+  period              = 600
+  evaluation_periods  = 1
+  threshold           = 3
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
 
   tags = local.common_tags
 }
