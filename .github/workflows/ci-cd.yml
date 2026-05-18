@@ -669,18 +669,11 @@ jobs:
         env:
           GRAFANA_CLOUD_TOKEN: ${{ secrets.GRAFANA_CLOUD_TOKEN }}
           GRAFANA_CLOUD_URL: ${{ secrets.GRAFANA_CLOUD_URL }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
           set -eu
-          SECRET=$(aws secretsmanager get-secret-value \
-            --secret-id trading-analysis/grafana-cloudwatch \
-            --region ap-northeast-1 \
-            --query SecretString --output text)
-          CW_KEY_ID=$(echo "$SECRET" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_key_id'])")
-          CW_SECRET=$(echo "$SECRET" | python3 -c "import sys,json; print(json.load(sys.stdin)['secret_access_key'])")
 
           PAYLOAD=$(python3 -c "
-          import json, sys
+          import json
           print(json.dumps({
             'name': 'cloudwatch',
             'type': 'cloudwatch',
@@ -688,15 +681,11 @@ jobs:
             'access': 'proxy',
             'isDefault': False,
             'jsonData': {
-              'authType': 'keys',
-              'defaultRegion': 'us-east-1',
+              'authType': 'arn',
+              'assumeRoleArn': 'arn:aws:iam::068704208855:role/trading-analysis-grafana-cloudwatch',
+              'defaultRegion': 'ap-northeast-1',
             },
-            'secureJsonData': {
-              'accessKey': sys.argv[1],
-              'secretKey': sys.argv[2],
-            },
-          }))
-          " "$CW_KEY_ID" "$CW_SECRET")
+          }))")
 
           # GET datasource by name to find its ID, then PUT to update or POST to create
           DS_ID=$(curl -s \
