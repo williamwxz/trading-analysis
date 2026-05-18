@@ -1497,6 +1497,7 @@ resource "aws_ecs_task_definition" "flink_pnl" {
       { name = "ENABLE_PROD_SINK",       value = "false" },
       { name = "ENABLE_BT_SINK",         value = "false" },
       { name = "ENABLE_REAL_TRADE_SINK", value = "true" },
+      { name = "DRY_RUN",                value = "true" },
     ]
     logConfiguration = {
       logDriver = "awslogs"
