@@ -151,8 +151,15 @@ SELECT
     argMax(weighting, minute_ts)       AS weighting,
     now()                              AS updated_at,
     any(strategy_instance_id)          AS strategy_instance_id
-FROM (SELECT *, ts AS minute_ts FROM analytics.{min_table} FINAL
-      WHERE ts >= toStartOfHour(toDateTime('{window_start_ts}')))
+FROM (
+    SELECT *, ts AS minute_ts
+    FROM analytics.{min_table}
+    WHERE ts >= toStartOfHour(toDateTime('{window_start_ts}'))
+    ORDER BY strategy_table_name, strategy_id, strategy_name, underlying,
+             config_timeframe, source, version, ts, updated_at DESC
+    LIMIT 1 BY strategy_table_name, strategy_id, strategy_name, underlying,
+               config_timeframe, source, version, ts
+)
 GROUP BY strategy_table_name, strategy_id, strategy_name, underlying,
          config_timeframe, source, version, toStartOfHour(minute_ts)
 """,

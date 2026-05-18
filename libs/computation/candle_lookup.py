@@ -192,9 +192,9 @@ SELECT
     underlying,
     config_timeframe,
     weighting,
-    ts AS bar_ts,
-    max(revision_ts) AS max_revision_ts,
-    argMax(row_json, revision_ts) AS row_json
+    argMax(ts, (ts, revision_ts))           AS bar_ts,
+    argMax(revision_ts, (ts, revision_ts))  AS max_revision_ts,
+    argMax(row_json, (ts, revision_ts))     AS row_json
 FROM analytics.strategy_output_history_v2
 PREWHERE underlying = '{underlying}'
 WHERE ts >= '{ts_str}'::DateTime - INTERVAL {_LOOKBACK}
@@ -202,8 +202,6 @@ WHERE ts >= '{ts_str}'::DateTime - INTERVAL {_LOOKBACK}
   AND revision_ts <= '{ts_str}'
 GROUP BY
     strategy_table_name, strategy_instance_id, strategy_id, strategy_name,
-    underlying, config_timeframe, weighting, ts
-ORDER BY strategy_instance_id, ts DESC
-LIMIT 1 BY strategy_instance_id
+    underlying, config_timeframe, weighting
 """
     return [_parse_revision(r) for r in query_dicts(sql)]
