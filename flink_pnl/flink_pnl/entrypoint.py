@@ -3,10 +3,9 @@
 import logging
 import os
 
-from pyflink.common.configuration import Configuration
-from pyflink.common.serialization import SimpleStringSchema
 from pyflink.common import WatermarkStrategy
-from pyflink.datastream import CheckpointingMode, StreamExecutionEnvironment
+from pyflink.common.serialization import SimpleStringSchema
+from pyflink.datastream import StreamExecutionEnvironment
 from pyflink.datastream.connectors.kafka import KafkaOffsetsInitializer, KafkaSource
 
 from flink_pnl.pnl_job import PnlProcessFunction
@@ -14,22 +13,11 @@ from flink_pnl.pnl_job import PnlProcessFunction
 logger = logging.getLogger(__name__)
 
 TOPIC = "binance.price.ticks"
-CHECKPOINT_INTERVAL_MS = 60_000
-CHECKPOINT_URI = "s3p://trading-analysis-flink-checkpoints-068704208855/checkpoints/"
 
 
 def build_env() -> StreamExecutionEnvironment:
-    config = Configuration()
-    config.set_string("execution.checkpointing.storage", "filesystem")
-    config.set_string("execution.checkpointing.dir", CHECKPOINT_URI)
-
-    env = StreamExecutionEnvironment.get_execution_environment(config)
+    env = StreamExecutionEnvironment.get_execution_environment()
     env.set_parallelism(1)
-
-    # Checkpoint every 60s to S3.
-    # At-least-once + idempotent CH upsert = effectively exactly-once.
-    env.enable_checkpointing(CHECKPOINT_INTERVAL_MS, CheckpointingMode.AT_LEAST_ONCE)
-
     return env
 
 
