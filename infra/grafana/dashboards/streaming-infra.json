@@ -1045,6 +1045,696 @@
       ],
       "title": "Stopped Task Count (crash loops)",
       "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 30
+      },
+      "id": 102,
+      "title": "Flink PnL Job",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10
+          },
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 31
+      },
+      "id": 20,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "alias": "prod",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "Mode": "prod"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "FlinkBootstrapComplete",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "A",
+          "region": "ap-northeast-1",
+          "statistic": "Sum"
+        },
+        {
+          "alias": "bt",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "Mode": "bt"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "FlinkBootstrapComplete",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "B",
+          "region": "ap-northeast-1",
+          "statistic": "Sum"
+        },
+        {
+          "alias": "real_trade",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "Mode": "real_trade"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "FlinkBootstrapComplete",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "C",
+          "region": "ap-northeast-1",
+          "statistic": "Sum"
+        }
+      ],
+      "title": "Flink Bootstrap Complete (once on startup, per mode)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10
+          },
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 31
+      },
+      "id": 21,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "alias": "prod",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "Mode": "prod"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "FlinkBootstrapStrategyCount",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "A",
+          "region": "ap-northeast-1",
+          "statistic": "Maximum"
+        },
+        {
+          "alias": "bt",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "Mode": "bt"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "FlinkBootstrapStrategyCount",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "B",
+          "region": "ap-northeast-1",
+          "statistic": "Maximum"
+        },
+        {
+          "alias": "real_trade",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "Mode": "real_trade"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "FlinkBootstrapStrategyCount",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "C",
+          "region": "ap-northeast-1",
+          "statistic": "Maximum"
+        }
+      ],
+      "title": "Flink Bootstrap Strategy Count (per mode)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10
+          },
+          "min": 0,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 38
+      },
+      "id": 22,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "alias": "lag",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {},
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "FlinkCandleLagSeconds",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "A",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        }
+      ],
+      "title": "Flink Candle Lag (seconds behind real-time)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10
+          },
+          "min": 0,
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 38
+      },
+      "id": 23,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "alias": "candle_ts",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {},
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "FlinkCandleTimestamp",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "A",
+          "region": "ap-northeast-1",
+          "statistic": "Maximum"
+        }
+      ],
+      "title": "Flink Last Candle Timestamp (epoch, should track wall-clock)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10
+          },
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 45
+      },
+      "id": 24,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "alias": "rows",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {},
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "FlinkRowsEmittedPerCandle",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "A",
+          "region": "ap-northeast-1",
+          "statistic": "Sum"
+        }
+      ],
+      "title": "Flink Rows Emitted per Candle",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10
+          },
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 45
+      },
+      "id": 25,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "alias": "price",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "Sink": "price"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "FlinkRowsFlushed",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "A",
+          "region": "ap-northeast-1",
+          "statistic": "Sum"
+        },
+        {
+          "alias": "prod",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "Sink": "pnl_prod"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "FlinkRowsFlushed",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "B",
+          "region": "ap-northeast-1",
+          "statistic": "Sum"
+        },
+        {
+          "alias": "bt",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "Sink": "pnl_bt"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "FlinkRowsFlushed",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "C",
+          "region": "ap-northeast-1",
+          "statistic": "Sum"
+        },
+        {
+          "alias": "real_trade",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "Sink": "pnl_real_trade"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "FlinkRowsFlushed",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "D",
+          "region": "ap-northeast-1",
+          "statistic": "Sum"
+        }
+      ],
+      "title": "Flink Rows Flushed to ClickHouse (per sink)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10
+          },
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 52
+      },
+      "id": 26,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "alias": "flink-pnl",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-flink-pnl"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "CpuUtilized",
+          "metricQueryType": 0,
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "A",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        }
+      ],
+      "title": "Flink ECS CPU (vCPU units)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10
+          },
+          "min": 0,
+          "unit": "mebibytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 52
+      },
+      "id": 27,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "alias": "flink-pnl",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-flink-pnl"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "MemoryUtilized",
+          "metricQueryType": 0,
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "A",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        }
+      ],
+      "title": "Flink ECS Memory (MiB)",
+      "type": "timeseries"
     }
   ],
   "templating": {

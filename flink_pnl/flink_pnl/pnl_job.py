@@ -9,6 +9,7 @@ import os
 from pyflink.datastream import ProcessFunction, RuntimeContext
 
 from flink_pnl.clickhouse_sink import ClickHouseSinkFunction
+from flink_pnl.metrics import bootstrap_complete, candle_processed
 from flink_pnl.process_candle import process_candle
 from flink_pnl.sink_config import SinkConfig
 from flink_pnl.state import StateMap, build_state_from_bootstrap
@@ -33,18 +34,21 @@ class PnlProcessFunction(ProcessFunction):
         if cfg.prod:
             anchor_prod = _bootstrap_state("prod", reference_ts)
             self._state_prod: StateMap = build_state_from_bootstrap(anchor_prod)
+            bootstrap_complete("prod", sum(len(v) for v in self._state_prod.values()))
         else:
             self._state_prod = {}
 
         if cfg.bt:
             anchor_bt = _bootstrap_state("bt", reference_ts)
             self._state_bt: StateMap = build_state_from_bootstrap(anchor_bt)
+            bootstrap_complete("bt", sum(len(v) for v in self._state_bt.values()))
         else:
             self._state_bt = {}
 
         if cfg.real_trade:
             anchor_rt = _bootstrap_state("real_trade", reference_ts)
             self._state_rt: StateMap = build_state_from_bootstrap(anchor_rt)
+            bootstrap_complete("real_trade", sum(len(v) for v in self._state_rt.values()))
         else:
             self._state_rt = {}
 
@@ -57,6 +61,8 @@ class PnlProcessFunction(ProcessFunction):
         )
         for row in rows:
             self._sink.invoke(row)
+        candle_processed(candle.ts, len(rows))
+        self._sink.flush()
 
     def snapshot_state(self, context) -> None:
         self._sink.flush()

@@ -75,6 +75,7 @@ def test_process_element_calls_process_candle():
     with (
         patch("flink_pnl.pnl_job.CandleEvent") as mock_ce,
         patch("flink_pnl.pnl_job.process_candle", return_value=[]) as mock_pc,
+        patch("flink_pnl.pnl_job.candle_processed"),
     ):
         mock_ce.from_dict.return_value = mock_candle
 
@@ -99,6 +100,7 @@ def test_process_element_invokes_sink_for_each_row():
     with (
         patch("flink_pnl.pnl_job.CandleEvent") as mock_ce,
         patch("flink_pnl.pnl_job.process_candle", return_value=rows),
+        patch("flink_pnl.pnl_job.candle_processed"),
     ):
         mock_ce.from_dict.return_value = MagicMock()
 
@@ -127,6 +129,7 @@ def test_process_element_parses_json():
     with (
         patch("flink_pnl.pnl_job.CandleEvent") as mock_ce,
         patch("flink_pnl.pnl_job.process_candle", return_value=[]),
+        patch("flink_pnl.pnl_job.candle_processed"),
     ):
         mock_ce.from_dict.return_value = MagicMock()
 

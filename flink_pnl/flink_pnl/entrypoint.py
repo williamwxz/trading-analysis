@@ -41,6 +41,9 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    # Suppress noisy apache_beam import-time warnings (BigQuery/GCS unavailable).
+    logging.getLogger("apache_beam.typehints.native_type_compatibility").setLevel(logging.ERROR)
+    logging.getLogger("apache_beam.io.gcp.bigquery").setLevel(logging.ERROR)
     env = build_env()
     source = build_kafka_source()
     stream = env.from_source(source, WatermarkStrategy.no_watermarks(), "Kafka Source")

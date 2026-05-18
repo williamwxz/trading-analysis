@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 
 import libs.clickhouse_client as ch
+from flink_pnl.metrics import rows_flushed as _metric_rows_flushed
 from flink_pnl.sink_config import SinkConfig
 from libs.computation.pnl_formula import INSERT_COLUMNS
 
@@ -94,13 +95,17 @@ class ClickHouseSinkFunction:
         ch.insert_rows(
             "analytics.futures_price_1min", _PRICE_COLUMNS, rows, client=client
         )
+        n = len(rows)
         self._price_buf.clear()
-        logger.debug("Flushed %d price rows", len(rows))
+        _metric_rows_flushed("price", n)
+        logger.debug("Flushed %d price rows", n)
 
     def _flush_pnl(self, sink_key: str, table: str, buf: list[dict], client) -> None:
         if not buf:
             return
         rows = [r["_row"] for r in buf]
+        n = len(rows)
         ch.insert_rows(table, INSERT_COLUMNS, rows, client=client)
         buf.clear()
-        logger.debug("Flushed %d rows to %s", len(rows), table)
+        _metric_rows_flushed(sink_key, n)
+        logger.debug("Flushed %d rows to %s", n, table)
