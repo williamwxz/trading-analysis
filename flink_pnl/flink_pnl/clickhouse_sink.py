@@ -84,19 +84,39 @@ class ClickHouseSinkFunction:
         )
 
     def _dry_run_flush(self) -> None:
-        """Print buffered rows to stdout instead of writing to ClickHouse."""
-        for r in self._price_buf:
-            print(f"[DRY_RUN price] {r}", flush=True)
-        for r in self._prod_buf:
-            cols = dict(zip(INSERT_COLUMNS, r["_row"]))
-            print(f"[DRY_RUN pnl_prod] siid={cols.get('strategy_instance_id')} ts={cols.get('ts')} pnl={cols.get('cumulative_pnl'):.6f} price={cols.get('price')}", flush=True)
-        for r in self._bt_buf:
-            cols = dict(zip(INSERT_COLUMNS, r["_row"]))
-            print(f"[DRY_RUN pnl_bt] siid={cols.get('strategy_instance_id')} ts={cols.get('ts')} pnl={cols.get('cumulative_pnl'):.6f} price={cols.get('price')}", flush=True)
-        for r in self._rt_buf:
-            cols = dict(zip(INSERT_COLUMNS, r["_row"]))
-            print(f"[DRY_RUN pnl_real_trade] siid={cols.get('strategy_instance_id')} ts={cols.get('ts')} pnl={cols.get('cumulative_pnl'):.6f} price={cols.get('price')}", flush=True)
-        _metric_rows_flushed("dry_run", len(self._price_buf) + len(self._prod_buf) + len(self._bt_buf) + len(self._rt_buf))
+        """Print one summary line per sink per candle, with up to 3 sample rows."""
+        total = 0
+        for sink_key, buf in [
+            ("price", self._price_buf),
+            ("pnl_prod", self._prod_buf),
+            ("pnl_bt", self._bt_buf),
+            ("pnl_real_trade", self._rt_buf),
+        ]:
+            if not buf:
+                continue
+            n = len(buf)
+            total += n
+            samples = []
+            for r in buf[:3]:
+                if sink_key == "price":
+                    samples.append(
+                        f"inst={r['instrument']} ts={r['ts']} open={r['open']}"
+                    )
+                else:
+                    c = dict(zip(INSERT_COLUMNS, r["_row"]))
+                    samples.append(
+                        f"underlying={c.get('underlying')} name={c.get('strategy_name')} "
+                        f"ts={c.get('ts')} pnl={c.get('cumulative_pnl'):.6f} "
+                        f"pos={c.get('position')} price={c.get('price')}"
+                    )
+            suffix = f" (+{n - 3} more)" if n > 3 else ""
+            print(
+                f"[DRY_RUN {sink_key}] {n} rows | "
+                + " | ".join(samples)
+                + suffix,
+                flush=True,
+            )
+        _metric_rows_flushed("dry_run", total)
         self._price_buf.clear()
         self._prod_buf.clear()
         self._bt_buf.clear()
