@@ -320,7 +320,7 @@ def test_fetch_real_trade_sql_uses_revision_ts_filter():
 
 @pytest.mark.unit
 def test_fetch_real_trade_sql_uses_argmax_revision_ts():
-    """Real-trade lookup uses argMax(row_json, revision_ts) — latest revision."""
+    """Real-trade lookup uses argMax with composite (ts, revision_ts) key — latest bar, then latest revision."""
     captured = []
 
     def capture(sql):
@@ -329,12 +329,12 @@ def test_fetch_real_trade_sql_uses_argmax_revision_ts():
 
     with patch("libs.computation.candle_lookup.query_dicts", side_effect=capture):
         fetch_real_trade_for_candle(instrument="BTCUSDT", candle_ts=_CANDLE_TS)
-    assert "argMax(row_json, revision_ts)" in captured[0]
+    assert "argMax(row_json, (ts, revision_ts))" in captured[0]
 
 
 @pytest.mark.unit
 def test_fetch_real_trade_sql_limit_1_by_strategy_instance_id():
-    """Real-trade lookup uses LIMIT 1 BY strategy_instance_id."""
+    """Real-trade lookup uses GROUP BY strategy_instance_id (via argMax composite key)."""
     captured = []
 
     def capture(sql):
@@ -343,7 +343,8 @@ def test_fetch_real_trade_sql_limit_1_by_strategy_instance_id():
 
     with patch("libs.computation.candle_lookup.query_dicts", side_effect=capture):
         fetch_real_trade_for_candle(instrument="BTCUSDT", candle_ts=_CANDLE_TS)
-    assert "LIMIT 1 BY strategy_instance_id" in captured[0]
+    assert "GROUP BY" in captured[0]
+    assert "strategy_instance_id" in captured[0]
 
 
 @pytest.mark.unit
