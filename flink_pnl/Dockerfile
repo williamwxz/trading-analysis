@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
         python3-pip \
         wget \
+    && ln -s /usr/bin/python3 /usr/local/bin/python \
     && wget -q -O /opt/flink/lib/flink-sql-connector-kafka.jar \
         https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka/4.0.1-2.0/flink-sql-connector-kafka-4.0.1-2.0.jar \
     && rm -rf /var/lib/apt/lists/*
