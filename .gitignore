@@ -49,4 +49,4 @@ flink_job/connectors/*.jar
 
 .telemetry/
 
-.claude/settings.json
+.claude/
