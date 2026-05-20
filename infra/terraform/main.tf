@@ -1010,28 +1010,19 @@ resource "aws_iam_role_policy" "ecs_task_policy" {
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Grafana Cloud assumes this role via cross-account trust (Grafana Labs AWS account: 008923505280).
-# In Grafana UI: Connections → CloudWatch datasource → Auth: AssumeRole → ARN: output below.
-resource "aws_iam_role" "grafana_cloudwatch" {
+# Grafana Cloud CloudWatch datasource — uses Access & secret key auth (ARN/AssumeRole deprecated since Grafana 7.3).
+# After terraform apply, retrieve credentials and configure in Grafana Cloud:
+#   Connections → Data Sources → CloudWatch → Auth: Access & secret key
+#   Access Key ID / Secret Access Key: from Secrets Manager (see output below)
+#   Default Region: ap-northeast-1
+resource "aws_iam_user" "grafana_cloudwatch" {
   name = "${local.name_prefix}-grafana-cloudwatch"
   tags = local.common_tags
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Principal = {
-          AWS = "arn:aws:iam::008923505280:user/hg-aws-plugins-creds_prod-ap-northeast-0"
-        }
-        Action = "sts:AssumeRole"
-      }
-    ]
-  })
 }
 
-resource "aws_iam_role_policy" "grafana_cloudwatch" {
+resource "aws_iam_user_policy" "grafana_cloudwatch" {
   name = "cloudwatch-read"
-  role = aws_iam_role.grafana_cloudwatch.id
+  user = aws_iam_user.grafana_cloudwatch.name
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -1062,6 +1053,24 @@ resource "aws_iam_role_policy" "grafana_cloudwatch" {
         Resource = "*"
       }
     ]
+  })
+}
+
+resource "aws_iam_access_key" "grafana_cloudwatch" {
+  user = aws_iam_user.grafana_cloudwatch.name
+}
+
+resource "aws_secretsmanager_secret" "grafana_cloudwatch" {
+  name                    = "${local.name_prefix}/grafana-cloudwatch"
+  recovery_window_in_days = 0
+  tags                    = local.common_tags
+}
+
+resource "aws_secretsmanager_secret_version" "grafana_cloudwatch" {
+  secret_id = aws_secretsmanager_secret.grafana_cloudwatch.id
+  secret_string = jsonencode({
+    access_key_id     = aws_iam_access_key.grafana_cloudwatch.id
+    secret_access_key = aws_iam_access_key.grafana_cloudwatch.secret
   })
 }
 
@@ -1623,7 +1632,7 @@ output "nat_static_ip" {
   description = "Static IP (outbound ClickHouse allowlist)"
 }
 
-output "grafana_cloudwatch_role_arn" {
-  value       = aws_iam_role.grafana_cloudwatch.arn
-  description = "ARN of the IAM role Grafana Cloud assumes for CloudWatch datasource access"
+output "grafana_cloudwatch_credentials_secret" {
+  value       = aws_secretsmanager_secret.grafana_cloudwatch.name
+  description = "Secrets Manager secret name containing Grafana CloudWatch datasource access key credentials"
 }
