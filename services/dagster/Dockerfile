@@ -7,7 +7,7 @@ FROM public.ecr.aws/docker/library/python:3.11-slim AS builder
 
 WORKDIR /build
 COPY pyproject.toml .
-COPY trading_dagster/ trading_dagster/
+COPY services/dagster/trading_dagster/ trading_dagster/
 COPY libs/ libs/
 
 RUN python -m venv /opt/venv
@@ -26,9 +26,9 @@ ENV PYTHONUNBUFFERED=1
 ENV DAGSTER_HOME=/app
 
 # Copy application code and config
-COPY trading_dagster/ trading_dagster/
+COPY services/dagster/trading_dagster/ trading_dagster/
 COPY libs/ libs/
-COPY dagster.yaml .
+COPY services/dagster/dagster.yaml dagster.yaml
 COPY workspace.yaml .
 # pyproject.toml provides [tool.dagster] module_name for dagster-daemon auto-discovery
 COPY pyproject.toml .
