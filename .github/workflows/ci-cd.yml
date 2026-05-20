@@ -26,21 +26,19 @@ jobs:
         with:
           filters: |
             dagster:
-              - 'trading_dagster/**'
+              - 'services/dagster/**'
               - 'libs/**'
-              - 'Dockerfile'
               - 'pyproject.toml'
-              - 'dagster.yaml'
               - '.github/workflows/ci-cd.yml'
             streaming:
-              - 'streaming/**'
+              - 'services/streaming/**'
             pnl-consumer:
-              - 'pnl_consumer/**'
+              - 'services/pnl_consumer/**'
               - 'libs/**'
             flink-pnl:
-              - 'flink_pnl/**'
+              - 'services/flink_pnl/**'
               - 'libs/**'
-              - 'streaming/models.py'
+              - 'services/streaming/streaming/models.py'
             terraform:
               - 'infra/terraform/**'
             grafana:
@@ -76,8 +74,7 @@ jobs:
 
       - name: Run tests
         run: |
-          pytest tests/ -v --tb=short -m "not integration"
-          pytest flink_pnl/tests/ -v --tb=short -m "not integration"
+          pytest libs/tests/ services/dagster/tests/ services/streaming/tests/ services/pnl_consumer/tests/ services/flink_pnl/tests/ -v --tb=short -m "not integration and not streaming_integration"
 
   integration-test:
     runs-on: ubuntu-latest
@@ -98,7 +95,7 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Run streaming integration tests
-        run: pytest tests/streaming/test_streaming_integration.py -v --tb=short -m streaming_integration
+        run: pytest services/streaming/tests/test_streaming_integration.py -v --tb=short -m streaming_integration
 
   build-dagster:
     runs-on: ubuntu-latest
@@ -140,6 +137,7 @@ jobs:
             --cache-from type=registry,ref=$IMAGE_CACHE \
             --cache-to   type=registry,ref=$IMAGE_CACHE,mode=max \
             --provenance=false \
+            -f services/dagster/Dockerfile \
             -t $IMAGE_URI \
             --push .
           echo "image_tag=${{ github.sha }}" >> $GITHUB_OUTPUT
@@ -181,7 +179,7 @@ jobs:
           IMAGE_URI=$REGISTRY/trading-analysis-ws-consumer:${{ github.sha }}
           IMAGE_CACHE=$REGISTRY/trading-analysis-ws-consumer:cache
           docker buildx build \
-            -f streaming/Dockerfile \
+            -f services/streaming/Dockerfile \
             --cache-from type=registry,ref=$IMAGE_CACHE \
             --cache-to   type=registry,ref=$IMAGE_CACHE,mode=max \
             --provenance=false \
@@ -226,7 +224,7 @@ jobs:
           IMAGE_URI=$REGISTRY/trading-analysis-pnl-consumer:${{ github.sha }}
           IMAGE_CACHE=$REGISTRY/trading-analysis-pnl-consumer:cache
           docker buildx build \
-            -f pnl_consumer/Dockerfile \
+            -f services/pnl_consumer/Dockerfile \
             --cache-from type=registry,ref=$IMAGE_CACHE \
             --cache-to   type=registry,ref=$IMAGE_CACHE,mode=max \
             --provenance=false \
@@ -543,7 +541,7 @@ jobs:
           IMAGE_URI=$REGISTRY/trading-analysis-flink-pnl:${{ github.sha }}
           IMAGE_CACHE=$REGISTRY/trading-analysis-flink-pnl:cache
           docker buildx build \
-            -f flink_pnl/Dockerfile \
+            -f services/flink_pnl/Dockerfile \
             --cache-from type=registry,ref=$IMAGE_CACHE \
             --cache-to   type=registry,ref=$IMAGE_CACHE,mode=max \
             --provenance=false \
