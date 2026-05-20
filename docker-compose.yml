@@ -14,7 +14,9 @@ services:
       - pgdata:/var/lib/postgresql/data
 
   dagster-webserver:
-    build: .
+    build:
+      context: .
+      dockerfile: services/dagster/Dockerfile
     command: dagster-webserver -h 0.0.0.0 -p 3000
     ports:
       - "3000:3000"
@@ -36,7 +38,9 @@ services:
       - postgres
 
   dagster-daemon:
-    build: .
+    build:
+      context: .
+      dockerfile: services/dagster/Dockerfile
     command: dagster-daemon run
     environment:
       DAGSTER_HOME: /app
