@@ -20,7 +20,7 @@ mypy .
 
 # Tests (unit tests require no external services)
 pytest
-pytest tests/test_pnl_compute.py -v
+pytest services/dagster/tests/test_pnl_compute.py -v
 pytest -m unit                    # fast, no external deps
 pytest -m integration             # requires live ClickHouse/S3
 pytest -m streaming_integration   # requires Docker + Binance network
@@ -45,11 +45,11 @@ Three independent ECS Fargate services, each with its own Dockerfile:
 
 | Service | Directory | Role |
 |---------|-----------|------|
-| `trading-analysis-dagster` | `trading_dagster/` | Dagster orchestration — batch PnL refresh, market data backfill |
-| `trading-analysis-streaming` | `streaming/` | Binance WebSocket → Kafka/Redpanda topic `binance.price.ticks` |
-| `trading-analysis-pnl-consumer` | `pnl_consumer/` | Kafka consumer → real-time PnL → ClickHouse |
+| `trading-analysis-dagster` | `services/dagster/` | Dagster orchestration — batch PnL refresh, market data backfill |
+| `trading-analysis-streaming` | `services/streaming/` | Binance WebSocket → Kafka/Redpanda topic `binance.price.ticks` |
+| `trading-analysis-pnl-consumer` | `services/pnl_consumer/` | Kafka consumer → real-time PnL → ClickHouse |
 
-Adding new instruments requires updating `INSTRUMENTS` in both `streaming/binance_ws_consumer.py` and the Dagster market data assets.
+Adding new instruments requires updating `INSTRUMENTS` in both `services/streaming/streaming/binance_ws_consumer.py` and the Dagster market data assets.
 
 ### Data Flow
 
@@ -81,7 +81,7 @@ Rollup asset (hourly, argMax aggregation)
 
 ### Dagster Entry Point
 
-`pyproject.toml` sets `[tool.dagster] module_name = "trading_dagster"`. Dagster discovers assets via `trading_dagster/definitions/__init__.py`, which imports all `*_asset` variables and registers them with a single `AutomationConditionSensorDefinition` sensor (30s interval):
+`pyproject.toml` sets `[tool.dagster] module_name = "trading_dagster"`. Dagster discovers assets via `services/dagster/trading_dagster/definitions/__init__.py`, which imports all `*_asset` variables and registers them with a single `AutomationConditionSensorDefinition` sensor (30s interval):
 
 | Sensor | Asset Groups |
 |--------|-------------|
@@ -128,7 +128,7 @@ All PnL logic lives here — both `pnl_consumer` (streaming) and `trading_dagste
 | `candle_lookup.py` | pnl_consumer live loop: `fetch_strategies_for_candle`, `fetch_bt_strategies_for_candle`, `fetch_real_trade_for_candle` — re-queried every candle |
 | `bootstrap.py` | pnl_consumer cold-start: `fetch_bootstrap_seeds`, `fetch_walk_rows` |
 
-`libs/clickhouse_client.py` is a standalone ClickHouse client (no Dagster dependency) used by all `libs/computation/` modules. `trading_dagster/utils/clickhouse_client.py` is the Dagster-side copy with the same interface; `trading_dagster/utils/pnl_compute.py` is a thin re-export shim for backward compatibility.
+`libs/clickhouse_client.py` is a standalone ClickHouse client (no Dagster dependency) used by all `libs/computation/` modules. `services/dagster/trading_dagster/utils/clickhouse_client.py` is the Dagster-side copy with the same interface; `services/dagster/trading_dagster/utils/pnl_compute.py` is a thin re-export shim for backward compatibility.
 
 ### PnL Calculation Per Mode
 
@@ -207,7 +207,7 @@ Full detail in `docs/pnl_consumer_logic.md`. Shared query library in `libs/compu
 
 ### ClickHouse Patterns
 
-- **All queries through** `trading_dagster/utils/clickhouse_client.py`: `get_client()`, `query_rows()`, `query_dicts()`, `query_scalar()`, `execute()`, `insert_rows()`
+- **All queries through** `services/dagster/trading_dagster/utils/clickhouse_client.py`: `get_client()`, `query_rows()`, `query_dicts()`, `query_scalar()`, `execute()`, `insert_rows()`
 - **No connection pooling**: each call creates a new connection unless a `client=` is passed explicitly. Pass a shared client when doing multiple operations in one asset run to avoid redundant connections.
 - **ReplacingMergeTree(updated_at)**: re-inserting rows replaces older ones after background merge. Use `FINAL` in SELECT to get deduplicated results immediately, but avoid `FINAL` on large frequently-queried tables (it forces in-memory merge). Prefer `LIMIT 1 BY key ORDER BY key, updated_at DESC` to read the latest row per key using the sort index instead.
 - **Idempotent upserts**: partitioned assets DELETE the day+instrument partition before inserting; unpartitioned assets rely on ReplacingMergeTree.
@@ -218,7 +218,7 @@ Full detail in `docs/pnl_consumer_logic.md`. Shared query library in `libs/compu
 
 Required env vars: `CLICKHOUSE_HOST`, `CLICKHOUSE_PORT` (8443), `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`, `CLICKHOUSE_SECURE` (true).
 
-Schema lives in `schemas/clickhouse_cloud.sql` (apply once). No `Replicated*` prefix needed — Cloud handles replication.
+Schema lives in `infra/schemas/clickhouse_cloud.sql` (apply once). No `Replicated*` prefix needed — Cloud handles replication.
 
 ## CI/CD
 
@@ -229,9 +229,9 @@ GitHub Actions drives all CI/CD. Workflows live in `.github/workflows/`.
 | `ci-cd.yml` | Push to `main` | test → build + terraform (parallel) → deploy-dagster + deploy-grafana-cloud (parallel, terraform must pass first) |
 
 Each service rebuilds only if its paths changed (via `dorny/paths-filter`). `workflow_dispatch` forces rebuild of all services regardless. Path filters:
-- `dagster`: `trading_dagster/**`, `Dockerfile`, `pyproject.toml`
-- `streaming`: `streaming/**`
-- `pnl-consumer`: `pnl_consumer/**`
+- `dagster`: `services/dagster/**`, `Dockerfile`, `pyproject.toml`
+- `streaming`: `services/streaming/**`
+- `pnl-consumer`: `services/pnl_consumer/**`
 - `terraform`: `infra/terraform/**`
 - `grafana`: `infra/grafana/**`
 
@@ -400,7 +400,7 @@ cd infra/terraform && terraform init
 terraform apply -var="github_repo=williamwxz/trading-analysis"
 
 # Apply ClickHouse schema (one-time)
-clickhouse-client --host <host> --secure --password <pw> < schemas/clickhouse_cloud.sql
+clickhouse-client --host <host> --secure --password <pw> < infra/schemas/clickhouse_cloud.sql
 ```
 
 ECR repo: `trading-analysis-dagster`  
