@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml .
 RUN pip install --no-cache-dir websockets>=12.0 confluent-kafka>=2.4
 
-COPY streaming/ ./streaming/
+COPY services/streaming/streaming/ ./streaming/
 
 ENV PYTHONUNBUFFERED=1
 
