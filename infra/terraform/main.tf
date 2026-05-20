@@ -72,7 +72,7 @@ locals {
       enable_real_trade = "false"
       enable_bt         = "false"
       group_id          = "flink-pnl-consumer-prod"
-      desired_count     = 0
+      desired_count     = 1
       dry_run           = "true"
     }
     real-trade = {
@@ -81,7 +81,7 @@ locals {
       enable_real_trade = "true"
       enable_bt         = "false"
       group_id          = "flink-pnl-consumer-v2"
-      desired_count     = 0
+      desired_count     = 1
       dry_run           = "false"
     }
     bt = {
@@ -90,7 +90,7 @@ locals {
       enable_real_trade = "false"
       enable_bt         = "true"
       group_id          = "flink-pnl-consumer-bt"
-      desired_count     = 0
+      desired_count     = 1
       dry_run           = "true"
     }
   }
