@@ -16,15 +16,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 USER flink
 
-COPY flink_pnl/requirements.txt /tmp/requirements.txt
+COPY services/flink_pnl/requirements.txt /tmp/requirements.txt
 RUN pip3 install --no-cache-dir --break-system-packages -r /tmp/requirements.txt
 
 WORKDIR /opt/flink/usrlib
 
 COPY libs/ ./libs/
-COPY streaming/ ./streaming/
-COPY pnl_consumer/ ./pnl_consumer/
-COPY flink_pnl/flink_pnl/ ./flink_pnl/
+COPY services/streaming/streaming/ ./streaming/
+COPY services/pnl_consumer/pnl_consumer/ ./pnl_consumer/
+COPY services/flink_pnl/flink_pnl/ ./flink_pnl/
 
 ENV PYTHONPATH=/opt/flink/usrlib
 ENV PYTHONUNBUFFERED=1
