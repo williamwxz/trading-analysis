@@ -53,8 +53,20 @@ warn_return_any = true
 warn_unused_configs = true
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "flink_pnl/tests"]
-pythonpath = ["."]
+testpaths = [
+    "libs/tests",
+    "services/dagster/tests",
+    "services/streaming/tests",
+    "services/pnl_consumer/tests",
+    "services/flink_pnl/tests",
+]
+pythonpath = [
+    ".",
+    "services/dagster",
+    "services/streaming",
+    "services/pnl_consumer",
+    "services/flink_pnl",
+]
 markers = [
     "unit: Unit tests (fast, no external dependencies)",
     "integration: Integration tests (require ClickHouse/S3)",
