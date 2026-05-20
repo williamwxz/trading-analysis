@@ -35,7 +35,7 @@ from flink_pnl.pnl_job import PnlProcessFunction  # noqa: E402  (must be after p
 # ---------------------------------------------------------------------------
 
 
-def _make_fn(process_candle_return=None) -> PnlProcessFunction:
+def _make_fn(sink_label: str = "bt") -> PnlProcessFunction:
     """Return a PnlProcessFunction with internals wired up directly (no open())."""
     fn = PnlProcessFunction.__new__(PnlProcessFunction)
     fn._cfg = MagicMock()
@@ -43,7 +43,7 @@ def _make_fn(process_candle_return=None) -> PnlProcessFunction:
     fn._state_bt = {}
     fn._state_rt = {}
     fn._sink = MagicMock()
-    fn._process_candle_return = process_candle_return or []
+    fn._sink_label = sink_label
     return fn
 
 
@@ -74,8 +74,8 @@ def test_process_element_calls_process_candle():
 
     with (
         patch("flink_pnl.pnl_job.CandleEvent") as mock_ce,
-        patch("flink_pnl.pnl_job.process_candle", return_value=[]) as mock_pc,
-        patch("flink_pnl.pnl_job.candle_processed"),
+        patch("flink_pnl.pnl_job.process_candle", return_value=([], 0, 0, 0)) as mock_pc,
+        patch("flink_pnl.pnl_job.emit_candle_lag"),
     ):
         mock_ce.from_dict.return_value = mock_candle
 
@@ -94,19 +94,60 @@ def test_process_element_calls_process_candle():
 def test_process_element_invokes_sink_for_each_row():
     """process_element() calls sink.invoke() once per row from process_candle()."""
     fn = _make_fn()
-    rows = [{"_sink": "pnl_prod", "_row": []}, {"_sink": "price"}, {"_sink": "pnl_bt"}]
+    rows = [{"_sink": "pnl_prod", "_row": []}, {"_sink": "pnl_bt", "_row": []}]
     mock_ctx = MagicMock()
 
     with (
         patch("flink_pnl.pnl_job.CandleEvent") as mock_ce,
-        patch("flink_pnl.pnl_job.process_candle", return_value=rows),
-        patch("flink_pnl.pnl_job.candle_processed"),
+        patch("flink_pnl.pnl_job.process_candle", return_value=(rows, 1, 1, 0)),
+        patch("flink_pnl.pnl_job.emit_candle_lag"),
     ):
         mock_ce.from_dict.return_value = MagicMock()
 
         fn.process_element(_SAMPLE_JSON, mock_ctx)
 
-        assert fn._sink.invoke.call_count == 3
+        assert fn._sink.invoke.call_count == 2
+
+
+@pytest.mark.unit
+def test_process_element_passes_expected_counts_to_flush():
+    """process_element() passes fetched counts from process_candle to sink.flush()."""
+    fn = _make_fn()
+    mock_ctx = MagicMock()
+
+    with (
+        patch("flink_pnl.pnl_job.CandleEvent") as mock_ce,
+        patch("flink_pnl.pnl_job.process_candle", return_value=([], 3, 2, 1)),
+        patch("flink_pnl.pnl_job.emit_candle_lag"),
+    ):
+        mock_ce.from_dict.return_value = MagicMock()
+
+        fn.process_element(_SAMPLE_JSON, mock_ctx)
+
+        fn._sink.flush.assert_called_once_with(
+            expected_prod=3,
+            expected_bt=2,
+            expected_real_trade=1,
+        )
+
+
+@pytest.mark.unit
+def test_process_element_emits_candle_lag():
+    """process_element() calls emit_candle_lag with candle.ts and sink_label."""
+    fn = _make_fn(sink_label="bt")
+    mock_ctx = MagicMock()
+    mock_candle = MagicMock()
+
+    with (
+        patch("flink_pnl.pnl_job.CandleEvent") as mock_ce,
+        patch("flink_pnl.pnl_job.process_candle", return_value=([], 0, 0, 0)),
+        patch("flink_pnl.pnl_job.emit_candle_lag") as mock_lag,
+    ):
+        mock_ce.from_dict.return_value = mock_candle
+
+        fn.process_element(_SAMPLE_JSON, mock_ctx)
+
+        mock_lag.assert_called_once_with(mock_candle.ts, "bt")
 
 
 @pytest.mark.unit
@@ -128,8 +169,8 @@ def test_process_element_parses_json():
 
     with (
         patch("flink_pnl.pnl_job.CandleEvent") as mock_ce,
-        patch("flink_pnl.pnl_job.process_candle", return_value=[]),
-        patch("flink_pnl.pnl_job.candle_processed"),
+        patch("flink_pnl.pnl_job.process_candle", return_value=([], 0, 0, 0)),
+        patch("flink_pnl.pnl_job.emit_candle_lag"),
     ):
         mock_ce.from_dict.return_value = MagicMock()
 

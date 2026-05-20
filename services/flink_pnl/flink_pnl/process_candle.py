@@ -5,9 +5,8 @@ fetch_* calls — all state mutation happens on the in-memory StateMap dicts
 passed in by the caller.
 
 Output format: each element is a dict with a ``_sink`` key that routes the
-row to the appropriate ClickHouse table or price topic:
+row to the appropriate ClickHouse table:
 
-    {"_sink": "price", "instrument": ..., "open": ..., "ts": ..., ...}
     {"_sink": "pnl_prod",       "_row": <INSERT_COLUMNS list>}
     {"_sink": "pnl_bt",         "_row": <INSERT_COLUMNS list>}
     {"_sink": "pnl_real_trade", "_row": <INSERT_COLUMNS list>}
@@ -15,7 +14,7 @@ row to the appropriate ClickHouse table or price topic:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from libs.computation.anchor_state import AnchorRecord
@@ -138,11 +137,7 @@ def _process_mode(
 
             # Revision guard: apply only if (bar_ts, revision_ts) > anchor's pair.
             existing_rec = (state_map.get(underlying) or {}).get(stn, AnchorRecord())
-            from libs.computation.anchor_state import AnchorState as _AS
-
-            _tmp = _AS()
-            _tmp.set(stn, existing_rec)
-            should_apply = _tmp.should_apply_revision(stn, rev.bar_ts, rev.revision_ts)
+            should_apply = (rev.bar_ts, rev.revision_ts) > (existing_rec.bar_ts, existing_rec.revision_ts)
 
             if should_apply:
                 # Apply the new revision.
@@ -277,48 +272,27 @@ def process_candle(
     state_bt: StateMap,
     state_rt: StateMap,
     cfg: SinkConfig,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], int, int, int]:
     """Process one closed candle and return all rows to be sunk.
 
-    Parameters
-    ----------
-    candle:
-        The closed 1-minute candle from Binance.
-    state_prod, state_bt, state_rt:
-        Per-mode anchor maps (underlying → stn → AnchorRecord). Mutated in-place.
-    cfg:
-        Which sinks are enabled.
-
-    Returns
-    -------
-    List of sink-tagged dicts. Each dict has ``_sink`` (str) and either direct
-    candle fields (for price sink) or ``_row`` (INSERT_COLUMNS list).
+    Returns (rows, prod_fetched, bt_fetched, real_trade_fetched) where the
+    fetched counts are the number of strategy instances returned by each
+    candle lookup query — used by the caller to validate flush completeness.
     """
-    if not (cfg.price or cfg.prod or cfg.bt or cfg.real_trade):
-        return []
+    if not (cfg.prod or cfg.bt or cfg.real_trade):
+        return [], 0, 0, 0
 
     output: list[dict[str, Any]] = []
-    now = datetime.utcnow()
+    now = datetime.now(UTC).replace(tzinfo=None)
+    prod_fetched = bt_fetched = rt_fetched = 0
 
     # underlying used for StateMap lookup only — NOT passed to fetch_* functions.
     underlying = candle.instrument.removesuffix("USDT")
 
-    # --- Price sink ---
-    if cfg.price:
-        output.append({
-            "_sink": "price",
-            "instrument": candle.instrument,
-            "ts": candle.ts,
-            "open": candle.open,
-            "high": candle.high,
-            "low": candle.low,
-            "close": candle.close,
-            "volume": candle.volume,
-        })
-
     # --- Prod sink ---
     if cfg.prod:
         bars = fetch_strategies_for_candle(candle.instrument, candle.ts)
+        prod_fetched = len(bars)
         bars_by_stn: dict[str, StrategyBar] = {b.strategy_table_name: b for b in bars}
         output.extend(_process_mode(
             candle, underlying, state_prod, bars_by_stn,
@@ -331,6 +305,7 @@ def process_candle(
     # --- Backtest sink ---
     if cfg.bt:
         bt_bars = fetch_bt_strategies_for_candle(candle.instrument, candle.ts)
+        bt_fetched = len(bt_bars)
         bt_by_stn: dict[str, StrategyBar] = {b.strategy_table_name: b for b in bt_bars}
         output.extend(_process_mode(
             candle, underlying, state_bt, bt_by_stn,
@@ -343,6 +318,7 @@ def process_candle(
     # --- Real-trade sink ---
     if cfg.real_trade:
         revisions = fetch_real_trade_for_candle(candle.instrument, candle.ts)
+        rt_fetched = len(revisions)
         revs_by_stn: dict[str, StrategyRevision] = {r.strategy_table_name: r for r in revisions}
         output.extend(_process_mode(
             candle, underlying, state_rt, revs_by_stn,
@@ -352,4 +328,4 @@ def process_candle(
             is_real_trade=True,
         ))
 
-    return output
+    return output, prod_fetched, bt_fetched, rt_fetched

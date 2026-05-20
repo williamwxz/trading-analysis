@@ -58,27 +58,24 @@ def _revision(stn: str = "strat_btc_rt", underlying: str = "BTC", position: floa
 
 
 @pytest.mark.unit
-def test_price_sink_emits_price_row():
-    cfg = SinkConfig(price=True, prod=False, bt=False, real_trade=False)
-    candle = _candle()
-
-    rows = process_candle(candle, {}, {}, {}, cfg)
-
-    price_rows = [r for r in rows if r["_sink"] == "price"]
-    assert len(price_rows) == 1
-    assert price_rows[0]["instrument"] == "BTCUSDT"
-    assert price_rows[0]["open"] == 50000.0
-
-
-@pytest.mark.unit
 def test_all_sinks_false_returns_empty():
     cfg = SinkConfig(price=False, prod=False, bt=False, real_trade=False)
-    rows = process_candle(_candle(), {}, {}, {}, cfg)
+    rows, prod_f, bt_f, rt_f = process_candle(_candle(), {}, {}, {}, cfg)
     assert rows == []
+    assert prod_f == bt_f == rt_f == 0
 
 
 @pytest.mark.unit
-def test_prod_new_bar_emits_pnl_row():
+def test_price_sink_flag_produces_no_rows():
+    """flink_pnl ignores the price sink — enabling it should produce no price rows."""
+    cfg = SinkConfig(price=True, prod=False, bt=False, real_trade=False)
+    rows, prod_f, bt_f, rt_f = process_candle(_candle(), {}, {}, {}, cfg)
+    assert rows == []
+    assert prod_f == bt_f == rt_f == 0
+
+
+@pytest.mark.unit
+def test_prod_new_bar_emits_pnl_row_and_fetched_count():
     cfg = SinkConfig(price=False, prod=True, bt=False, real_trade=False)
     candle = _candle(open_price=50000.0)
 
@@ -94,13 +91,17 @@ def test_prod_new_bar_emits_pnl_row():
 
     bar = _bar(position=1.0)
     with patch("flink_pnl.process_candle.fetch_strategies_for_candle", return_value=[bar]):
-        rows = process_candle(candle, state_prod, {}, {}, cfg)
+        rows, prod_fetched, bt_fetched, rt_fetched = process_candle(candle, state_prod, {}, {}, cfg)
+
+    assert prod_fetched == 1
+    assert bt_fetched == 0
+    assert rt_fetched == 0
 
     pnl_rows = [r for r in rows if r["_sink"] == "pnl_prod"]
     assert len(pnl_rows) == 1
     row_data = pnl_rows[0]["_row"]
-    # price must be candle.open = 50000.0, not from ClickHouse
-    assert row_data[11] == 50000.0  # price is index 11 in INSERT_COLUMNS
+    # price must be candle.open = 50000.0
+    assert row_data[11] == 50000.0  # price is index 11
     # cumulative_pnl = 0.0 + 1.0 * (50000 - 49000) / 49000
     expected_pnl = 0.0 + 1.0 * (50000.0 - 49000.0) / 49000.0
     assert abs(row_data[8] - expected_pnl) < 1e-9  # cumulative_pnl is index 8
@@ -122,10 +123,12 @@ def test_prod_carry_forward_when_no_new_bar():
     state_prod = build_state_from_bootstrap(anchor)
 
     with patch("flink_pnl.process_candle.fetch_strategies_for_candle", return_value=[]):
-        rows = process_candle(candle, state_prod, {}, {}, cfg)
+        rows, prod_fetched, _, _ = process_candle(candle, state_prod, {}, {}, cfg)
 
+    # fetched count is 0 (no bars from query) but a carry-forward row is still emitted
+    assert prod_fetched == 0
     pnl_rows = [r for r in rows if r["_sink"] == "pnl_prod"]
-    assert len(pnl_rows) == 1  # carry-forward row emitted
+    assert len(pnl_rows) == 1
     row_data = pnl_rows[0]["_row"]
     assert row_data[11] == 50000.0  # price updated to candle.open
     assert row_data[10] == 1.0      # position unchanged (index 10)
@@ -145,10 +148,10 @@ def test_carry_forward_only_fires_for_matching_underlying():
     state_prod = build_state_from_bootstrap(anchor)
 
     with patch("flink_pnl.process_candle.fetch_strategies_for_candle", return_value=[]):
-        rows = process_candle(candle, state_prod, {}, {}, cfg)
+        rows, _, _, _ = process_candle(candle, state_prod, {}, {}, cfg)
 
     pnl_rows = [r for r in rows if r["_sink"] == "pnl_prod"]
-    assert pnl_rows == []  # BTC strategy must NOT be carry-forwarded on SOL candle
+    assert pnl_rows == []
 
 
 @pytest.mark.unit
@@ -163,7 +166,7 @@ def test_real_trade_revision_guard_blocks_stale_revision():
         strategy_id=2, strategy_name="rt",
         config_timeframe="5m", weighting=1.0,
         final_signal=0.5, benchmark=0.0,
-        bar_ts=datetime(2026, 5, 15, 10, 0, 0),      # newer bar already active
+        bar_ts=datetime(2026, 5, 15, 10, 0, 0),       # newer bar already active
         revision_ts=datetime(2026, 5, 15, 10, 0, 30),
     ))
     state_rt = build_state_from_bootstrap(anchor)
@@ -179,13 +182,14 @@ def test_real_trade_revision_guard_blocks_stale_revision():
         position=0.0,
         final_signal=0.0,
         benchmark=0.0,
-        bar_ts=datetime(2026, 5, 15, 9, 55, 0),   # older bar — guard must block this
+        bar_ts=datetime(2026, 5, 15, 9, 55, 0),    # older bar — guard must block
         revision_ts=datetime(2026, 5, 15, 9, 59, 0),
     )
 
     with patch("flink_pnl.process_candle.fetch_real_trade_for_candle", return_value=[stale_rev]):
-        rows = process_candle(candle, {}, {}, state_rt, cfg)
+        rows, _, _, rt_fetched = process_candle(candle, {}, {}, state_rt, cfg)
 
+    assert rt_fetched == 1  # revision was fetched
     pnl_rows = [r for r in rows if r["_sink"] == "pnl_real_trade"]
     assert len(pnl_rows) == 1  # carry-forward emitted (guard blocked new position)
     row_data = pnl_rows[0]["_row"]
@@ -202,3 +206,17 @@ def test_fetch_strategies_receives_full_instrument_not_underlying():
         process_candle(candle, {}, {}, {}, cfg)
 
     mock_fetch.assert_called_once_with("BTCUSDT", candle.ts)
+
+
+@pytest.mark.unit
+def test_bt_fetched_count_matches_bars_returned():
+    cfg = SinkConfig(price=False, prod=False, bt=True, real_trade=False)
+    candle = _candle()
+
+    bars = [_bar("strat_btc_5m"), _bar("strat_btc_1h", position=0.5)]
+    with patch("flink_pnl.process_candle.fetch_bt_strategies_for_candle", return_value=bars):
+        _, prod_f, bt_f, rt_f = process_candle(candle, {}, {}, {}, cfg)
+
+    assert prod_f == 0
+    assert bt_f == 2
+    assert rt_f == 0

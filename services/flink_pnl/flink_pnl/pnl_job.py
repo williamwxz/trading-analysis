@@ -9,7 +9,7 @@ import os
 from pyflink.datastream import ProcessFunction, RuntimeContext
 
 from flink_pnl.clickhouse_sink import ClickHouseSinkFunction
-from flink_pnl.metrics import bootstrap_complete, candle_processed
+from flink_pnl.metrics import bootstrap_complete, emit_candle_lag
 from flink_pnl.process_candle import process_candle
 from flink_pnl.sink_config import SinkConfig
 from flink_pnl.state import StateMap, build_state_from_bootstrap
@@ -28,6 +28,7 @@ class PnlProcessFunction(ProcessFunction):
 
         brokers = os.environ["REDPANDA_BROKERS"]
         group_id = os.environ.get("KAFKA_GROUP_ID", "flink-pnl-consumer-v2")
+        self._sink_label = group_id.removeprefix("flink-pnl-consumer-") or group_id
 
         reference_ts = peek_reference_ts(brokers, group_id)
 
@@ -56,13 +57,17 @@ class PnlProcessFunction(ProcessFunction):
 
     def process_element(self, value: str, ctx: ProcessFunction.Context) -> None:
         candle = CandleEvent.from_dict(json.loads(value))
-        rows = process_candle(
+        rows, prod_fetched, bt_fetched, rt_fetched = process_candle(
             candle, self._state_prod, self._state_bt, self._state_rt, self._cfg
         )
         for row in rows:
             self._sink.invoke(row)
-        candle_processed(candle.ts, len(rows))
-        self._sink.flush()
+        self._sink.flush(
+            expected_prod=prod_fetched,
+            expected_bt=bt_fetched,
+            expected_real_trade=rt_fetched,
+        )
+        emit_candle_lag(candle.ts, self._sink_label)
 
     def snapshot_state(self, context) -> None:
         self._sink.flush()
