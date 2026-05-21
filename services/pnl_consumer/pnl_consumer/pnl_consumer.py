@@ -257,6 +257,14 @@ def _bootstrap_state(
                 position=seed.position,
                 bar_ts=seed.bar_ts,
                 revision_ts=seed.revision_ts,
+                strategy_instance_id=seed.strategy_instance_id,
+                underlying=seed.underlying,
+                strategy_id=seed.strategy_id,
+                strategy_name=seed.strategy_name,
+                config_timeframe=seed.config_timeframe,
+                weighting=seed.weighting,
+                final_signal=seed.final_signal,
+                benchmark=seed.benchmark,
             ),
         )
 

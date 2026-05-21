@@ -357,6 +357,36 @@ def test_fetch_real_trade_returns_empty_when_no_rows():
     assert revisions == []
 
 
+def _mk_pos_row(
+    siid: str,
+    position: float,
+    underlying: str = "BTC",
+    strategy_id: int = 1,
+    strategy_name: str = "test_strategy",
+    config_timeframe: str = "1h",
+    weighting: float = 1.0,
+    final_signal: float = 0.5,
+    benchmark: float = 0.0,
+    bar_ts: "datetime | None" = None,
+    max_revision_ts: "datetime | None" = None,
+) -> dict:
+    """Build a mock pos query row with all required metadata fields."""
+    row: dict = {
+        "strategy_instance_id": siid,
+        "underlying": underlying,
+        "strategy_id": strategy_id,
+        "strategy_name": strategy_name,
+        "config_timeframe": config_timeframe,
+        "weighting": weighting,
+        "row_json": json.dumps({"position": position, "final_signal": final_signal, "benchmark": benchmark}),
+    }
+    if bar_ts is not None:
+        row["bar_ts"] = bar_ts
+    if max_revision_ts is not None:
+        row["max_revision_ts"] = max_revision_ts
+    return row
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # bootstrap — fetch_bootstrap_seeds (prod/bt, real_trade=False)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -373,12 +403,7 @@ def test_fetch_bootstrap_seeds_returns_bootstrap_seed_with_correct_fields():
             "price": 93000.0,
         }
     ]
-    pos_rows = [
-        {
-            "strategy_instance_id": "inst_001",
-            "row_json": json.dumps({"position": 1.0}),
-        }
-    ]
+    pos_rows = [_mk_pos_row("inst_001", position=1.0)]
     # call order: DISTINCT stns, pnl per stn, pos per stn, completeness check
     with patch(
         "libs.computation.bootstrap.query_dicts",
@@ -405,7 +430,7 @@ def test_fetch_bootstrap_seeds_bar_ts_revision_ts_are_datetime_min_for_prod():
     """For prod/bt mode, bar_ts and revision_ts default to datetime.min."""
     stn_rows = [{"strategy_table_name": "strat_prod_1"}]
     pnl_rows = [{"strategy_instance_id": "inst_001", "cumulative_pnl": 1.0, "price": 50000.0}]
-    pos_rows = [{"strategy_instance_id": "inst_001", "row_json": json.dumps({"position": 0.5})}]
+    pos_rows = [_mk_pos_row("inst_001", position=0.5)]
     with patch(
         "libs.computation.bootstrap.query_dicts",
         side_effect=[stn_rows, pnl_rows, pos_rows, [{"cnt": 1}]],
@@ -451,7 +476,7 @@ def test_fetch_bootstrap_seeds_strategy_in_history_but_not_pnl_gets_zero_pnl_pri
     """Strategy present in history but not in pnl table gets pnl=0.0, price=0.0."""
     stn_rows = [{"strategy_table_name": "strat_new"}]
     pnl_rows: list = []
-    pos_rows = [{"strategy_instance_id": "inst_new", "row_json": json.dumps({"position": 0.3})}]
+    pos_rows = [_mk_pos_row("inst_new", position=0.3)]
     with patch(
         "libs.computation.bootstrap.query_dicts",
         side_effect=[stn_rows, pnl_rows, pos_rows, [{"cnt": 1}]],
@@ -502,7 +527,7 @@ def test_fetch_bootstrap_seeds_all_keys_union_of_both_sources():
     pos_rows_a: list = []
     stn_rows_b = [{"strategy_table_name": "strat_B"}]
     pnl_rows_b: list = []
-    pos_rows_b = [{"strategy_instance_id": "inst_B", "row_json": json.dumps({"position": 0.5})}]
+    pos_rows_b = [_mk_pos_row("inst_B", position=0.5)]
 
     stn_rows = [{"strategy_table_name": "strat_A"}, {"strategy_table_name": "strat_B"}]
 
@@ -565,14 +590,7 @@ def test_fetch_bootstrap_seeds_real_trade_bar_ts_revision_ts_populated():
     expected_rev_ts = datetime(2026, 5, 9, 23, 57, 30)
     stn_rows = [{"strategy_table_name": "strat_rt"}]
     pnl_rows: list = []
-    pos_rows = [
-        {
-            "strategy_instance_id": "inst_rt",
-            "bar_ts": expected_bar_ts,
-            "max_revision_ts": expected_rev_ts,
-            "row_json": json.dumps({"position": 0.8}),
-        }
-    ]
+    pos_rows = [_mk_pos_row("inst_rt", position=0.8, bar_ts=expected_bar_ts, max_revision_ts=expected_rev_ts)]
     with patch(
         "libs.computation.bootstrap.query_dicts",
         side_effect=[stn_rows, pnl_rows, pos_rows, [{"cnt": 1}]],
@@ -595,14 +613,11 @@ def test_fetch_bootstrap_seeds_real_trade_correct_position():
     """Real-trade mode returns correct position from argMax revision."""
     stn_rows = [{"strategy_table_name": "strat_rt"}]
     pnl_rows = [{"strategy_instance_id": "inst_rt", "cumulative_pnl": 3.0, "price": 70000.0}]
-    pos_rows = [
-        {
-            "strategy_instance_id": "inst_rt",
-            "bar_ts": datetime(2026, 5, 9, 22, 0, 0),
-            "max_revision_ts": datetime(2026, 5, 9, 22, 5, 0),
-            "row_json": json.dumps({"position": -1.0}),
-        }
-    ]
+    pos_rows = [_mk_pos_row(
+        "inst_rt", position=-1.0,
+        bar_ts=datetime(2026, 5, 9, 22, 0, 0),
+        max_revision_ts=datetime(2026, 5, 9, 22, 5, 0),
+    )]
     with patch(
         "libs.computation.bootstrap.query_dicts",
         side_effect=[stn_rows, pnl_rows, pos_rows, [{"cnt": 1}]],
@@ -617,6 +632,30 @@ def test_fetch_bootstrap_seeds_real_trade_correct_position():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+@pytest.mark.unit
+def test_fetch_bootstrap_seeds_underlying_populated_on_seed():
+    """BootstrapSeed.underlying is populated from the position query so build_state_from_bootstrap
+    can bucket by underlying without skipping strategies."""
+    stn_rows = [{"strategy_table_name": "strat_eth_1h"}]
+    pnl_rows = [{"strategy_instance_id": "inst_001", "cumulative_pnl": -0.537, "price": 2126.15}]
+    pos_rows = [_mk_pos_row("inst_001", position=-1.0, underlying="ETH", config_timeframe="1h")]
+    with patch(
+        "libs.computation.bootstrap.query_dicts",
+        side_effect=[stn_rows, pnl_rows, pos_rows, [{"cnt": 1}]],
+    ):
+        seeds = fetch_bootstrap_seeds(
+            pnl_table="analytics.strategy_pnl_1min_real_trade_v2",
+            history_table="analytics.strategy_output_history_v2",
+            start_ts=_START_TS,
+            real_trade=False,
+        )
+    assert len(seeds) == 1
+    seed = seeds[0]
+    assert seed.underlying == "ETH"
+    assert seed.config_timeframe == "1h"
+    assert seed.strategy_name == "test_strategy"
+
+
 # bootstrap — fetch_walk_rows (prod/bt, real_trade=False)
 # ─────────────────────────────────────────────────────────────────────────────
 

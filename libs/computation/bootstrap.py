@@ -37,6 +37,14 @@ class BootstrapSeed:
     pnl: float
     price: float
     position: float
+    # Bar metadata — needed by build_state_from_bootstrap to bucket by underlying.
+    underlying: str = ""
+    strategy_id: int = 0
+    strategy_name: str = ""
+    config_timeframe: str = ""
+    weighting: float = 0.0
+    final_signal: float = 0.0
+    benchmark: float = 0.0
     # bar_ts and revision_ts are used by real_trade's AnchorState revision guard.
     # For prod/bt these are unused — left at datetime.min so any real revision passes.
     bar_ts: datetime = field(default_factory=lambda: _DATETIME_MIN)
@@ -131,11 +139,16 @@ LIMIT 1 BY strategy_instance_id
                 "price": float(row["price"]),
             }
 
-        # ── Position per strategy_table_name ─────────────────────────────────
+        # ── Position + bar metadata per strategy_table_name ──────────────────
         if real_trade:
             pos_sql = f"""\
 SELECT
     strategy_instance_id,
+    underlying,
+    strategy_id,
+    strategy_name,
+    config_timeframe,
+    weighting,
     ts AS bar_ts,
     max(revision_ts) AS max_revision_ts,
     argMax(row_json, revision_ts) AS row_json
@@ -144,7 +157,7 @@ WHERE strategy_table_name = '{stn}'
   AND ts >= '{seed_window_start_str}'
   AND ts <= '{start_str}'
   AND revision_ts <= '{start_str}'
-GROUP BY strategy_instance_id, ts
+GROUP BY strategy_instance_id, underlying, strategy_id, strategy_name, config_timeframe, weighting, ts
 ORDER BY strategy_instance_id, ts DESC
 LIMIT 1 BY strategy_instance_id
 """
@@ -152,6 +165,13 @@ LIMIT 1 BY strategy_instance_id
                 rj = json.loads(row["row_json"])
                 pos_rows[row["strategy_instance_id"]] = {
                     "strategy_table_name": stn,
+                    "underlying": row["underlying"],
+                    "strategy_id": row["strategy_id"],
+                    "strategy_name": row["strategy_name"],
+                    "config_timeframe": row["config_timeframe"],
+                    "weighting": float(row["weighting"]),
+                    "final_signal": float(rj.get("final_signal", 0.0)),
+                    "benchmark": float(rj.get("benchmark", 0.0)),
                     "position": float(rj.get("position", 0.0)),
                     "bar_ts": row["bar_ts"],
                     "revision_ts": row["max_revision_ts"],
@@ -160,13 +180,18 @@ LIMIT 1 BY strategy_instance_id
             pos_sql = f"""\
 SELECT
     strategy_instance_id,
+    underlying,
+    strategy_id,
+    strategy_name,
+    config_timeframe,
+    weighting,
     argMin(row_json, revision_ts) AS row_json,
     max(ts) AS max_ts
 FROM {history_table}
 WHERE strategy_table_name = '{stn}'
   AND ts >= '{seed_window_start_str}'
   AND ts <= '{start_str}'
-GROUP BY strategy_instance_id
+GROUP BY strategy_instance_id, underlying, strategy_id, strategy_name, config_timeframe, weighting
 ORDER BY strategy_instance_id, max_ts DESC
 LIMIT 1 BY strategy_instance_id
 """
@@ -174,6 +199,13 @@ LIMIT 1 BY strategy_instance_id
                 rj = json.loads(row["row_json"])
                 pos_rows[row["strategy_instance_id"]] = {
                     "strategy_table_name": stn,
+                    "underlying": row["underlying"],
+                    "strategy_id": row["strategy_id"],
+                    "strategy_name": row["strategy_name"],
+                    "config_timeframe": row["config_timeframe"],
+                    "weighting": float(row["weighting"]),
+                    "final_signal": float(rj.get("final_signal", 0.0)),
+                    "benchmark": float(rj.get("benchmark", 0.0)),
                     "position": float(rj.get("position", 0.0)),
                     "bar_ts": _DATETIME_MIN,
                     "revision_ts": _DATETIME_MIN,
@@ -193,6 +225,13 @@ LIMIT 1 BY strategy_instance_id
                 pnl=pnl_info.get("pnl", 0.0),
                 price=pnl_info.get("price", 0.0),
                 position=pos_info.get("position", 0.0),
+                underlying=pos_info.get("underlying", ""),
+                strategy_id=pos_info.get("strategy_id", 0),
+                strategy_name=pos_info.get("strategy_name", ""),
+                config_timeframe=pos_info.get("config_timeframe", ""),
+                weighting=pos_info.get("weighting", 0.0),
+                final_signal=pos_info.get("final_signal", 0.0),
+                benchmark=pos_info.get("benchmark", 0.0),
                 bar_ts=pos_info.get("bar_ts", _DATETIME_MIN),
                 revision_ts=pos_info.get("revision_ts", _DATETIME_MIN),
             )
