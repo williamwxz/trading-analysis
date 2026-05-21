@@ -656,68 +656,9 @@ jobs:
       (needs.terraform.result == 'success' || needs.terraform.result == 'skipped') &&
       needs.detect-changes.outputs.grafana == 'true'
     permissions:
-      id-token: write
       contents: read
     steps:
       - uses: actions/checkout@v6.0.2
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.GHA_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Upsert CloudWatch datasource in Grafana Cloud
-        env:
-          GRAFANA_CLOUD_TOKEN: ${{ secrets.GRAFANA_CLOUD_TOKEN }}
-          GRAFANA_CLOUD_URL: ${{ secrets.GRAFANA_CLOUD_URL }}
-        run: |
-          set -eu
-
-          PAYLOAD=$(python3 -c "
-          import json
-          print(json.dumps({
-            'name': 'cloudwatch',
-            'type': 'cloudwatch',
-            'uid': 'cloudwatch',
-            'access': 'proxy',
-            'isDefault': False,
-            'jsonData': {
-              'authType': 'arn',
-              'assumeRoleArn': 'arn:aws:iam::068704208855:role/trading-analysis-grafana-cloudwatch',
-              'defaultRegion': 'ap-northeast-1',
-            },
-          }))")
-
-          # GET datasource by name to find its ID, then PUT to update or POST to create
-          DS_ID=$(curl -s \
-            -H "Authorization: Bearer $GRAFANA_CLOUD_TOKEN" \
-            "$GRAFANA_CLOUD_URL/api/datasources/name/cloudwatch" \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || true)
-
-          if [[ -n "$DS_ID" ]]; then
-            echo "Datasource found (id=$DS_ID), updating..."
-            HTTP_STATUS=$(curl -s -o /tmp/grafana_ds_response.json -w "%{http_code}" \
-              -X PUT \
-              -H "Content-Type: application/json" \
-              -H "Authorization: Bearer $GRAFANA_CLOUD_TOKEN" \
-              "$GRAFANA_CLOUD_URL/api/datasources/$DS_ID" \
-              -d "$PAYLOAD")
-          else
-            echo "Datasource not found, creating..."
-            HTTP_STATUS=$(curl -s -o /tmp/grafana_ds_response.json -w "%{http_code}" \
-              -X POST \
-              -H "Content-Type: application/json" \
-              -H "Authorization: Bearer $GRAFANA_CLOUD_TOKEN" \
-              "$GRAFANA_CLOUD_URL/api/datasources" \
-              -d "$PAYLOAD")
-          fi
-          if [[ "$HTTP_STATUS" -lt 200 || "$HTTP_STATUS" -ge 300 ]]; then
-            echo "ERROR: datasource upsert returned HTTP $HTTP_STATUS"
-            cat /tmp/grafana_ds_response.json
-            exit 1
-          fi
-          echo "OK: CloudWatch datasource upserted (HTTP $HTTP_STATUS)"
 
       - name: Push dashboards to Grafana Cloud
         env:
