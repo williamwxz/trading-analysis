@@ -103,7 +103,7 @@ Each `pnl_*_v2_full` asset runs every ~5 min and recomputes a rolling window end
 2. **Fetch anchors**: `fetch_anchors()` reads the last committed row per strategy from the target table just before `window_start` (1-day lookback)
 3. **Delete window**: idempotent DELETE WHERE ts >= window_start AND underlying = X
 4. **Fetch bars**: `fetch_new_bars_*()` queries `strategy_output_history_v2` for bars in the window
-5. **Fetch prices**: `fetch_prices_multi()` reads `analytics.futures_price_1min` — prices ALWAYS come from here, never from `row_json`
+5. **Fetch prices**: `fetch_prices_multi()` reads `analytics.futures_price_1min` — prices always come from here, never from `row_json`
 6. **Compute PnL**: `compute_*_pnl()` expands each bar into 1-min rows, chaining anchors forward
 7. **Insert rows**: `insert_rows()` writes to the target table
 
@@ -157,7 +157,7 @@ All three modes share the same formula and anchor-chaining loop. Differences are
 **Price fallback** (all modes): if `prices[ts_str]` is missing and an anchor price exists, the last known anchor price is reused. If no anchor price exists yet, the minute is skipped until the first price arrives.
 
 **Critical invariants:**
-- `price` in all PnL output tables is always the 1-min open from `analytics.futures_price_1min` — never the `price` field from `row_json`/`strategy_output_history_*`
+- `price` in all PnL output tables is always a 1-min open price — never the `price` field from `row_json`/`strategy_output_history_*`. **Dagster assets** read price from `analytics.futures_price_1min`; **pnl_consumer and flink_pnl** read `candle.open` from the Redpanda `binance.price.ticks` topic directly (no ClickHouse lookup in the live loop)
 - `cumulative_pnl` is always recomputed from scratch using our own anchor chain — the `cumulative_pnl` field in `row_json` is only used as a cold-start seed for BT (where we have no prior anchor), never for prod or real_trade
 - `traded` column in `strategy_pnl_1min_real_trade_v2` is always `False` — it was intended for future use and is never set; do not use it for any logic or reporting
 - `pnl_refresh_watermarks` table does not exist — the live refresh path is not active; no watermark table or watermark logic should be referenced
