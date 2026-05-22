@@ -1,0 +1,272 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "refresh": "1h",
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "AWS Billing",
+  "uid": "aws-billing",
+  "version": 1,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "AWS Estimated Charges",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "min": 0,
+          "unit": "currencyUSD",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "id": 1,
+      "options": {
+        "legend": {
+          "calcs": ["last", "max"],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": { "mode": "single" }
+      },
+      "targets": [
+        {
+          "alias": "Total",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "dimensions": { "Currency": "USD" },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "EstimatedCharges",
+          "metricQueryType": 0,
+          "namespace": "AWS/Billing",
+          "period": "86400",
+          "refId": "A",
+          "region": "us-east-1",
+          "statistic": "Maximum"
+        }
+      ],
+      "title": "Total Estimated Charges (USD)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 1, "fillOpacity": 10 },
+          "min": 0,
+          "unit": "currencyUSD",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "id": 2,
+      "options": {
+        "legend": {
+          "calcs": ["last", "max"],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "alias": "EC2",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "dimensions": { "Currency": "USD", "ServiceName": "AmazonEC2" },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "EstimatedCharges",
+          "metricQueryType": 0,
+          "namespace": "AWS/Billing",
+          "period": "86400",
+          "refId": "A",
+          "region": "us-east-1",
+          "statistic": "Maximum"
+        },
+        {
+          "alias": "ECS",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "dimensions": { "Currency": "USD", "ServiceName": "AmazonECS" },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "EstimatedCharges",
+          "metricQueryType": 0,
+          "namespace": "AWS/Billing",
+          "period": "86400",
+          "refId": "B",
+          "region": "us-east-1",
+          "statistic": "Maximum"
+        },
+        {
+          "alias": "RDS",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "dimensions": { "Currency": "USD", "ServiceName": "AmazonRDS" },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "EstimatedCharges",
+          "metricQueryType": 0,
+          "namespace": "AWS/Billing",
+          "period": "86400",
+          "refId": "C",
+          "region": "us-east-1",
+          "statistic": "Maximum"
+        },
+        {
+          "alias": "ECR",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "dimensions": { "Currency": "USD", "ServiceName": "AmazonECR" },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "EstimatedCharges",
+          "metricQueryType": 0,
+          "namespace": "AWS/Billing",
+          "period": "86400",
+          "refId": "D",
+          "region": "us-east-1",
+          "statistic": "Maximum"
+        },
+        {
+          "alias": "Secrets Manager",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "dimensions": { "Currency": "USD", "ServiceName": "AWSSecretsManager" },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "EstimatedCharges",
+          "metricQueryType": 0,
+          "namespace": "AWS/Billing",
+          "period": "86400",
+          "refId": "E",
+          "region": "us-east-1",
+          "statistic": "Maximum"
+        },
+        {
+          "alias": "CloudWatch",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "dimensions": { "Currency": "USD", "ServiceName": "AWSCloudWatch" },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "EstimatedCharges",
+          "metricQueryType": 0,
+          "namespace": "AWS/Billing",
+          "period": "86400",
+          "refId": "F",
+          "region": "us-east-1",
+          "statistic": "Maximum"
+        }
+      ],
+      "title": "Estimated Charges by Service (USD)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "red", "value": 200 }
+            ]
+          },
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 9 },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["last"],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "alias": "Total",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "dimensions": { "Currency": "USD" },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "EstimatedCharges",
+          "metricQueryType": 0,
+          "namespace": "AWS/Billing",
+          "period": "86400",
+          "refId": "A",
+          "region": "us-east-1",
+          "statistic": "Maximum"
+        }
+      ],
+      "title": "Current Month Estimate",
+      "type": "stat"
+    }
+  ]
+}
