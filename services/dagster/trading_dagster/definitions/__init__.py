@@ -11,6 +11,9 @@ from ..assets.binance_futures_ohlcv import (
 )
 from ..assets.pnl_strategy_v2 import (
     pnl_bt_v2_full_asset,
+    pnl_hourly_rollup_asset,
+    pnl_hourly_rollup_job,
+    pnl_hourly_rollup_schedule,
     pnl_prod_v2_full_asset,
     pnl_real_trade_v2_full_asset,
 )
@@ -24,6 +27,8 @@ all_assets = [
     pnl_prod_v2_full_asset,
     pnl_real_trade_v2_full_asset,
     pnl_bt_v2_full_asset,
+    # Hourly rollup (streaming supplement — runs every hour via schedule)
+    pnl_hourly_rollup_asset,
     # Infra checks
     postgres_cleanup_asset,
 ]
@@ -33,4 +38,6 @@ all_sensors = build_automation_sensors()
 defs = Definitions(
     assets=all_assets,
     sensors=all_sensors,
+    schedules=[pnl_hourly_rollup_schedule],
+    jobs=[pnl_hourly_rollup_job],
 )

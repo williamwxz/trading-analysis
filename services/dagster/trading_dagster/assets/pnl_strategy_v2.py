@@ -19,7 +19,9 @@ import boto3
 from dagster import (
     AssetExecutionContext,
     MaterializeResult,
+    ScheduleDefinition,
     asset,
+    define_asset_job,
 )
 
 from libs.computation import (
@@ -127,7 +129,15 @@ def _resume_ecs_service(
 def _refresh_hour_table(
     min_table: str, hour_table: str, window_start_ts: str, log_fn=None
 ) -> None:
-    """Re-aggregate 1hour rollup from the 1min table for the recomputed window."""
+    """Re-aggregate 1hour rollup from the 1min table for the recomputed window.
+
+    Simple argMax GROUP BY over the recomputed window — no fill-forward needed
+    because the full-recompute writes a 1-min row for every minute in the window,
+    so every strategy has data in every hour slot it is active.
+
+    The streaming gap problem (underlyings missing from some hour slots) is handled
+    separately by the pnl_hourly_rollup_asset which runs every hour.
+    """
     _emit = log_fn or _log.info
     client = get_client()
     execute(
@@ -702,3 +712,112 @@ def pnl_bt_v2_full_asset(context: AssetExecutionContext) -> MaterializeResult:
         target_table="strategy_pnl_1min_bt_v2",
         source_table="strategy_output_history_bt_v2",
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hourly rollup asset + schedule
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ROLLUP_PAIRS = [
+    ("strategy_pnl_1min_prod_v2", "strategy_pnl_1hour_prod_v2"),
+    ("strategy_pnl_1min_real_trade_v2", "strategy_pnl_1hour_real_trade_v2"),
+    ("strategy_pnl_1min_bt_v2", "strategy_pnl_1hour_bt_v2"),
+]
+
+
+_ROLLUP_LOOKBACK_HOURS = 6
+
+
+def _rollup_recent_hours(min_table: str, hour_table: str, log_fn=None) -> str | None:
+    """Re-aggregate the last 6 hours from a 1-min table into the 1-hour table.
+
+    Uses max(ts) - 6h as the window start. Re-inserting existing hour slots is
+    safe because the 1-hour tables use ReplacingMergeTree(updated_at) — duplicate
+    rows are deduplicated on merge.  The 6-hour overlap ensures any partially
+    written slot from a previous run gets corrected.
+
+    Returns the window_start string used, or None if the table is empty.
+    """
+    _emit = log_fn or _log.info
+    client = get_client()
+
+    max_ts = query_scalar(
+        f"SELECT max(ts) FROM analytics.{min_table}", client=client
+    )
+    if max_ts is None:
+        _emit(f"[hourly_rollup] {min_table} is empty — skipping")
+        return None
+
+    if isinstance(max_ts, str):
+        max_ts = datetime.strptime(max_ts, "%Y-%m-%d %H:%M:%S")
+    max_ts = max_ts.replace(tzinfo=None)
+
+    window_start = max_ts - timedelta(hours=_ROLLUP_LOOKBACK_HOURS)
+    window_start_str = window_start.strftime("%Y-%m-%d %H:%M:%S")
+    _emit(f"[hourly_rollup] {hour_table}: window [{window_start_str}, {max_ts}]")
+
+    execute(
+        f"ALTER TABLE analytics.{hour_table} DELETE"
+        f" WHERE ts >= toStartOfHour(toDateTime('{window_start_str}'))",
+        client=client,
+    )
+    execute(
+        f"""\
+INSERT INTO analytics.{hour_table}
+SELECT
+    strategy_table_name, strategy_id, strategy_name, underlying,
+    config_timeframe, source, version,
+    toStartOfHour(ts)                  AS ts,
+    argMax(cumulative_pnl, ts)         AS cumulative_pnl,
+    argMax(benchmark, ts)              AS benchmark,
+    argMax(position, ts)               AS position,
+    argMax(price, ts)                  AS price,
+    argMax(final_signal, ts)           AS final_signal,
+    argMax(weighting, ts)              AS weighting,
+    now()                              AS updated_at,
+    any(strategy_instance_id)          AS strategy_instance_id
+FROM (
+    SELECT *
+    FROM analytics.{min_table}
+    WHERE ts >= toStartOfHour(toDateTime('{window_start_str}'))
+    ORDER BY strategy_table_name, strategy_id, strategy_name, underlying,
+             config_timeframe, source, version, ts, updated_at DESC
+    LIMIT 1 BY strategy_table_name, strategy_id, strategy_name, underlying,
+               config_timeframe, source, version, ts
+)
+GROUP BY strategy_table_name, strategy_id, strategy_name, underlying,
+         config_timeframe, source, version, toStartOfHour(ts)
+""",
+        client=client,
+    )
+    _emit(f"[hourly_rollup] {hour_table}: done")
+    return window_start_str
+
+
+@asset(
+    name="pnl_hourly_rollup",
+    group_name="strategy_pnl",
+    compute_kind="clickhouse",
+    description="Re-aggregate the last completed hour from each _1min_ PnL table into the corresponding _1hour_ table.",
+)
+def pnl_hourly_rollup_asset(context: AssetExecutionContext) -> MaterializeResult:
+    """Re-aggregate the last 6 hours from each _1min_ PnL table into _1hour_ tables."""
+    windows: dict[str, str] = {}
+    for min_table, hour_table in _ROLLUP_PAIRS:
+        window_start = _rollup_recent_hours(min_table, hour_table, context.log.info)
+        if window_start:
+            windows[hour_table] = window_start
+    return MaterializeResult(metadata=windows)
+
+
+pnl_hourly_rollup_job = define_asset_job(
+    name="pnl_hourly_rollup_job",
+    selection=["pnl_hourly_rollup"],
+)
+
+pnl_hourly_rollup_schedule = ScheduleDefinition(
+    name="pnl_hourly_rollup_schedule",
+    cron_schedule="5 * * * *",  # 5 minutes past each hour — candles for :59 will be flushed
+    job=pnl_hourly_rollup_job,
+    execution_timezone="UTC",
+)
