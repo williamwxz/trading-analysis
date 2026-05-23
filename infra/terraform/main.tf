@@ -347,7 +347,7 @@ resource "aws_ecs_task_definition" "dagster" {
 
       environment = [
         { name = "DAGSTER_HOME", value = "/app" },
-        { name = "CLICKHOUSE_USER", value = "dev_ro3" },
+        { name = "CLICKHOUSE_USER", value = "dagster" },
         { name = "CLICKHOUSE_PORT", value = "8443" },
         { name = "CLICKHOUSE_SECURE", value = "true" },
         { name = "DAGSTER_PG_DB", value = "postgres" },
@@ -389,7 +389,7 @@ resource "aws_ecs_task_definition" "dagster" {
 
       environment = [
         { name = "DAGSTER_HOME", value = "/app" },
-        { name = "CLICKHOUSE_USER", value = "dev_ro3" },
+        { name = "CLICKHOUSE_USER", value = "dagster" },
         { name = "CLICKHOUSE_PORT", value = "8443" },
         { name = "CLICKHOUSE_SECURE", value = "true" },
         { name = "DAGSTER_PG_DB", value = "postgres" },
@@ -424,7 +424,7 @@ resource "aws_ecs_task_definition" "dagster" {
 
       environment = [
         { name = "DAGSTER_HOME", value = "/app" },
-        { name = "CLICKHOUSE_USER", value = "dev_ro3" },
+        { name = "CLICKHOUSE_USER", value = "dagster" },
         { name = "CLICKHOUSE_PORT", value = "8443" },
         { name = "CLICKHOUSE_SECURE", value = "true" },
         { name = "DAGSTER_PG_DB", value = "postgres" },
@@ -1287,7 +1287,7 @@ resource "aws_ecs_task_definition" "pnl_consumer" {
     ]
     environment = [
       { name = "CLICKHOUSE_PORT",         value = "8443" },
-      { name = "CLICKHOUSE_USER",         value = "dev_ro3" },
+      { name = "CLICKHOUSE_USER",         value = "streaming" },
       { name = "CLICKHOUSE_SECURE",       value = "true" },
       { name = "REDPANDA_BROKERS",        value = "redpanda.${local.name_prefix}.local:9092" },
       { name = "KAFKA_GROUP_ID",          value = each.value.group_id },
@@ -1539,7 +1539,7 @@ resource "aws_ecs_task_definition" "flink_pnl" {
     ]
     environment = [
       { name = "CLICKHOUSE_PORT",        value = "8443" },
-      { name = "CLICKHOUSE_USER",        value = "dev_ro3" },
+      { name = "CLICKHOUSE_USER",        value = "streaming" },
       { name = "CLICKHOUSE_SECURE",      value = "true" },
       { name = "REDPANDA_BROKERS",       value = "redpanda.${local.name_prefix}.local:9092" },
       { name = "KAFKA_GROUP_ID",         value = each.value.group_id },
