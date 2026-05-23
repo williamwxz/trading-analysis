@@ -18,7 +18,7 @@ from dagster import (
     asset,
 )
 
-from ..utils.clickhouse_client import get_price_client, insert_rows, query_scalar, execute_query
+from ..utils.clickhouse_client import get_client, insert_rows, query_scalar, execute_query
 from ..utils.exchange_price_service import ExchangePriceDataService
 
 # Configuration
@@ -72,7 +72,7 @@ def binance_futures_backfill_asset(context: AssetExecutionContext) -> Materializ
     start_dt = datetime.strptime(partition_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     end_dt = start_dt + timedelta(days=1)
     
-    client = get_price_client()
+    client = get_client()
     total_inserted = 0
 
     start_dt_str = start_dt.strftime('%Y-%m-%d %H:%M:%S')

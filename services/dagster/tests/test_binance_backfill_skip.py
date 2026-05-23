@@ -17,7 +17,7 @@ def test_skips_instrument_when_full_day_present():
 
     ctx = _make_context("2024-03-01")
 
-    with patch("trading_dagster.assets.binance_futures_ohlcv.get_price_client") as mock_get_client, \
+    with patch("trading_dagster.assets.binance_futures_ohlcv.get_client") as mock_get_client, \
          patch("trading_dagster.assets.binance_futures_ohlcv.query_scalar", return_value=1440) as mock_qs, \
          patch("trading_dagster.assets.binance_futures_ohlcv.execute_query") as mock_exec, \
          patch("trading_dagster.assets.binance_futures_ohlcv.insert_rows") as mock_insert, \
@@ -57,7 +57,7 @@ def test_refetches_instrument_when_partial_day():
         "volume": [1.0] * 10,
     })
 
-    with patch("trading_dagster.assets.binance_futures_ohlcv.get_price_client"), \
+    with patch("trading_dagster.assets.binance_futures_ohlcv.get_client"), \
          patch("trading_dagster.assets.binance_futures_ohlcv.query_scalar", side_effect=scalar_side_effect), \
          patch("trading_dagster.assets.binance_futures_ohlcv.execute_query") as mock_exec, \
          patch("trading_dagster.assets.binance_futures_ohlcv.insert_rows") as mock_insert, \
