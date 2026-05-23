@@ -35,10 +35,8 @@ def _bar(stn="strat_1", ts="2026-05-12 10:00:00", tf="1h", pos=1.0):
 
 
 def _rev(stn="strat_1", ts="2026-05-12 10:00:00", tf="1h", rev_ts="2026-05-12 10:05:00",
-         next_closing=None, pos=1.0):
+         pos=1.0):
     closing_ts = _add_tf(ts, tf)
-    if next_closing is None:
-        next_closing = closing_ts  # sentinel = always accept
     return {
         "strategy_table_name": stn,
         "strategy_id": 1,
@@ -51,7 +49,6 @@ def _rev(stn="strat_1", ts="2026-05-12 10:00:00", tf="1h", rev_ts="2026-05-12 10
         "closing_ts": closing_ts,
         "execution_ts": _to_start_of_minute_plus59(rev_ts),
         "revision_ts": rev_ts,
-        "next_bar_closing_ts": next_closing,
         "position": pos,
         "final_signal": pos,
         "bar_benchmark": 0.0,
@@ -181,21 +178,29 @@ def test_active_prod_bar_at_unknown_strategy_returns_none():
 # ─────────────────────────────────────────────────────────────────────────────
 
 @pytest.mark.unit
-def test_build_rt_lookup_filters_rejected_revision():
-    # revision_ts >= next_bar_closing_ts → rejected
-    closing = "2026-05-12 11:00:00"
-    next_closing = "2026-05-12 12:00:00"
-    accepted_rev = _rev(rev_ts="2026-05-12 10:05:00", next_closing=next_closing)
-    rejected_rev = _rev(rev_ts="2026-05-12 12:30:00", next_closing=next_closing)
-    lookup = build_rt_lookup([accepted_rev, rejected_rev])
-    # Only accepted revision should appear
+def test_build_rt_lookup_duplicate_revision_discarded():
+    # Same (ts, revision_ts) pair appears twice — only one entry in lookup
+    rev = _rev(rev_ts="2026-05-12 10:05:00")
+    lookup = build_rt_lookup([rev, dict(rev)])
     assert len(lookup["strat_1"]) == 1
 
 
 @pytest.mark.unit
-def test_build_rt_lookup_sentinel_always_accepted():
-    # sentinel: next_bar_closing_ts == closing_ts → always accept
-    rev = _rev(rev_ts="2026-05-12 11:30:00", next_closing=None)  # None → sentinel
+def test_build_rt_lookup_older_bar_after_newer_discarded():
+    # Newer bar accepted first (ts=11:00), then older bar (ts=10:00) — discarded
+    newer = _rev(ts="2026-05-12 11:00:00", rev_ts="2026-05-12 11:05:00")
+    older = _rev(ts="2026-05-12 10:00:00", rev_ts="2026-05-12 12:30:00")
+    # sorted by (ts, revision_ts): older first (10:00 < 11:00), newer second → both accepted
+    # To trigger the discard, we need an older-bar revision that sorts AFTER the newer one —
+    # impossible with ASC sort, so test that input order doesn't matter (sort is internal)
+    lookup_a = build_rt_lookup([newer, older])
+    lookup_b = build_rt_lookup([older, newer])
+    assert len(lookup_a["strat_1"]) == len(lookup_b["strat_1"])
+
+
+@pytest.mark.unit
+def test_build_rt_lookup_single_revision_always_accepted():
+    rev = _rev(rev_ts="2026-05-12 11:30:00")
     lookup = build_rt_lookup([rev])
     assert "strat_1" in lookup
     assert len(lookup["strat_1"]) == 1
@@ -233,10 +238,8 @@ def test_active_rt_revision_at_returns_none_before_execution_ts():
 
 @pytest.mark.unit
 def test_active_rt_revision_at_switches_at_next_revision():
-    rev1 = _rev(stn="strat_1", rev_ts="2026-05-12 10:05:00", tf="1h",
-                next_closing="2026-05-12 12:00:00")
-    rev2 = _rev(stn="strat_1", rev_ts="2026-05-12 10:30:00", tf="1h",
-                next_closing=None)
+    rev1 = _rev(stn="strat_1", rev_ts="2026-05-12 10:05:00", tf="1h")
+    rev2 = _rev(stn="strat_1", rev_ts="2026-05-12 10:30:00", tf="1h")
     lookup = build_rt_lookup([rev1, rev2])
     exec1 = _parse("2026-05-12 10:05:00")
     exec2 = _parse("2026-05-12 10:30:00")

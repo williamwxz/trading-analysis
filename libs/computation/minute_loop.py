@@ -10,8 +10,9 @@ For prod/bt:
 
 For real_trade:
     Active revision at minute M = accepted revision R where execution_ts(R) <= M
-    < next_execution_ts(R). Acceptance filter: revision_ts < next_bar_closing_ts.
-    Mirrors candle_lookup.fetch_real_trade_for_candle + AnchorState revision guard.
+    < next_execution_ts(R). Acceptance filter: (bar_ts, revision_ts) must be strictly
+    greater than the previous accepted revision's (bar_ts, revision_ts) — mirrors
+    AnchorState.should_apply_revision in the pnl_consumer.
 """
 
 from bisect import bisect_right
@@ -72,8 +73,9 @@ def build_prod_lookup(bars: list[dict]) -> ProdLookup:
 def build_rt_lookup(bars: list[dict]) -> RtLookup:
     """Build per-strategy sorted execution_ts lookup for real_trade revisions.
 
-    Acceptance filter applied once here: revision_ts < next_bar_closing_ts
-    (or sentinel: next_bar_closing_ts == closing_ts means always accept).
+    Acceptance filter mirrors AnchorState.should_apply_revision: a revision is
+    accepted iff (bar_ts, revision_ts) > (prev_accepted.ts, prev_accepted.revision_ts).
+    Revisions are sorted by (ts, revision_ts) ascending before filtering.
     """
     by_stn: dict[str, list[dict]] = {}
     for bar in bars:
@@ -82,11 +84,14 @@ def build_rt_lookup(bars: list[dict]) -> RtLookup:
     lookup: RtLookup = {}
     for stn, stn_bars in by_stn.items():
         stn_bars.sort(key=lambda b: (b["ts"], b["revision_ts"]))
-        accepted = [
-            rev for rev in stn_bars
-            if rev["next_bar_closing_ts"] == rev["closing_ts"]
-            or rev["revision_ts"] < rev["next_bar_closing_ts"]
-        ]
+        accepted: list[dict] = []
+        last_bar_ts: str = ""
+        last_revision_ts: str = ""
+        for rev in stn_bars:
+            if (rev["ts"], rev["revision_ts"]) > (last_bar_ts, last_revision_ts):
+                accepted.append(rev)
+                last_bar_ts = rev["ts"]
+                last_revision_ts = rev["revision_ts"]
         if not accepted:
             continue
         entries: list[RtRevisionEntry] = []

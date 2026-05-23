@@ -198,53 +198,34 @@ def fetch_new_bars_real_trade(
     Each revision includes:
     - execution_ts = toStartOfMinute(revision_ts + 59s) — when position takes effect
     - closing_ts   = ts + tf_minutes — bar close time
-    - next_bar_closing_ts — closing time of the next bar (sentinel = closing_ts if no next bar)
 
-    compute_real_trade_pnl uses next_bar_closing_ts to decide whether to accept
-    or discard each revision.
+    compute_real_trade_pnl applies the acceptance filter in Python using the same
+    tuple guard as AnchorState.should_apply_revision: accept iff
+    (ts, revision_ts) > (prev_accepted.ts, prev_accepted.revision_ts).
     """
     tf_expr = _TF_EXPR
     sql = f"""\
 SELECT
-    r.strategy_table_name,
-    r.strategy_id,
-    r.strategy_name,
-    r.underlying,
-    r.config_timeframe,
-    r.strategy_instance_id,
-    r.weighting,
-    toString(r.ts)                                                          AS ts,
-    toString(r.ts + toIntervalMinute({tf_expr}))                            AS closing_ts,
-    toString(toStartOfMinute(r.revision_ts + INTERVAL 59 SECOND))           AS execution_ts,
-    toString(r.revision_ts)                                                 AS revision_ts,
-    toString(nb.next_bar_ts + toIntervalMinute({tf_expr}))                  AS next_bar_closing_ts,
-    JSONExtractFloat(r.row_json, 'position')    AS position,
-    JSONExtractFloat(r.row_json, 'final_signal') AS final_signal,
-    JSONExtractFloat(r.row_json, 'benchmark')   AS bar_benchmark
-FROM analytics.{source_table} r
-LEFT JOIN (
-    SELECT
-        strategy_table_name,
-        ts,
-        leadInFrame(ts, 1, ts) OVER (
-            PARTITION BY strategy_table_name ORDER BY ts
-            ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
-        ) AS next_bar_ts
-    FROM (
-        SELECT strategy_table_name, ts
-        FROM analytics.{source_table}
-        WHERE underlying = '{underlying}'
-          AND strategy_table_name NOT LIKE 'manual_probe%'
-          AND toDateTime(ts) >= toDateTime('{ts_start}')
-          AND toDateTime(ts) < toDateTime('{ts_end}')
-        GROUP BY strategy_table_name, ts
-    )
-) nb ON r.strategy_table_name = nb.strategy_table_name AND r.ts = nb.ts
-WHERE r.underlying = '{underlying}'
-  AND r.strategy_table_name NOT LIKE 'manual_probe%'
-  AND toDateTime(r.ts) >= toDateTime('{ts_start}')
-  AND toDateTime(r.ts) < toDateTime('{ts_end}')
-ORDER BY r.strategy_table_name, r.ts, r.revision_ts
+    strategy_table_name,
+    strategy_id,
+    strategy_name,
+    underlying,
+    config_timeframe,
+    strategy_instance_id,
+    weighting,
+    toString(ts)                                                        AS ts,
+    toString(ts + toIntervalMinute({tf_expr}))                          AS closing_ts,
+    toString(toStartOfMinute(revision_ts + INTERVAL 59 SECOND))         AS execution_ts,
+    toString(revision_ts)                                               AS revision_ts,
+    JSONExtractFloat(row_json, 'position')    AS position,
+    JSONExtractFloat(row_json, 'final_signal') AS final_signal,
+    JSONExtractFloat(row_json, 'benchmark')   AS bar_benchmark
+FROM analytics.{source_table}
+WHERE underlying = '{underlying}'
+  AND strategy_table_name NOT LIKE 'manual_probe%'
+  AND toDateTime(ts) >= toDateTime('{ts_start}')
+  AND toDateTime(ts) < toDateTime('{ts_end}')
+ORDER BY strategy_table_name, ts, revision_ts
 """
     return [
         {
@@ -259,7 +240,6 @@ ORDER BY r.strategy_table_name, r.ts, r.revision_ts
             "closing_ts": str(r["closing_ts"]),
             "execution_ts": str(r["execution_ts"]),
             "revision_ts": str(r["revision_ts"]),
-            "next_bar_closing_ts": str(r["next_bar_closing_ts"]),
             "position": float(r["position"]),
             "final_signal": float(r["final_signal"]),
             "bar_benchmark": float(r["bar_benchmark"]),

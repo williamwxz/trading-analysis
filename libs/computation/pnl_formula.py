@@ -311,8 +311,10 @@ def compute_real_trade_pnl(
 ) -> List[list]:
     """Expand real_trade revisions to 1-min rows.
 
-    Acceptance rule: a revision is accepted if revision_ts < next_bar_closing_ts.
-    When next_bar_closing_ts == closing_ts (no next bar sentinel), always accepted.
+    Acceptance rule: mirrors AnchorState.should_apply_revision in the pnl_consumer.
+    A revision is accepted iff (bar_ts, revision_ts) > (prev_accepted.ts, prev_accepted.revision_ts).
+    Revisions are processed in (ts, revision_ts) ascending order; any revision that is
+    not strictly greater than the last accepted one is discarded (duplicate or stale).
     Accepted revisions expand from their execution_ts until the next accepted
     revision's execution_ts. The last accepted revision holds for tf_minutes past
     its closing_ts.
@@ -329,10 +331,13 @@ def compute_real_trade_pnl(
         anchor_pnl, anchor_price, _active_pos = anchors.get(stn, (0.0, 0.0, 0.0))
 
         accepted: List[dict] = []
+        last_bar_ts: str = ""
+        last_revision_ts: str = ""
         for rev in strategy_bars:
-            no_next_bar = rev["next_bar_closing_ts"] == rev["closing_ts"]
-            if no_next_bar or rev["revision_ts"] < rev["next_bar_closing_ts"]:
+            if (rev["ts"], rev["revision_ts"]) > (last_bar_ts, last_revision_ts):
                 accepted.append(rev)
+                last_bar_ts = rev["ts"]
+                last_revision_ts = rev["revision_ts"]
 
         for i, rev in enumerate(accepted):
             exec_ts = _parse_ts(rev["execution_ts"])

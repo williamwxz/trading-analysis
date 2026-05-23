@@ -148,7 +148,7 @@ All three modes share the same formula and anchor-chaining loop. Differences are
 
 **Real-trade** (`source_label="real_trade"`, `compute_real_trade_pnl`):
 - Source: `strategy_output_history_v2`, ALL revisions per bar fetched and filtered.
-- Revision acceptance rule: a revision is accepted if `revision_ts < next_bar_closing_ts`. When no next bar exists, the SQL sentinel `next_bar_closing_ts == closing_ts` always accepts. Discarded revisions are skipped entirely — the previous accepted position continues holding.
+- Revision acceptance rule: mirrors `AnchorState.should_apply_revision` in the pnl_consumer — a revision is accepted iff `(bar_ts, revision_ts) > (prev_accepted.bar_ts, prev_accepted.revision_ts)`. Revisions are sorted by `(ts, revision_ts)` ascending; duplicates and out-of-order older-bar revisions are discarded. Discarded revisions are skipped entirely — the previous accepted position continues holding.
 - Execution starts at `execution_ts = toStartOfMinute(revision_ts + 59s)` — the minute the position *actually* took effect (not bar close). `closing_ts` (= `ts + tf_minutes`) is stored separately on each output row.
 - Accepted revisions expand 1-min from their `execution_ts` until the next accepted revision's `execution_ts`. The last accepted revision holds for `tf_minutes` past its `closing_ts`.
 - Anchor seed: always from previous day's tail in `strategy_pnl_1min_real_trade_v2`. No cold-start seeding from source JSON.
@@ -171,9 +171,8 @@ Each bar's position is held from its `closing_ts` (= `ts + tf_minutes`) until th
 `real_trade` bars have multiple revisions per bar (position updates arriving after bar open). `fetch_new_bars_real_trade` fetches all revisions for bars in the window, computing:
 - `execution_ts = toStartOfMinute(revision_ts + 59s)` — the minute when the new position becomes active
 - `closing_ts = ts + tf_minutes` — the bar's own close time
-- `next_bar_closing_ts` — the close time of the following bar (via SQL `leadInFrame`); used to filter stale revisions
 
-`compute_real_trade_pnl` acceptance rule: a revision is accepted if `revision_ts < next_bar_closing_ts`. When no next bar exists, the sentinel `next_bar_closing_ts == closing_ts` always accepts. Accepted revisions are expanded 1-min from their `execution_ts` until the next accepted revision's `execution_ts`. The last accepted revision holds for `tf_minutes` past its own `closing_ts`.
+`compute_real_trade_pnl` acceptance rule: a revision is accepted iff `(ts, revision_ts) > (prev_accepted.ts, prev_accepted.revision_ts)` — the same tuple guard as `AnchorState.should_apply_revision`. Revisions are sorted `(ts, revision_ts)` ascending before filtering. Accepted revisions are expanded 1-min from their `execution_ts` until the next accepted revision's `execution_ts`. The last accepted revision holds for `tf_minutes` past its own `closing_ts`.
 
 `execution_ts` in `strategy_pnl_1min_real_trade_v2` is `toStartOfMinute(revision_ts + 59s)` — the minute the position took effect. It is NOT the bar's closing time. `closing_ts` is the bar closing time.
 
