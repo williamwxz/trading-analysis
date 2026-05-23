@@ -65,6 +65,7 @@ locals {
       group_id          = "flink-pnl-consumer-price"
       desired_count     = 0
       dry_run           = "true"
+      clickhouse_user   = "streaming"
     }
     prod = {
       enable_price      = "false"
@@ -74,6 +75,7 @@ locals {
       group_id          = "flink-pnl-consumer-prod"
       desired_count     = 0
       dry_run           = "true"
+      clickhouse_user   = "streaming"
     }
     real-trade = {
       enable_price      = "false"
@@ -83,6 +85,7 @@ locals {
       group_id          = "flink-pnl-consumer-v2"
       desired_count     = 0
       dry_run           = "false"
+      clickhouse_user   = "streaming"
     }
     bt = {
       enable_price      = "false"
@@ -92,6 +95,7 @@ locals {
       group_id          = "flink-pnl-consumer-bt"
       desired_count     = 0
       dry_run           = "true"
+      clickhouse_user   = "streaming"
     }
   }
 }
@@ -348,6 +352,7 @@ resource "aws_ecs_task_definition" "dagster" {
       environment = [
         { name = "DAGSTER_HOME", value = "/app" },
         { name = "CLICKHOUSE_USER", value = "dagster" },
+        { name = "CLICKHOUSE_USER_PRICE", value = "dev_ro3" },
         { name = "CLICKHOUSE_PORT", value = "8443" },
         { name = "CLICKHOUSE_SECURE", value = "true" },
         { name = "DAGSTER_PG_DB", value = "postgres" },
@@ -390,6 +395,7 @@ resource "aws_ecs_task_definition" "dagster" {
       environment = [
         { name = "DAGSTER_HOME", value = "/app" },
         { name = "CLICKHOUSE_USER", value = "dagster" },
+        { name = "CLICKHOUSE_USER_PRICE", value = "dev_ro3" },
         { name = "CLICKHOUSE_PORT", value = "8443" },
         { name = "CLICKHOUSE_SECURE", value = "true" },
         { name = "DAGSTER_PG_DB", value = "postgres" },
@@ -425,6 +431,7 @@ resource "aws_ecs_task_definition" "dagster" {
       environment = [
         { name = "DAGSTER_HOME", value = "/app" },
         { name = "CLICKHOUSE_USER", value = "dagster" },
+        { name = "CLICKHOUSE_USER_PRICE", value = "dev_ro3" },
         { name = "CLICKHOUSE_PORT", value = "8443" },
         { name = "CLICKHOUSE_SECURE", value = "true" },
         { name = "DAGSTER_PG_DB", value = "postgres" },
@@ -1239,6 +1246,7 @@ locals {
       enable_bt         = "false"
       group_id          = "pnl-consumer-price"
       desired_count     = 1
+      clickhouse_user   = "dev_ro3"
     }
     prod = {
       enable_price      = "false"
@@ -1247,6 +1255,7 @@ locals {
       enable_bt         = "false"
       group_id          = "pnl-consumer-prod-2"
       desired_count     = 1
+      clickhouse_user   = "streaming"
     }
     real-trade = {
       enable_price      = "false"
@@ -1255,6 +1264,7 @@ locals {
       enable_bt         = "false"
       group_id          = "pnl-consumer-real-trade-3"
       desired_count     = 0
+      clickhouse_user   = "streaming"
     }
     bt = {
       enable_price      = "false"
@@ -1263,6 +1273,7 @@ locals {
       enable_bt         = "true"
       group_id          = "pnl-consumer-bt"
       desired_count     = 0
+      clickhouse_user   = "streaming"
     }
   }
 }
@@ -1287,7 +1298,7 @@ resource "aws_ecs_task_definition" "pnl_consumer" {
     ]
     environment = [
       { name = "CLICKHOUSE_PORT",         value = "8443" },
-      { name = "CLICKHOUSE_USER",         value = "streaming" },
+      { name = "CLICKHOUSE_USER",         value = each.value.clickhouse_user },
       { name = "CLICKHOUSE_SECURE",       value = "true" },
       { name = "REDPANDA_BROKERS",        value = "redpanda.${local.name_prefix}.local:9092" },
       { name = "KAFKA_GROUP_ID",          value = each.value.group_id },
@@ -1539,7 +1550,7 @@ resource "aws_ecs_task_definition" "flink_pnl" {
     ]
     environment = [
       { name = "CLICKHOUSE_PORT",        value = "8443" },
-      { name = "CLICKHOUSE_USER",        value = "streaming" },
+      { name = "CLICKHOUSE_USER",        value = each.value.clickhouse_user },
       { name = "CLICKHOUSE_SECURE",      value = "true" },
       { name = "REDPANDA_BROKERS",       value = "redpanda.${local.name_prefix}.local:9092" },
       { name = "KAFKA_GROUP_ID",         value = each.value.group_id },

@@ -12,17 +12,22 @@ import clickhouse_connect
 from clickhouse_connect.driver.client import Client
 
 
-def get_client() -> Client:
+def get_client(username: Optional[str] = None) -> Client:
     """Create a ClickHouse Cloud client from env vars."""
     return clickhouse_connect.get_client(
         host=os.getenv("CLICKHOUSE_HOST", "localhost"),
         port=int(os.getenv("CLICKHOUSE_PORT", "8443")),
-        username=os.getenv("CLICKHOUSE_USER", "default"),
+        username=username or os.getenv("CLICKHOUSE_USER", "default"),
         password=os.getenv("CLICKHOUSE_PASSWORD", ""),
         secure=os.getenv("CLICKHOUSE_SECURE", "true").lower() == "true",
         connect_timeout=15,
         send_receive_timeout=600,
     )
+
+
+def get_price_client() -> Client:
+    """ClickHouse client using CLICKHOUSE_USER_PRICE for price/market-data assets."""
+    return get_client(username=os.getenv("CLICKHOUSE_USER_PRICE", os.getenv("CLICKHOUSE_USER", "default")))
 
 
 def query_rows(sql: str, client: Optional[Client] = None) -> List[List]:
