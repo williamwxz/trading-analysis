@@ -366,3 +366,29 @@ GROUP BY
     strategy_table_name, strategy_id, strategy_name, underlying,
     config_timeframe, source, version, toStartOfHour(src_ts);
 
+-- ─────────────────────────────────────────────────────────────────────────────
+-- strategy_pause_events — one row per paused strategy table per pause event
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS analytics.strategy_pause_events
+(
+    event_uuid                       String,
+    event_ts_utc                     DateTime64(6, 'UTC'),
+    sid                              String,
+    trace_text_paused_strategy_table String
+)
+ENGINE = MergeTree()
+ORDER BY (event_ts_utc, sid, event_uuid);
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS analytics.strategy_pause_events_mv
+TO analytics.strategy_pause_events
+AS
+SELECT
+    event_uuid,
+    parseDateTime64BestEffort(event_ts_utc) AS event_ts_utc,
+    extract(pst, 'sid=([^|]+)')             AS sid,
+    pst                                     AS trace_text_paused_strategy_table
+FROM analytics.errors_history
+ARRAY JOIN JSONExtract(traceback_text, 'paused_strategy_tables', 'Array(String)') AS pst
+WHERE category = 'strategy_pause'
+  AND traceback_text != '';
+

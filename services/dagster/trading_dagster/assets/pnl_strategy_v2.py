@@ -141,7 +141,7 @@ def _refresh_hour_table(
     _emit = log_fn or _log.info
     client = get_client()
     execute(
-        f"ALTER TABLE analytics.{hour_table} DELETE"
+        f"DELETE FROM analytics.{hour_table}"
         f" WHERE ts >= toStartOfHour(toDateTime('{window_start_ts}'))",
         client=client,
     )
@@ -289,8 +289,8 @@ def _process_underlying_recent(
     _emit(f"[{underlying}] loaded {len(state)} anchors")
 
     execute(
-        f"ALTER TABLE analytics.{target_table} DELETE "
-        f"WHERE underlying = '{underlying}' AND ts >= toDateTime('{window_start_ts}')",
+        f"DELETE FROM analytics.{target_table}"
+        f" WHERE underlying = '{underlying}' AND ts >= toDateTime('{window_start_ts}')",
         client=client,
     )
     _emit(f"[{underlying}] deleted rows >= {window_start_ts}")
@@ -478,8 +478,8 @@ def _process_underlying_bt(
     )
 
     execute(
-        f"ALTER TABLE analytics.{target_table} DELETE "
-        f"WHERE underlying = '{underlying}' AND ts >= toDateTime('{window_start_ts}')",
+        f"DELETE FROM analytics.{target_table}"
+        f" WHERE underlying = '{underlying}' AND ts >= toDateTime('{window_start_ts}')",
         client=client,
     )
     _emit(f"[{underlying}] bt deleted rows >= {window_start_ts}")
@@ -757,7 +757,7 @@ def _rollup_recent_hours(min_table: str, hour_table: str, log_fn=None) -> str | 
     _emit(f"[hourly_rollup] {hour_table}: window [{window_start_str}, {max_ts}]")
 
     execute(
-        f"ALTER TABLE analytics.{hour_table} DELETE"
+        f"DELETE FROM analytics.{hour_table}"
         f" WHERE ts >= toStartOfHour(toDateTime('{window_start_str}'))",
         client=client,
     )
