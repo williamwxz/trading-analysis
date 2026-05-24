@@ -228,7 +228,7 @@ def test_fetch_bt_strategies_closing_ts_filter():
 
 @pytest.mark.unit
 def test_fetch_bt_strategies_uses_argmin_revision_ts():
-    """bt lookup uses argMin(row_json, revision_ts) — first revision only."""
+    """bt lookup uses argMin on scalar fields keyed by revision_ts — first revision only."""
     captured = []
 
     def capture(sql):
@@ -237,7 +237,9 @@ def test_fetch_bt_strategies_uses_argmin_revision_ts():
 
     with patch("libs.computation.candle_lookup.query_dicts", side_effect=capture):
         fetch_bt_strategies_for_candle(instrument="BTCUSDT", candle_ts=_CANDLE_TS)
-    assert "argMin(row_json, revision_ts)" in captured[0]
+    assert "argMin(" in captured[0]
+    assert "revision_ts" in captured[0]
+    assert "'position'" in captured[0]
 
 
 @pytest.mark.unit

@@ -144,7 +144,9 @@ def test_fetch_bt_strategies_returns_list_of_strategy_bars():
             "config_timeframe": "5m",
             "weighting": 1.0,
             "latest_ts": datetime(2026, 4, 26, 0, 1, 0),
-            "row_json": '{"position": -1.0, "final_signal": -1.0, "benchmark": 0.01}',
+            "position": -1.0,
+            "final_signal": -1.0,
+            "benchmark": 0.01,
         }
     ]
     with patch("libs.computation.candle_lookup.query_dicts", return_value=mock_rows):
@@ -181,7 +183,9 @@ def test_fetch_bt_strategies_parses_position_from_row_json():
             "config_timeframe": "15m",
             "weighting": 0.5,
             "latest_ts": datetime(2026, 4, 26, 0, 1, 0),
-            "row_json": '{"position": 0.0, "final_signal": 0.0, "benchmark": 0.0}',
+            "position": 0.0,
+            "final_signal": 0.0,
+            "benchmark": 0.0,
         }
     ]
     with patch("libs.computation.candle_lookup.query_dicts", return_value=mock_rows):
