@@ -85,7 +85,8 @@ def fetch_new_bars_prod(
 ) -> List[dict]:
     """Fetch bars for prod/bt batch recompute in [ts_start, ts_end).
 
-    Returns first revision per (strategy, bar_ts) via argMin(row_json, revision_ts).
+    Returns first revision per (strategy, bar_ts) using LIMIT 1 BY ordered by
+    revision_ts ascending — avoids materializing all row_json blobs for argMin.
     """
     sql = f"""\
 SELECT
@@ -94,19 +95,19 @@ SELECT
     strategy_name,
     underlying,
     config_timeframe,
-    argMin(strategy_instance_id, revision_ts) AS strategy_instance_id,
-    argMin(weighting, revision_ts)            AS weighting,
-    toString(ts)                              AS ts,
-    JSONExtractFloat(argMin(row_json, revision_ts), 'position')     AS position,
-    JSONExtractFloat(argMin(row_json, revision_ts), 'final_signal') AS final_signal,
-    JSONExtractFloat(argMin(row_json, revision_ts), 'benchmark')    AS bar_benchmark
+    strategy_instance_id,
+    weighting,
+    toString(ts)                                                     AS ts,
+    JSONExtractFloat(row_json, 'position')     AS position,
+    JSONExtractFloat(row_json, 'final_signal') AS final_signal,
+    JSONExtractFloat(row_json, 'benchmark')    AS bar_benchmark
 FROM analytics.{source_table}
 WHERE underlying = '{underlying}'
   AND strategy_table_name NOT LIKE 'manual_probe%'
   AND toDateTime(ts) >= toDateTime('{ts_start}')
   AND toDateTime(ts) < toDateTime('{ts_end}')
-GROUP BY strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, ts
-ORDER BY strategy_table_name, ts
+ORDER BY strategy_table_name, ts, revision_ts
+LIMIT 1 BY strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, ts
 """
     return [
         {
@@ -137,6 +138,9 @@ def fetch_new_bars_bt(
 
     Like fetch_new_bars_prod but also extracts cumulative_pnl (bt cold-start seed)
     and computes execution_ts = ts + tf_minutes (bar close time).
+
+    Uses LIMIT 1 BY instead of argMin(row_json) to avoid materializing all row_json
+    blobs for sorting — ClickHouse picks the first row per group using the sort key.
     """
     sql = f"""\
 SELECT
@@ -145,20 +149,20 @@ SELECT
     strategy_name,
     underlying,
     config_timeframe,
-    argMin(strategy_instance_id, revision_ts) AS strategy_instance_id,
-    argMin(weighting, revision_ts)            AS weighting,
-    toString(ts)                              AS ts,
-    JSONExtractFloat(argMin(row_json, revision_ts), 'position')       AS position,
-    JSONExtractFloat(argMin(row_json, revision_ts), 'final_signal')   AS final_signal,
-    JSONExtractFloat(argMin(row_json, revision_ts), 'benchmark')      AS bar_benchmark,
-    JSONExtractFloat(argMin(row_json, revision_ts), 'cumulative_pnl') AS cumulative_pnl
+    strategy_instance_id,
+    weighting,
+    toString(ts)                                                         AS ts,
+    JSONExtractFloat(row_json, 'position')       AS position,
+    JSONExtractFloat(row_json, 'final_signal')   AS final_signal,
+    JSONExtractFloat(row_json, 'benchmark')      AS bar_benchmark,
+    JSONExtractFloat(row_json, 'cumulative_pnl') AS cumulative_pnl
 FROM analytics.{source_table}
 WHERE underlying = '{underlying}'
   AND strategy_table_name NOT LIKE 'manual_probe%'
   AND toDateTime(ts) >= toDateTime('{ts_start}')
   AND toDateTime(ts) < toDateTime('{ts_end}')
-GROUP BY strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, ts
-ORDER BY strategy_table_name, ts
+ORDER BY strategy_table_name, ts, revision_ts
+LIMIT 1 BY strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, ts
 """
     result = []
     for r in query_dicts(sql, client):
