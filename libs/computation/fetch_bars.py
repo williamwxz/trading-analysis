@@ -60,13 +60,12 @@ def fetch_anchors(
 SELECT
     strategy_table_name,
     strategy_instance_id,
-    cumulative_pnl AS anchor_pnl,
-    price          AS anchor_price,
-    position       AS anchor_position
+    argMax(cumulative_pnl, (ts, updated_at)) AS anchor_pnl,
+    argMax(price,          (ts, updated_at)) AS anchor_price,
+    argMax(position,       (ts, updated_at)) AS anchor_position
 FROM analytics.{target_table}
 WHERE underlying = '{underlying}'
-{ts_filter}ORDER BY strategy_instance_id, ts DESC, updated_at DESC
-LIMIT 1 BY strategy_instance_id
+{ts_filter}GROUP BY strategy_table_name, strategy_instance_id
 """
     result: Dict[str, Tuple[float, float, float]] = {}
     for r in query_dicts(sql, client):
