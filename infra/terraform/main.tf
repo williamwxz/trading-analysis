@@ -1260,7 +1260,7 @@ locals {
       enable_real_trade = "true"
       enable_bt         = "false"
       group_id          = "pnl-consumer-real-trade-3"
-      desired_count     = 0
+      desired_count     = 1
       clickhouse_user   = "streaming"
     }
     bt = {
