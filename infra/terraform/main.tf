@@ -351,7 +351,7 @@ resource "aws_ecs_task_definition" "dagster" {
 
       environment = [
         { name = "DAGSTER_HOME", value = "/app" },
-        { name = "CLICKHOUSE_USER", value = "dev_ro3" },
+        { name = "CLICKHOUSE_USER", value = "dagster" },
         { name = "CLICKHOUSE_PORT", value = "8443" },
         { name = "CLICKHOUSE_SECURE", value = "true" },
         { name = "DAGSTER_PG_DB", value = "postgres" },
@@ -1269,7 +1269,7 @@ locals {
       enable_real_trade = "false"
       enable_bt         = "true"
       group_id          = "pnl-consumer-bt"
-      desired_count     = 1
+      desired_count     = 0
       clickhouse_user   = "streaming"
     }
   }
