@@ -201,12 +201,14 @@ def _fetch_walk_anchors(
     price_map: dict[str, float] = {}
     for underlying in underlyings:
         sql = f"""\
-SELECT strategy_table_name, cumulative_pnl, price
+SELECT
+    strategy_table_name,
+    argMax(cumulative_pnl, (ts, updated_at)) AS cumulative_pnl,
+    argMax(price,          (ts, updated_at)) AS price
 FROM {pnl_table}
 WHERE underlying = '{underlying}'
   AND ts >= '{window_start_str}' AND ts < '{ts_str}'
-ORDER BY strategy_table_name, ts DESC, updated_at DESC
-LIMIT 1 BY strategy_table_name
+GROUP BY strategy_table_name
 """
         for row in query_dicts(sql):
             pnl_map[row["strategy_table_name"]] = float(row["cumulative_pnl"] or 0.0)
