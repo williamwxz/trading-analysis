@@ -12,7 +12,9 @@ import json
 import logging
 import os
 from collections import deque
+from typing import Any
 
+import boto3
 import websockets
 from confluent_kafka import Producer
 
@@ -68,6 +70,23 @@ def publish_candle(producer: Producer, candle: CandleEvent, topic: str = TOPIC) 
     producer.poll(0)  # trigger delivery callbacks without blocking
 
 
+def _emit_published(cw_client: Any, count: int) -> None:
+    try:
+        cw_client.put_metric_data(
+            Namespace="trading-analysis",
+            MetricData=[
+                {
+                    "MetricName": "MessagesPublished",
+                    "Value": count,
+                    "Unit": "Count",
+                    "Dimensions": [],
+                }
+            ],
+        )
+    except Exception:
+        logger.warning("Failed to emit MessagesPublished metric", exc_info=True)
+
+
 def _make_producer() -> Producer:
     return Producer(
         {
@@ -78,7 +97,7 @@ def _make_producer() -> Producer:
     )
 
 
-async def _consume_forever(producer: Producer, buffer: deque) -> None:
+async def _consume_forever(producer: Producer, buffer: deque, cw_client: Any) -> None:
     subscribe_msg = build_subscribe_msg(INSTRUMENTS)
     backoff_idx = 0
 
@@ -93,6 +112,7 @@ async def _consume_forever(producer: Producer, buffer: deque) -> None:
                 while buffer:
                     candle = buffer[0]
                     publish_candle(producer, candle)
+                    _emit_published(cw_client, 1)
                     buffer.popleft()
                 frame_count = 0
                 async for raw in ws:
@@ -111,6 +131,7 @@ async def _consume_forever(producer: Producer, buffer: deque) -> None:
                     if candle is not None:
                         try:
                             publish_candle(producer, candle)
+                            _emit_published(cw_client, 1)
                             logger.info(
                                 "Published %s %s close=%.2f ts=%s",
                                 candle.instrument, candle.exchange,
@@ -130,7 +151,10 @@ async def main() -> None:
     logging.basicConfig(level=logging.INFO)
     producer = _make_producer()
     buffer: deque = deque(maxlen=120)  # 2 min of candles during Redpanda outage
-    await _consume_forever(producer, buffer)
+    cw_client = boto3.client(
+        "cloudwatch", region_name=os.environ.get("AWS_REGION", "ap-northeast-1")
+    )
+    await _consume_forever(producer, buffer, cw_client)
 
 
 if __name__ == "__main__":

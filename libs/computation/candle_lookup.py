@@ -77,6 +77,22 @@ def _parse_strategy_bar(row: dict) -> StrategyBar:
     )
 
 
+def _parse_strategy_bar_scalar(row: dict) -> StrategyBar:
+    return StrategyBar(
+        strategy_table_name=row["strategy_table_name"],
+        strategy_instance_id=row["strategy_instance_id"],
+        strategy_id=row["strategy_id"],
+        strategy_name=row["strategy_name"],
+        underlying=row["underlying"],
+        config_timeframe=row["config_timeframe"],
+        weighting=row["weighting"],
+        position=float(row.get("position") or 0.0),
+        final_signal=float(row.get("final_signal") or 0.0),
+        benchmark=float(row.get("benchmark") or 0.0),
+        bar_ts=row["latest_ts"],
+    )
+
+
 def _parse_revision(row: dict) -> StrategyRevision:
     rj = json.loads(row["row_json"])
     return StrategyRevision(
@@ -138,6 +154,8 @@ def fetch_bt_strategies_for_candle(
     """Return active bt bar per strategy_instance_id for instrument at candle_ts.
 
     Same closing_ts gate as fetch_strategies_for_candle, but queries _bt_v2.
+    Extracts only the needed scalar fields from row_json instead of buffering
+    the full JSON blob through argMin, reducing ClickHouse memory usage.
     """
     underlying = instrument.removesuffix("USDT")
     ts_str = candle_ts.strftime("%Y-%m-%d %H:%M:%S")
@@ -151,7 +169,9 @@ SELECT
     config_timeframe,
     weighting,
     max(ts) AS latest_ts,
-    argMin(row_json, revision_ts) AS row_json
+    argMin(JSONExtractFloat(row_json, 'position'),     revision_ts) AS position,
+    argMin(JSONExtractFloat(row_json, 'final_signal'), revision_ts) AS final_signal,
+    argMin(JSONExtractFloat(row_json, 'benchmark'),    revision_ts) AS benchmark
 FROM analytics.strategy_output_history_bt_v2
 WHERE underlying = '{underlying}'
   AND ts + toIntervalMinute({_TF_MINUTES_EXPR_NO_ALIAS}) <= '{ts_str}'
@@ -162,7 +182,7 @@ GROUP BY
 ORDER BY strategy_instance_id, latest_ts DESC
 LIMIT 1 BY strategy_instance_id
 """
-    return [_parse_strategy_bar(r) for r in query_dicts(sql)]
+    return [_parse_strategy_bar_scalar(r) for r in query_dicts(sql)]
 
 
 def fetch_real_trade_for_candle(

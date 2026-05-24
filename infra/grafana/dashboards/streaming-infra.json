@@ -1319,27 +1319,95 @@
       },
       "targets": [
         {
-          "alias": "lag",
+          "alias": "price",
           "datasource": {
             "type": "cloudwatch",
             "uid": "cloudwatch"
           },
-          "dimensions": {},
+          "dimensions": {
+            "Sink": "price"
+          },
           "expression": "",
           "id": "",
           "matchExact": true,
           "metricEditorMode": 0,
           "metricKind": 0,
-          "metricName": "FlinkCandleLagSeconds",
+          "metricName": "CandleLagSeconds",
           "metricQueryType": 0,
           "namespace": "trading-analysis",
           "period": "60",
           "refId": "A",
           "region": "ap-northeast-1",
-          "statistic": "Average"
+          "statistic": "Maximum"
+        },
+        {
+          "alias": "prod",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "Sink": "prod"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "CandleLagSeconds",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "B",
+          "region": "ap-northeast-1",
+          "statistic": "Maximum"
+        },
+        {
+          "alias": "bt",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "Sink": "bt"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "CandleLagSeconds",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "C",
+          "region": "ap-northeast-1",
+          "statistic": "Maximum"
+        },
+        {
+          "alias": "real-trade",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "Sink": "real-trade"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "CandleLagSeconds",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "D",
+          "region": "ap-northeast-1",
+          "statistic": "Maximum"
         }
       ],
-      "title": "Flink Candle Lag (seconds behind real-time)",
+      "title": "Flink Candle Lag by Sink (seconds)",
       "type": "timeseries"
     },
     {
@@ -1383,27 +1451,95 @@
       },
       "targets": [
         {
-          "alias": "candle_ts",
+          "alias": "price",
           "datasource": {
             "type": "cloudwatch",
             "uid": "cloudwatch"
           },
-          "dimensions": {},
+          "dimensions": {
+            "Sink": "price"
+          },
           "expression": "",
           "id": "",
           "matchExact": true,
           "metricEditorMode": 0,
           "metricKind": 0,
-          "metricName": "FlinkCandleTimestamp",
+          "metricName": "CandleProcessingTs",
           "metricQueryType": 0,
           "namespace": "trading-analysis",
           "period": "60",
           "refId": "A",
           "region": "ap-northeast-1",
           "statistic": "Maximum"
+        },
+        {
+          "alias": "prod",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "Sink": "prod"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "CandleProcessingTs",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "B",
+          "region": "ap-northeast-1",
+          "statistic": "Maximum"
+        },
+        {
+          "alias": "bt",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "Sink": "bt"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "CandleProcessingTs",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "C",
+          "region": "ap-northeast-1",
+          "statistic": "Maximum"
+        },
+        {
+          "alias": "real-trade",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "Sink": "real-trade"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "CandleProcessingTs",
+          "metricQueryType": 0,
+          "namespace": "trading-analysis",
+          "period": "60",
+          "refId": "D",
+          "region": "ap-northeast-1",
+          "statistic": "Maximum"
         }
       ],
-      "title": "Flink Last Candle Timestamp (epoch, should track wall-clock)",
+      "title": "Flink Last Candle Timestamp by Sink (epoch)",
       "type": "timeseries"
     },
     {
@@ -1643,14 +1779,14 @@
       },
       "targets": [
         {
-          "alias": "flink-pnl",
+          "alias": "flink-pnl-price",
           "datasource": {
             "type": "cloudwatch",
             "uid": "cloudwatch"
           },
           "dimensions": {
             "ClusterName": "trading-analysis",
-            "ServiceName": "trading-analysis-flink-pnl"
+            "ServiceName": "trading-analysis-flink-pnl-price"
           },
           "expression": "",
           "id": "",
@@ -1662,6 +1798,75 @@
           "namespace": "ECS/ContainerInsights",
           "period": "60",
           "refId": "A",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        },
+        {
+          "alias": "flink-pnl-prod",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-flink-pnl-prod"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "CpuUtilized",
+          "metricQueryType": 0,
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "B",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        },
+        {
+          "alias": "flink-pnl-bt",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-flink-pnl-bt"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "CpuUtilized",
+          "metricQueryType": 0,
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "C",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        },
+        {
+          "alias": "flink-pnl-real-trade",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-flink-pnl-real-trade"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "CpuUtilized",
+          "metricQueryType": 0,
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "D",
           "region": "ap-northeast-1",
           "statistic": "Average"
         }
@@ -1710,14 +1915,14 @@
       },
       "targets": [
         {
-          "alias": "flink-pnl",
+          "alias": "flink-pnl-price",
           "datasource": {
             "type": "cloudwatch",
             "uid": "cloudwatch"
           },
           "dimensions": {
             "ClusterName": "trading-analysis",
-            "ServiceName": "trading-analysis-flink-pnl"
+            "ServiceName": "trading-analysis-flink-pnl-price"
           },
           "expression": "",
           "id": "",
@@ -1729,6 +1934,75 @@
           "namespace": "ECS/ContainerInsights",
           "period": "60",
           "refId": "A",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        },
+        {
+          "alias": "flink-pnl-prod",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-flink-pnl-prod"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "MemoryUtilized",
+          "metricQueryType": 0,
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "B",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        },
+        {
+          "alias": "flink-pnl-bt",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-flink-pnl-bt"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "MemoryUtilized",
+          "metricQueryType": 0,
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "C",
+          "region": "ap-northeast-1",
+          "statistic": "Average"
+        },
+        {
+          "alias": "flink-pnl-real-trade",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "dimensions": {
+            "ClusterName": "trading-analysis",
+            "ServiceName": "trading-analysis-flink-pnl-real-trade"
+          },
+          "expression": "",
+          "id": "",
+          "matchExact": true,
+          "metricEditorMode": 0,
+          "metricKind": 0,
+          "metricName": "MemoryUtilized",
+          "metricQueryType": 0,
+          "namespace": "ECS/ContainerInsights",
+          "period": "60",
+          "refId": "D",
           "region": "ap-northeast-1",
           "statistic": "Average"
         }
@@ -1747,5 +2021,5 @@
   "timezone": "browser",
   "title": "Streaming Infra",
   "uid": "streaming-infra",
-  "version": 1
+  "version": 2
 }

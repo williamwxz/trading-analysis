@@ -13,7 +13,7 @@ from libs.computation import AnchorRecord, AnchorState, StrategyBar, StrategyRev
 from pnl_consumer.pnl_consumer import (
     SinkConfig,
     _flush_candle,
-    emit_candle_lag,
+    emit_candle_metrics,
     process_candle,
     resolve_group_id,
 )
@@ -397,11 +397,11 @@ def test_flush_candle_commits_after_all_inserts():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# emit_candle_lag
+# emit_candle_metrics
 # ─────────────────────────────────────────────────────────────────────────────
 
 @pytest.mark.unit
-def test_emit_candle_lag_puts_lag_seconds():
+def test_emit_candle_metrics_puts_lag_and_counts():
     candle_ts = datetime(2026, 5, 4, 10, 0, 0)
     fake_now = datetime(2026, 5, 4, 10, 1, 30)
     mock_cw = MagicMock()
@@ -409,23 +409,26 @@ def test_emit_candle_lag_puts_lag_seconds():
     with patch("pnl_consumer.pnl_consumer.datetime") as mock_dt:
         mock_dt.now.return_value = fake_now
         mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-        emit_candle_lag(candle_ts, mock_cw, "price")
+        emit_candle_metrics(candle_ts, mock_cw, "price", messages_received=3, prod_rows=10, real_trade_rows=5, bt_rows=0)
 
     call_kwargs = mock_cw.put_metric_data.call_args.kwargs
     assert call_kwargs["Namespace"] == "trading-analysis"
-    metric = call_kwargs["MetricData"][0]
-    assert metric["MetricName"] == "CandleLagSeconds"
-    assert metric["Value"] == 90.0
+    metric_names = {m["MetricName"]: m["Value"] for m in call_kwargs["MetricData"]}
+    assert metric_names["CandleLagSeconds"] == 90.0
+    assert metric_names["MessagesReceived"] == 3
+    assert metric_names["ClickHouseSinkProd"] == 10
+    assert metric_names["ClickHouseSinkRealTrade"] == 5
+    assert "ClickHouseSinkBt" not in metric_names  # zero rows — not emitted
 
 
 @pytest.mark.unit
-def test_emit_candle_lag_swallows_exceptions():
+def test_emit_candle_metrics_swallows_exceptions():
     mock_cw = MagicMock()
     mock_cw.put_metric_data.side_effect = Exception("network error")
     with patch("pnl_consumer.pnl_consumer.datetime") as mock_dt:
         mock_dt.now.return_value = datetime(2026, 5, 4, 10, 1, 0)
         mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-        emit_candle_lag(datetime(2026, 5, 4, 10, 0, 0), mock_cw, "bt")  # must not raise
+        emit_candle_metrics(datetime(2026, 5, 4, 10, 0, 0), mock_cw, "bt", messages_received=1, prod_rows=0, real_trade_rows=0, bt_rows=4)  # must not raise
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -9,7 +9,7 @@ import os
 from pyflink.datastream import ProcessFunction, RuntimeContext
 
 from flink_pnl.clickhouse_sink import ClickHouseSinkFunction
-from flink_pnl.metrics import bootstrap_complete, emit_candle_lag
+from flink_pnl.metrics import bootstrap_complete, emit_candle_lag, rows_emitted
 from flink_pnl.process_candle import process_candle
 from flink_pnl.sink_config import SinkConfig
 from flink_pnl.state import StateMap, build_state_from_bootstrap
@@ -68,6 +68,7 @@ class PnlProcessFunction(ProcessFunction):
             expected_real_trade=rt_fetched,
         )
         emit_candle_lag(candle.ts, self._sink_label)
+        rows_emitted(len(rows))
 
     def snapshot_state(self, context) -> None:
         self._sink.flush()

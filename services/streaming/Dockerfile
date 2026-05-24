@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml .
-RUN pip install --no-cache-dir websockets>=12.0 confluent-kafka>=2.4
+RUN pip install --no-cache-dir websockets>=12.0 confluent-kafka>=2.4 boto3>=1.34
 
 COPY services/streaming/streaming/ ./streaming/
 

@@ -85,3 +85,15 @@ def rows_flushed(sink: str, count: int) -> None:
             "Unit": "Count",
         }
     ])
+
+
+def rows_emitted(count: int) -> None:
+    """Total rows emitted (all sinks combined) for a single candle."""
+    _put([
+        {
+            "MetricName": "FlinkRowsEmittedPerCandle",
+            "Dimensions": [],
+            "Value": float(count),
+            "Unit": "Count",
+        }
+    ])

@@ -652,27 +652,66 @@ def _flush_candle(
             raise
 
 
-def emit_candle_lag(candle_ts: datetime, cw_client: Any, sink: str) -> None:
+def emit_candle_metrics(
+    candle_ts: datetime,
+    cw_client: Any,
+    sink: str,
+    messages_received: int,
+    prod_rows: int,
+    real_trade_rows: int,
+    bt_rows: int,
+) -> None:
     try:
         lag = (datetime.now(UTC).replace(tzinfo=None) - candle_ts).total_seconds()
         dims = [{"Name": "Sink", "Value": sink}]
-        cw_client.put_metric_data(
-            Namespace="trading-analysis",
-            MetricData=[
+        metric_data = [
+            {
+                "MetricName": "CandleLagSeconds",
+                "Value": lag,
+                "Unit": "Seconds",
+                "Dimensions": dims,
+            },
+            {
+                "MetricName": "CandleProcessingTs",
+                "Value": candle_ts.timestamp(),
+                "Unit": "None",
+                "Dimensions": dims,
+            },
+            {
+                "MetricName": "MessagesReceived",
+                "Value": messages_received,
+                "Unit": "Count",
+                "Dimensions": dims,
+            },
+        ]
+        if prod_rows:
+            metric_data.append(
                 {
-                    "MetricName": "CandleLagSeconds",
-                    "Value": lag,
-                    "Unit": "Seconds",
+                    "MetricName": "ClickHouseSinkProd",
+                    "Value": prod_rows,
+                    "Unit": "Count",
                     "Dimensions": dims,
-                },
+                }
+            )
+        if real_trade_rows:
+            metric_data.append(
                 {
-                    "MetricName": "CandleProcessingTs",
-                    "Value": candle_ts.timestamp(),
-                    "Unit": "None",
+                    "MetricName": "ClickHouseSinkRealTrade",
+                    "Value": real_trade_rows,
+                    "Unit": "Count",
                     "Dimensions": dims,
-                },
-            ],
-        )
+                }
+            )
+        if bt_rows:
+            metric_data.append(
+                {
+                    "MetricName": "ClickHouseSinkBt",
+                    "Value": bt_rows,
+                    "Unit": "Count",
+                    "Dimensions": dims,
+                }
+            )
+        cw_client.put_metric_data(Namespace="trading-analysis", MetricData=metric_data)
     except Exception:
         logger.warning("Failed to emit candle metrics", exc_info=True)
 
@@ -734,6 +773,8 @@ def run() -> None:
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
 
+    messages_received = 0
+
     try:
         while True:
             msg = consumer.poll(timeout=1.0)
@@ -748,6 +789,7 @@ def run() -> None:
                 logger.warning("Kafka error: %s", err)
                 continue
 
+            messages_received += 1
             raw = msg.value()
             data = json.loads(raw.decode() if raw is not None else "{}")
             candle = CandleEvent(
@@ -813,7 +855,16 @@ def run() -> None:
                 expected_bt=bt_fetched,
                 expected_real_trade=rt_fetched,
             )
-            emit_candle_lag(candle.ts, cw_client, sink_label)
+            emit_candle_metrics(
+                candle.ts,
+                cw_client,
+                sink_label,
+                messages_received=messages_received,
+                prod_rows=len(pnl_prod_rows),
+                real_trade_rows=len(pnl_real_trade_rows),
+                bt_rows=len(pnl_bt_rows),
+            )
+            messages_received = 0
             logger.info(
                 "Flushed candle %s ts=%s price=%s prod=%d rt=%d bt=%d",
                 candle.instrument,
