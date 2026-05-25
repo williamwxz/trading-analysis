@@ -153,7 +153,7 @@ SELECT
     max(revision_ts) AS max_revision_ts,
     argMax(row_json, revision_ts) AS row_json
 FROM {history_table}
-WHERE strategy_table_name = '{stn}'
+PREWHERE strategy_table_name = '{stn}'
   AND ts >= '{seed_window_start_str}'
   AND ts <= '{start_str}'
   AND revision_ts <= '{start_str}'
