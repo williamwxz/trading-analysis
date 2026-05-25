@@ -28,7 +28,7 @@ from confluent_kafka import (
     TopicPartition,
 )
 
-from libs.clickhouse_client import insert_rows
+from libs.clickhouse_client import insert_rows, query_dicts
 from libs.computation import (
     INSERT_COLUMNS,
     AnchorRecord,
@@ -216,12 +216,102 @@ GROUP BY strategy_table_name
     return pnl_map, price_map
 
 
+def _bootstrap_bt_state(reference_ts: "datetime | None") -> AnchorState:
+    """Seed AnchorState for bt directly from row_json.cumulative_pnl.
+
+    BT bars carry an authoritative cumulative_pnl in row_json (set by the backtest
+    engine), so there is no need to walk the pnl table or fetch price history.
+    We seed each strategy from its latest bar before ref_ts: pnl from row_json,
+    price from futures_price_1min at that bar's closing_ts, position from row_json.
+
+    A single scoped query per underlying keeps memory usage small.
+    """
+    cfg = _MODE_CONFIG["bt"]
+    now = datetime.now(UTC).replace(tzinfo=None)
+    ref_ts = (reference_ts if reference_ts is not None else now).replace(tzinfo=None)
+    lookback_str = (ref_ts - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+    ref_str = ref_ts.strftime("%Y-%m-%d %H:%M:%S")
+
+    state = AnchorState()
+    for underlying in _UNDERLYINGS:
+        # Latest first-revision bar per strategy whose closing_ts <= ref_ts.
+        tf_expr = (
+            "multiIf(config_timeframe='1m',1,config_timeframe='3m',3,"
+            "config_timeframe='5m',5,config_timeframe='15m',15,"
+            "config_timeframe='30m',30,config_timeframe='1h',60,"
+            "config_timeframe='4h',240,config_timeframe='1d',1440,5)"
+        )
+        bars_sql = f"""\
+SELECT
+    strategy_table_name,
+    strategy_instance_id,
+    strategy_id,
+    strategy_name,
+    underlying,
+    config_timeframe,
+    weighting,
+    max(ts) AS latest_ts,
+    JSONExtractFloat(argMin(row_json, revision_ts), 'cumulative_pnl') AS cumulative_pnl,
+    JSONExtractFloat(argMin(row_json, revision_ts), 'position')       AS position,
+    JSONExtractFloat(argMin(row_json, revision_ts), 'final_signal')   AS final_signal,
+    JSONExtractFloat(argMin(row_json, revision_ts), 'benchmark')      AS benchmark,
+    toString(max(ts) + toIntervalMinute({tf_expr}))                   AS closing_ts
+FROM {cfg['history_table']}
+WHERE underlying = '{underlying}'
+  AND ts >= '{lookback_str}'
+  AND ts + toIntervalMinute({tf_expr}) <= '{ref_str}'
+GROUP BY strategy_table_name, strategy_instance_id, strategy_id,
+         strategy_name, underlying, config_timeframe, weighting
+ORDER BY strategy_instance_id, latest_ts DESC
+LIMIT 1 BY strategy_instance_id
+"""
+        bars = query_dicts(bars_sql)
+        if not bars:
+            continue
+
+        # Fetch prices at each bar's closing_ts in one query.
+        closing_ts_list = ", ".join(f"'{r['closing_ts']}'" for r in bars)
+        instrument = underlying + "USDT"
+        price_sql = f"""\
+SELECT toString(ts) AS ts, open
+FROM analytics.futures_price_1min
+WHERE exchange = 'binance'
+  AND instrument = '{instrument}'
+  AND ts IN ({closing_ts_list})
+"""
+        price_map = {r["ts"]: float(r["open"]) for r in query_dicts(price_sql)}
+
+        for r in bars:
+            stn = r["strategy_table_name"]
+            price = price_map.get(r["closing_ts"], 0.0)
+            state.set(
+                stn,
+                AnchorRecord(
+                    pnl=float(r["cumulative_pnl"] or 0.0),
+                    price=price,
+                    position=float(r["position"] or 0.0),
+                    strategy_instance_id=str(r["strategy_instance_id"]),
+                    underlying=r["underlying"],
+                    strategy_id=int(r["strategy_id"]),
+                    strategy_name=r["strategy_name"],
+                    config_timeframe=r["config_timeframe"],
+                    weighting=float(r["weighting"]),
+                    final_signal=float(r["final_signal"] or 0.0),
+                    benchmark=float(r["benchmark"] or 0.0),
+                ),
+            )
+
+    logger.info("Bootstrap [bt]: seeded %d strategies from row_json", len(state))
+    return state
+
+
 def _bootstrap_state(
     mode: str,
     reference_ts: "datetime | None",
 ) -> AnchorState:
-    """Seed AnchorState for one mode."""
+    """Seed AnchorState for prod/real_trade modes."""
     cfg = _MODE_CONFIG[mode]
+    is_bt = False
     now = datetime.now(UTC).replace(tzinfo=None)
     ref_ts = reference_ts if reference_ts is not None else now
     # seed_ts: far enough back (48h) that all strategies have a position row before
@@ -305,7 +395,7 @@ def _bootstrap_state(
         # Use previous price as fallback when current price is missing (0.0 from coalesce).
         effective_price = wr.price if wr.price != 0.0 else pp
 
-        if pp != 0.0 and effective_price != 0.0 and wr.cumulative_pnl != 0.0:
+        if not is_bt and pp != 0.0 and effective_price != 0.0 and wr.cumulative_pnl != 0.0:
             recomputed = pp_pnl + wr.position * (effective_price - pp) / pp
             deviation = abs(recomputed - wr.cumulative_pnl)
             if deviation > _PNL_CRASH_TOLERANCE:
@@ -741,7 +831,7 @@ def run() -> None:
         if sink_cfg.prod:
             state_prod = _bootstrap_state("prod", reference_ts)
         if sink_cfg.bt:
-            state_bt = _bootstrap_state("bt", reference_ts)
+            state_bt = _bootstrap_bt_state(reference_ts)
         if sink_cfg.real_trade:
             state_real_trade = _bootstrap_state("real_trade", reference_ts)
     except Exception:

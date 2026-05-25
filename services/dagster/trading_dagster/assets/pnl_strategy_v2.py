@@ -531,9 +531,11 @@ def _recompute_bt_recent(
     max_workers: int = _MAX_WORKERS,
 ) -> MaterializeResult:
     end_dt = datetime.now(tz=UTC)
-    default_window_start = datetime.strptime(
-        PROD_REAL_TRADE_START_DATE, "%Y-%m-%d"
-    ).replace(tzinfo=UTC)
+    # BT cold start: only fetch the last _CHUNK_DAYS of bars, not all history.
+    # Each bar carries cumulative_pnl in row_json so any window start is valid.
+    default_window_start = (end_dt - timedelta(days=_CHUNK_DAYS)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
     underlyings = _get_underlyings(source_table)
     context.log.info(f"BT recompute: {len(underlyings)} underlyings")
 
