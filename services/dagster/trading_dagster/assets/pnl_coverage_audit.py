@@ -238,8 +238,48 @@ def _check_phase2(
     descriptors.sort(key=lambda d: d.gap_minutes, reverse=True)
     return descriptors[:top_n]
 
-def _check_phase3(*args, **kwargs):
-    raise NotImplementedError
+def _check_phase3(
+    table: str,
+    underlying: str,
+    stn: str,
+    source_changes: list[PositionChange],
+    target_changes: list[PositionChange],
+) -> Violation | None:
+    """Compare source and target position-change sequences for 1-min tables.
+
+    Fails on first mismatch. Length differs → fail. ts differs by more than
+    POS_TS_TOLERANCE_MIN minutes → fail. position differs (exact) → fail.
+    """
+    if len(source_changes) != len(target_changes):
+        return Violation(
+            table=table,
+            underlying=underlying,
+            stn=stn,
+            category="position_mismatch",
+            detail=f"length mismatch: source={len(source_changes)} target={len(target_changes)}",
+            severity_minutes=abs(len(source_changes) - len(target_changes)),
+        )
+    tol = timedelta(minutes=POS_TS_TOLERANCE_MIN)
+    for i, (src, tgt) in enumerate(zip(source_changes, target_changes)):
+        if abs(src.effective_ts - tgt.effective_ts) > tol:
+            return Violation(
+                table=table,
+                underlying=underlying,
+                stn=stn,
+                category="position_mismatch",
+                detail=f"ts mismatch at #{i}: source={src.effective_ts:%Y-%m-%d %H:%M:%S} target={tgt.effective_ts:%Y-%m-%d %H:%M:%S}",
+                severity_minutes=1,
+            )
+        if src.position != tgt.position:
+            return Violation(
+                table=table,
+                underlying=underlying,
+                stn=stn,
+                category="position_mismatch",
+                detail=f"position mismatch at #{i}: source={src.position} target={tgt.position} (ts={src.effective_ts:%Y-%m-%d %H:%M:%S})",
+                severity_minutes=1,
+            )
+    return None
 
 def _check_phase3_hour(*args, **kwargs):
     raise NotImplementedError

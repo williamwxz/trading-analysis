@@ -273,3 +273,55 @@ class TestSourceChangesRt:
 
     def test_unknown_stn_returns_empty(self):
         assert _compute_source_changes_rt([], stn="S") == []
+
+
+# ── Phase 3: 1-min position boundary diff ────────────────────────────────────
+
+
+class TestPhase3Min:
+    def test_identical_sequences_pass(self):
+        source = [
+            PositionChange(_dt("2026-03-05 09:05:00"), 1.0),
+            PositionChange(_dt("2026-03-05 09:10:00"), -1.0),
+        ]
+        target = [
+            PositionChange(_dt("2026-03-05 09:05:00"), 1.0),
+            PositionChange(_dt("2026-03-05 09:10:00"), -1.0),
+        ]
+        v = _check_phase3("t", "FET", "S", source, target)
+        assert v is None
+
+    def test_length_mismatch_fails(self):
+        source = [
+            PositionChange(_dt("2026-03-05 09:05:00"), 1.0),
+            PositionChange(_dt("2026-03-05 09:10:00"), -1.0),
+        ]
+        target = [
+            PositionChange(_dt("2026-03-05 09:05:00"), 1.0),
+        ]
+        v = _check_phase3("t", "FET", "S", source, target)
+        assert v is not None
+        assert v.category == "position_mismatch"
+        assert "length" in v.detail.lower()
+
+    def test_value_mismatch_fails(self):
+        source = [PositionChange(_dt("2026-03-05 09:05:00"), 1.0)]
+        target = [PositionChange(_dt("2026-03-05 09:05:00"), -1.0)]
+        v = _check_phase3("t", "FET", "S", source, target)
+        assert v is not None
+        assert v.category == "position_mismatch"
+        assert "1.0" in v.detail and "-1.0" in v.detail
+
+    def test_ts_within_tolerance_passes(self):
+        """If timestamps differ by <= POS_TS_TOLERANCE_MIN (1 min), match."""
+        source = [PositionChange(_dt("2026-03-05 09:05:00"), 1.0)]
+        target = [PositionChange(_dt("2026-03-05 09:05:30"), 1.0)]
+        v = _check_phase3("t", "FET", "S", source, target)
+        assert v is None
+
+    def test_ts_outside_tolerance_fails(self):
+        source = [PositionChange(_dt("2026-03-05 09:05:00"), 1.0)]
+        target = [PositionChange(_dt("2026-03-05 09:10:00"), 1.0)]
+        v = _check_phase3("t", "FET", "S", source, target)
+        assert v is not None
+        assert v.category == "position_mismatch"
