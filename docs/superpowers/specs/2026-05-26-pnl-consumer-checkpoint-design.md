@@ -67,16 +67,20 @@ CREATE TABLE streaming.pnl_checkpoint (
     pnl                   DOUBLE PRECISION NOT NULL,
     price                 DOUBLE PRECISION NOT NULL,
     position              DOUBLE PRECISION NOT NULL,
-    bar_ts                TIMESTAMPTZ,           -- real_trade only
-    revision_ts           TIMESTAMPTZ,           -- real_trade only
-    strategy_id           TEXT,
-    strategy_name         TEXT,
-    underlying            TEXT,
-    config_timeframe      TEXT,
-    weighting             DOUBLE PRECISION,
-    strategy_instance_id  TEXT,
-    final_signal          TEXT,
-    benchmark             DOUBLE PRECISION,
+    -- bar_ts and revision_ts are NOT NULL. The "no anchor yet" sentinel is
+    -- datetime.min (0001-01-01 00:00:00+00) — uniformly serialized for all modes
+    -- so prod/bt rows are valid Postgres timestamps too. The real-trade sanity
+    -- check on read is "bar_ts > '0001-01-01'::timestamptz", not a NULL check.
+    bar_ts                TIMESTAMPTZ NOT NULL,
+    revision_ts           TIMESTAMPTZ NOT NULL,
+    strategy_id           INTEGER NOT NULL DEFAULT 0,
+    strategy_name         TEXT NOT NULL DEFAULT '',
+    underlying            TEXT NOT NULL DEFAULT '',
+    config_timeframe      TEXT NOT NULL DEFAULT '',
+    weighting             DOUBLE PRECISION NOT NULL DEFAULT 0,
+    strategy_instance_id  TEXT NOT NULL DEFAULT '',
+    final_signal          DOUBLE PRECISION NOT NULL DEFAULT 0,
+    benchmark             DOUBLE PRECISION NOT NULL DEFAULT 0,
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (mode, strategy_table_name)
 );
@@ -98,7 +102,7 @@ CREATE INDEX idx_pnl_checkpoint_mode_updated
 
 `pnl_checkpoint` holds per-strategy state. `pnl_commit_state` is the atomic-commit anchor; its `state_hash` is sha256 over the canonical encoding of all `pnl_checkpoint` rows for the mode. A consistent read pair (checkpoint rows + commit_state) is guaranteed by writing both in one Postgres transaction.
 
-`bar_ts` and `revision_ts` are nullable for prod/bt rows, NOT NULL semantically for real_trade rows (enforced in code on read).
+`bar_ts` and `revision_ts` are NOT NULL columns. For prod/bt rows where revisions are not used, they are stored as the sentinel `datetime.min` (matching the `AnchorRecord` default). Real-trade rows store actual revision timestamps. The real-trade sanity check on read uses `bar_ts > datetime.min`, not a NULL test.
 
 ## Write path
 
@@ -159,7 +163,7 @@ Real-trade is the highest-risk mode due to the revision guard tuple `(bar_ts, re
 **Persistence**: both fields are part of the checkpoint row. After restore, `AnchorState.should_apply_revision()` works unchanged — the tuple comparison is the only state needed.
 
 **Additional sanity checks** for real-trade mode:
-- All checkpoint rows have non-null `bar_ts` and `revision_ts`
+- All checkpoint rows have `bar_ts > datetime.min` and `revision_ts > datetime.min` (i.e., the revision guard has been populated)
 - `revision_ts ≤ last_candle_ts` for every row
 
 **Variant invariant check**: query `strategy_output_history_v2 WHERE ts = checkpoint.bar_ts AND revision_ts = checkpoint.revision_ts`, extract `position` from `row_json`, compare to `checkpoint.position`. Fall back on mismatch.
