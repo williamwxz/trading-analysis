@@ -76,6 +76,12 @@ def build_rt_lookup(bars: list[dict]) -> RtLookup:
     Acceptance filter mirrors AnchorState.should_apply_revision: a revision is
     accepted iff (bar_ts, revision_ts) > (prev_accepted.ts, prev_accepted.revision_ts).
     Revisions are sorted by (ts, revision_ts) ascending before filtering.
+
+    After acceptance, revisions are re-sorted by execution_ts and deduplicated:
+    when multiple accepted revisions share the same execution_ts (e.g. a late
+    bulk re-revision batch covering many bars at the same revision_ts), only the
+    last one in (ts, revision_ts) order is kept. This ensures the lookup timeline
+    is strictly monotonic so no entry has a zero-width active window.
     """
     by_stn: dict[str, list[dict]] = {}
     for bar in bars:
@@ -94,11 +100,22 @@ def build_rt_lookup(bars: list[dict]) -> RtLookup:
                 last_revision_ts = rev["revision_ts"]
         if not accepted:
             continue
+
+        # Re-sort by execution_ts; deduplicate by keeping the last accepted
+        # revision per execution_ts (latest (ts, revision_ts) wins).
+        accepted.sort(key=lambda b: (b["execution_ts"], b["ts"], b["revision_ts"]))
+        deduped: list[dict] = []
+        for rev in accepted:
+            if deduped and deduped[-1]["execution_ts"] == rev["execution_ts"]:
+                deduped[-1] = rev  # replace with later (ts, revision_ts)
+            else:
+                deduped.append(rev)
+
         entries: list[RtRevisionEntry] = []
-        for i, rev in enumerate(accepted):
+        for i, rev in enumerate(deduped):
             exec_ts = _parse_ts(rev["execution_ts"])
-            if i + 1 < len(accepted):
-                next_exec_ts = _parse_ts(accepted[i + 1]["execution_ts"])
+            if i + 1 < len(deduped):
+                next_exec_ts = _parse_ts(deduped[i + 1]["execution_ts"])
             else:
                 tf = TIMEFRAME_MAP.get(rev["config_timeframe"], 5)
                 next_exec_ts = _parse_ts(rev["closing_ts"]) + timedelta(minutes=tf)
