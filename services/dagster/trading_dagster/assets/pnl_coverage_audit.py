@@ -123,7 +123,93 @@ class AuditReport:
         return bool(self.violations)
 
 
-# ── Implementation goes in subsequent tasks ─────────────────────────────────
+# ── Phase 1: coverage check ─────────────────────────────────────────────────
+
+
+def _check_phase1(
+    table: str,
+    underlying: str,
+    stn: str,
+    stat: StratStat,
+    source: SourceFirstBar,
+    price_set: set[datetime],
+    now_ts: datetime,
+) -> Violation | None:
+    """Detect start_gap / stale_end / internal_holes for one (U, S).
+
+    Checks in priority order; returns the first detected violation, or None.
+    """
+    expected_min = source.expected_min_ts
+    expected_max = now_ts - timedelta(minutes=STALE_END_TOLERANCE_MIN // 2)  # now - 5m
+
+    # 1. start_gap
+    if stat.actual_min_ts > expected_min + timedelta(minutes=START_TOLERANCE_MIN):
+        gap_minutes = int((stat.actual_min_ts - expected_min).total_seconds() // 60)
+        return Violation(
+            table=table,
+            underlying=underlying,
+            stn=stn,
+            category="start_gap",
+            detail=f"expected={expected_min:%Y-%m-%d %H:%M:%S} actual={stat.actual_min_ts:%Y-%m-%d %H:%M:%S} ({gap_minutes}m)",
+            severity_minutes=gap_minutes,
+        )
+
+    # 2. stale_end
+    stale_threshold = now_ts - timedelta(minutes=STALE_END_TOLERANCE_MIN)
+    if stat.actual_max_ts < stale_threshold:
+        stale_minutes = int((now_ts - stat.actual_max_ts).total_seconds() // 60)
+        return Violation(
+            table=table,
+            underlying=underlying,
+            stn=stn,
+            category="stale_end",
+            detail=f"expected≈{expected_max:%Y-%m-%d %H:%M:%S} actual={stat.actual_max_ts:%Y-%m-%d %H:%M:%S} ({stale_minutes}m stale)",
+            severity_minutes=stale_minutes,
+        )
+
+    # 3. internal_holes
+    expected_minutes = sum(
+        1 for p in price_set if expected_min <= p <= expected_max
+    )
+    if stat.actual_rows < expected_minutes:
+        missing = expected_minutes - stat.actual_rows
+        return Violation(
+            table=table,
+            underlying=underlying,
+            stn=stn,
+            category="internal_holes",
+            detail=f"expected_minutes={expected_minutes} actual_rows={stat.actual_rows} missing={missing}",
+            severity_minutes=missing,
+        )
+
+    return None
+
+
+# ── Stubs replaced in later tasks ─────────────────────────────────────────
+# Phase 1 implementation lives above this block. The functions below are
+# placeholder stubs so that test files can import the full surface area now
+# even though Tasks 3-8 haven't been implemented yet.
+
+def _check_phase2(*args, **kwargs):
+    raise NotImplementedError
+
+def _check_phase3(*args, **kwargs):
+    raise NotImplementedError
+
+def _check_phase3_hour(*args, **kwargs):
+    raise NotImplementedError
+
+def _compute_source_changes_prod_bt(*args, **kwargs):
+    raise NotImplementedError
+
+def _compute_source_changes_rt(*args, **kwargs):
+    raise NotImplementedError
+
+def _format_report(*args, **kwargs):
+    raise NotImplementedError
+
+
+# ── Asset placeholder ────────────────────────────────────────────────────────
 
 
 def pnl_coverage_audit_asset():
