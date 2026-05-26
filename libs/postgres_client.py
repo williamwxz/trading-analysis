@@ -13,7 +13,8 @@ Required env vars (with defaults):
 """
 
 import os
-from typing import Any, Optional, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import psycopg
 from psycopg import Connection
@@ -34,8 +35,8 @@ def get_client() -> Connection:
 
 def execute(
     sql: str,
-    params: Optional[Sequence[Any]] = None,
-    client: Optional[Connection] = None,
+    params: Sequence[Any] | None = None,
+    client: Connection | None = None,
 ) -> None:
     """Execute a single DDL/DML statement. Commits on owned connection."""
     own = client is None

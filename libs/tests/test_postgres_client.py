@@ -21,6 +21,7 @@ def test_get_client_uses_env_vars(monkeypatch):
     fake_conn = mock.MagicMock()
     with mock.patch("psycopg.connect", return_value=fake_conn) as mock_connect:
         from libs.postgres_client import get_client
+
         client = get_client()
 
     assert client is fake_conn
@@ -36,13 +37,20 @@ def test_get_client_uses_env_vars(monkeypatch):
 
 @pytest.mark.unit
 def test_get_client_defaults(monkeypatch):
-    for var in ["SUPABASE_HOST", "SUPABASE_PORT", "SUPABASE_USER",
-                "SUPABASE_PASSWORD", "SUPABASE_DATABASE", "SUPABASE_SSLMODE"]:
+    for var in [
+        "SUPABASE_HOST",
+        "SUPABASE_PORT",
+        "SUPABASE_USER",
+        "SUPABASE_PASSWORD",
+        "SUPABASE_DATABASE",
+        "SUPABASE_SSLMODE",
+    ]:
         monkeypatch.delenv(var, raising=False)
 
     fake_conn = mock.MagicMock()
     with mock.patch("psycopg.connect", return_value=fake_conn) as mock_connect:
         from libs.postgres_client import get_client
+
         get_client()
 
     kwargs = mock_connect.call_args.kwargs
