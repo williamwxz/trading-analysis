@@ -263,8 +263,35 @@ def _compute_source_changes_prod_bt(
             prev_position = position
     return changes
 
-def _compute_source_changes_rt(*args, **kwargs):
-    raise NotImplementedError
+def _compute_source_changes_rt(
+    bars_with_revs: list[dict],
+    stn: str,
+) -> list[PositionChange]:
+    """Extract position-change points for real_trade.
+
+    Input: all revisions for one strategy as returned by
+    fetch_new_bars_real_trade (each row has ts, revision_ts, execution_ts,
+    closing_ts, position, config_timeframe). bars_with_revs may contain
+    multiple strategies — only rows whose strategy_table_name == stn are used.
+    Filtering is via build_rt_lookup which applies the
+    (bar_ts, revision_ts) > prev_accepted rule.
+
+    Output: PositionChange(effective_ts=execution_ts, position) at each
+    transition between accepted revisions.
+    """
+    relevant = [b for b in bars_with_revs if b.get("strategy_table_name") == stn]
+    if not relevant:
+        return []
+    lookup = build_rt_lookup(relevant)
+    entries = lookup.get(stn, [])
+    changes: list[PositionChange] = []
+    prev_position: float | None = None
+    for entry in entries:
+        pos = float(entry.rev["position"])
+        if prev_position is None or pos != prev_position:
+            changes.append(PositionChange(effective_ts=entry.execution_ts, position=pos))
+            prev_position = pos
+    return changes
 
 def _format_report(*args, **kwargs):
     raise NotImplementedError

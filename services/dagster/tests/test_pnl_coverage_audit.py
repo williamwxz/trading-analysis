@@ -196,3 +196,80 @@ class TestSourceChangesProdBt:
 
     def test_empty_bars_returns_empty(self):
         assert _compute_source_changes_prod_bt([], tf_minutes=5) == []
+
+
+# ── Source changes: real_trade (uses build_rt_lookup) ────────────────────────
+
+
+class TestSourceChangesRt:
+    def test_uses_accepted_revisions_only(self):
+        """Revisions failing the (bar_ts, revision_ts) > prev rule must be discarded.
+
+        Build bars that contain:
+          - bar A at 09:00 with rev at 09:00:10 → accepted
+          - bar A at 09:00 with rev at 09:00:05 → REJECTED (rev older than prev)
+          - bar B at 09:05 with rev at 09:05:10 → accepted
+        """
+        # bars_with_revs: list of dicts matching what fetch_new_bars_real_trade returns
+        bars = [
+            {
+                "strategy_table_name": "S",
+                "ts": "2026-03-05 09:00:00",
+                "revision_ts": "2026-03-05 09:00:10",
+                "execution_ts": "2026-03-05 09:01:00",
+                "closing_ts": "2026-03-05 09:05:00",
+                "config_timeframe": "5m",
+                "position": 1.0,
+            },
+            {
+                "strategy_table_name": "S",
+                "ts": "2026-03-05 09:00:00",
+                "revision_ts": "2026-03-05 09:00:05",  # older — REJECT
+                "execution_ts": "2026-03-05 09:01:00",
+                "closing_ts": "2026-03-05 09:05:00",
+                "config_timeframe": "5m",
+                "position": -1.0,
+            },
+            {
+                "strategy_table_name": "S",
+                "ts": "2026-03-05 09:05:00",
+                "revision_ts": "2026-03-05 09:05:10",
+                "execution_ts": "2026-03-05 09:06:00",
+                "closing_ts": "2026-03-05 09:10:00",
+                "config_timeframe": "5m",
+                "position": -1.0,
+            },
+        ]
+        changes = _compute_source_changes_rt(bars, stn="S")
+        # Accepted: position 1.0 at 09:01, position -1.0 at 09:06.
+        # Both transitions are emitted.
+        assert len(changes) == 2
+        assert changes[0] == PositionChange(_dt("2026-03-05 09:01:00"), 1.0)
+        assert changes[1] == PositionChange(_dt("2026-03-05 09:06:00"), -1.0)
+
+    def test_dedups_consecutive_equal_positions(self):
+        bars = [
+            {
+                "strategy_table_name": "S",
+                "ts": "2026-03-05 09:00:00",
+                "revision_ts": "2026-03-05 09:00:10",
+                "execution_ts": "2026-03-05 09:01:00",
+                "closing_ts": "2026-03-05 09:05:00",
+                "config_timeframe": "5m",
+                "position": 1.0,
+            },
+            {
+                "strategy_table_name": "S",
+                "ts": "2026-03-05 09:05:00",
+                "revision_ts": "2026-03-05 09:05:10",
+                "execution_ts": "2026-03-05 09:06:00",
+                "closing_ts": "2026-03-05 09:10:00",
+                "config_timeframe": "5m",
+                "position": 1.0,  # same as prev
+            },
+        ]
+        changes = _compute_source_changes_rt(bars, stn="S")
+        assert len(changes) == 1
+
+    def test_unknown_stn_returns_empty(self):
+        assert _compute_source_changes_rt([], stn="S") == []
