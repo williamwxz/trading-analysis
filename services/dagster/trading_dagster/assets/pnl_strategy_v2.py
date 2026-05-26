@@ -580,6 +580,22 @@ def _recompute_bt_recent(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _get_source_min_ts(source_table: str) -> datetime | None:
+    """Return min(ts) across all underlyings in source_table, or None if empty."""
+    result = query_scalar(
+        f"SELECT min(ts) FROM analytics.{source_table}"
+        f" WHERE strategy_table_name NOT LIKE 'manual_probe%'"
+    )
+    if result is None:
+        return None
+    if isinstance(result, str):
+        result = _parse_ts(result)
+    result = result.replace(tzinfo=UTC)
+    if result.year < 2000:
+        return None
+    return result.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
 def _recompute_pnl_recent(
     context: AssetExecutionContext,
     target_table: str,
@@ -591,7 +607,10 @@ def _recompute_pnl_recent(
     max_workers: int = _MAX_WORKERS,
 ) -> MaterializeResult:
     end_dt = datetime.now(tz=UTC)
-    default_window_start = datetime.strptime(
+    # When the target table is empty (cold start / full wipe), fall back to
+    # min(ts) from the source so we rebuild the full history, not just 7 days.
+    source_min_ts = _get_source_min_ts(source_table)
+    default_window_start = source_min_ts if source_min_ts is not None else datetime.strptime(
         PROD_REAL_TRADE_START_DATE, "%Y-%m-%d"
     ).replace(tzinfo=UTC)
     underlyings = _get_underlyings(source_table)
