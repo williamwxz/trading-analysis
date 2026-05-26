@@ -403,6 +403,211 @@ def _format_report(report: AuditReport) -> str:
     return "\n".join(lines)
 
 
+# ── ClickHouse fetch functions ───────────────────────────────────────────────
+
+
+def _underlying_to_instrument(u: str) -> str:
+    u = u.upper()
+    return u if u.endswith("USDT") else f"{u}USDT"
+
+
+def _fetch_q_stat(target_table: str, underlying: str, client) -> dict[str, StratStat]:
+    """Q_stat: per-strategy min(ts)/max(ts)/count() in target_table for one U."""
+    rows = query_rows(
+        f"""
+SELECT strategy_table_name, min(ts), max(ts), count()
+FROM analytics.{target_table}
+WHERE underlying = '{underlying}'
+GROUP BY strategy_table_name
+SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
+""",
+        client=client,
+    )
+    out: dict[str, StratStat] = {}
+    for r in rows:
+        stn = str(r[0])
+        out[stn] = StratStat(
+            actual_min_ts=r[1],
+            actual_max_ts=r[2],
+            actual_rows=int(r[3]),
+        )
+    return out
+
+
+def _fetch_q_px(underlying: str, client) -> set[datetime]:
+    """Q_px: 1-min price timestamps for one U since GLOBAL_START_TS."""
+    instrument = _underlying_to_instrument(underlying)
+    rows = query_rows(
+        f"""
+SELECT ts FROM analytics.futures_price_1min
+WHERE instrument = '{instrument}' AND ts >= toDateTime('{GLOBAL_START_TS}')
+SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
+""",
+        client=client,
+    )
+    return {r[0] for r in rows}
+
+
+def _fetch_q_src_prod_bt(source_table: str, underlying: str, client) -> dict[str, list[tuple[str, float]]]:
+    """Q_src (prod/bt): first-revision (ts, position) per strategy for one U.
+
+    Also returns the (constant) tf as part of a sibling query — captured by
+    _fetch_q_src_tf below.
+    """
+    rows = query_rows(
+        f"""
+SELECT
+  strategy_table_name,
+  toString(ts),
+  argMin(JSONExtract(row_json, 'position', 'Float64'), revision_ts)
+FROM analytics.{source_table}
+WHERE underlying = '{underlying}'
+  AND strategy_table_name NOT LIKE 'manual_probe%'
+GROUP BY strategy_table_name, ts
+ORDER BY strategy_table_name, ts
+SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
+""",
+        client=client,
+    )
+    out: dict[str, list[tuple[str, float]]] = {}
+    for r in rows:
+        stn = str(r[0])
+        out.setdefault(stn, []).append((str(r[1]), float(r[2])))
+    return out
+
+
+def _fetch_q_src_tf(source_table: str, underlying: str, client) -> dict[str, int]:
+    """Per-strategy config_timeframe (in minutes) for one U."""
+    rows = query_rows(
+        f"""
+SELECT strategy_table_name,
+       any(JSONExtractString(row_json, 'config_timeframe'))
+FROM analytics.{source_table}
+WHERE underlying = '{underlying}'
+  AND strategy_table_name NOT LIKE 'manual_probe%'
+GROUP BY strategy_table_name
+SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
+""",
+        client=client,
+    )
+    out: dict[str, int] = {}
+    for r in rows:
+        tf_str = str(r[1])
+        out[str(r[0])] = TIMEFRAME_MAP.get(tf_str, 5)
+    return out
+
+
+def _fetch_q_src_rt(underlying: str, client) -> list[dict]:
+    """Q_src_rt: all revisions for one U, in (stn, ts, revision_ts) order.
+
+    Returns rows already enriched with the fields that build_rt_lookup expects:
+    ts, revision_ts, execution_ts, closing_ts, position, config_timeframe,
+    strategy_table_name.
+    """
+    rows = query_rows(
+        f"""
+SELECT
+  strategy_table_name,
+  toString(ts),
+  toString(revision_ts),
+  toString(toStartOfMinute(revision_ts + INTERVAL 59 SECOND)) AS execution_ts,
+  JSONExtract(row_json, 'position', 'Float64') AS position,
+  JSONExtractString(row_json, 'config_timeframe') AS tf
+FROM analytics.strategy_output_history_v2
+WHERE underlying = '{underlying}'
+  AND strategy_table_name NOT LIKE 'manual_probe%'
+ORDER BY strategy_table_name, ts, revision_ts
+SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
+""",
+        client=client,
+    )
+    out: list[dict] = []
+    for r in rows:
+        stn, ts_s, rev_s, exec_s, position, tf = r
+        tf_minutes = TIMEFRAME_MAP.get(tf, 5)
+        # closing_ts = ts + tf_minutes
+        ts_dt = datetime.strptime(str(ts_s)[:19], "%Y-%m-%d %H:%M:%S")
+        closing_dt = ts_dt + timedelta(minutes=tf_minutes)
+        out.append(
+            {
+                "strategy_table_name": str(stn),
+                "ts": str(ts_s),
+                "revision_ts": str(rev_s),
+                "execution_ts": str(exec_s),
+                "closing_ts": closing_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                "position": float(position),
+                "config_timeframe": str(tf),
+            }
+        )
+    return out
+
+
+def _fetch_q_trans(target_table: str, underlying: str, stn: str, client) -> list[PositionChange]:
+    """Q_trans: per-strategy position transitions in target_table.
+
+    Uses lagInFrame over a single-partition window — bounded memory.
+    """
+    rows = query_rows(
+        f"""
+SELECT ts, position
+FROM (
+  SELECT ts, position,
+         lagInFrame(position) OVER (ORDER BY ts) AS prev_pos,
+         row_number()         OVER (ORDER BY ts) AS rn
+  FROM analytics.{target_table}
+  WHERE underlying = '{underlying}'
+    AND strategy_table_name = '{stn}'
+)
+WHERE position != prev_pos OR rn = 1
+ORDER BY ts
+SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
+""",
+        client=client,
+    )
+    return [PositionChange(effective_ts=r[0], position=float(r[1])) for r in rows]
+
+
+def _fetch_q_gap(target_table: str, underlying: str, stn: str, client) -> list[tuple[datetime, int]]:
+    """Q_gap: per-strategy ts gaps > 60s in target_table. Returns (gap_end, gap_secs)."""
+    rows = query_rows(
+        f"""
+SELECT gap_end, gap_secs FROM (
+  SELECT ts AS gap_end,
+         toUnixTimestamp(ts) AS ts_secs,
+         lagInFrame(toUnixTimestamp(ts)) OVER (ORDER BY ts) AS prev_ts_secs,
+         (toUnixTimestamp(ts) - lagInFrame(toUnixTimestamp(ts)) OVER (ORDER BY ts)) AS gap_secs
+  FROM analytics.{target_table}
+  WHERE underlying = '{underlying}'
+    AND strategy_table_name = '{stn}'
+)
+WHERE prev_ts_secs > 0 AND gap_secs > 60
+ORDER BY gap_secs DESC
+LIMIT 50
+SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
+""",
+        client=client,
+    )
+    return [(r[0], int(r[1])) for r in rows]
+
+
+def _fetch_q_stat_hour(hour_table: str, underlying: str, client) -> dict[str, list[tuple[datetime, float]]]:
+    """Q_stat variant for hour tables — returns per-strategy (ts, position) rows."""
+    rows = query_rows(
+        f"""
+SELECT strategy_table_name, ts, position
+FROM analytics.{hour_table}
+WHERE underlying = '{underlying}'
+ORDER BY strategy_table_name, ts
+SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
+""",
+        client=client,
+    )
+    out: dict[str, list[tuple[datetime, float]]] = {}
+    for r in rows:
+        out.setdefault(str(r[0]), []).append((r[1], float(r[2])))
+    return out
+
+
 # ── Asset placeholder ────────────────────────────────────────────────────────
 
 
