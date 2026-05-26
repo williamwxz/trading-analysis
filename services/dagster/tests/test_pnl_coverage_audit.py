@@ -156,3 +156,43 @@ class TestPhase2:
         prices = _price_set("2026-03-05 09:50:00", "2026-03-05 10:00:00")
         descriptors = _check_phase2("FET", "S", q_gap_rows, prices, top_n=5)
         assert descriptors == []
+
+
+# ── Source changes: prod / bt ────────────────────────────────────────────────
+
+
+class TestSourceChangesProdBt:
+    def test_emits_at_first_bar_unconditionally(self):
+        """Every strategy emits at least one change at the first bar's closing_ts."""
+        # bars: list of (ts_str, position) for one strategy, tf=5min
+        bars = [("2026-03-05 09:00:00", 1.0)]
+        changes = _compute_source_changes_prod_bt(bars, tf_minutes=5)
+        assert len(changes) == 1
+        assert changes[0] == PositionChange(_dt("2026-03-05 09:05:00"), 1.0)
+
+    def test_dedups_consecutive_equal_positions(self):
+        """If position doesn't change, no new change is emitted."""
+        bars = [
+            ("2026-03-05 09:00:00", 1.0),
+            ("2026-03-05 09:05:00", 1.0),
+            ("2026-03-05 09:10:00", 1.0),
+        ]
+        changes = _compute_source_changes_prod_bt(bars, tf_minutes=5)
+        assert len(changes) == 1
+        assert changes[0] == PositionChange(_dt("2026-03-05 09:05:00"), 1.0)
+
+    def test_emits_at_each_position_transition(self):
+        bars = [
+            ("2026-03-05 09:00:00", 1.0),
+            ("2026-03-05 09:05:00", -1.0),
+            ("2026-03-05 09:10:00", -1.0),
+            ("2026-03-05 09:15:00", 0.0),
+        ]
+        changes = _compute_source_changes_prod_bt(bars, tf_minutes=5)
+        assert len(changes) == 3
+        assert changes[0] == PositionChange(_dt("2026-03-05 09:05:00"), 1.0)
+        assert changes[1] == PositionChange(_dt("2026-03-05 09:10:00"), -1.0)
+        assert changes[2] == PositionChange(_dt("2026-03-05 09:20:00"), 0.0)
+
+    def test_empty_bars_returns_empty(self):
+        assert _compute_source_changes_prod_bt([], tf_minutes=5) == []

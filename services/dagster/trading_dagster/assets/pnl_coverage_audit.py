@@ -244,8 +244,24 @@ def _check_phase3(*args, **kwargs):
 def _check_phase3_hour(*args, **kwargs):
     raise NotImplementedError
 
-def _compute_source_changes_prod_bt(*args, **kwargs):
-    raise NotImplementedError
+def _compute_source_changes_prod_bt(
+    bars: list[tuple[str, float]],
+    tf_minutes: int,
+) -> list[PositionChange]:
+    """Extract position-change points from first-revision source bars (prod/bt).
+
+    Input: list of (bar_ts_str, position) sorted by bar_ts asc, for ONE strategy.
+    Output: PositionChange(effective_ts=closing_ts, position) at each transition,
+    including the first bar.
+    """
+    changes: list[PositionChange] = []
+    prev_position: float | None = None
+    for ts_str, position in bars:
+        if prev_position is None or position != prev_position:
+            closing_ts = datetime.strptime(ts_str[:19], "%Y-%m-%d %H:%M:%S") + timedelta(minutes=tf_minutes)
+            changes.append(PositionChange(effective_ts=closing_ts, position=position))
+            prev_position = position
+    return changes
 
 def _compute_source_changes_rt(*args, **kwargs):
     raise NotImplementedError
