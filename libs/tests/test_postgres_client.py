@@ -59,3 +59,57 @@ def test_get_client_defaults(monkeypatch):
     assert kwargs["user"] == "postgres"
     assert kwargs["dbname"] == "postgres"
     assert kwargs["sslmode"] == "prefer"
+
+
+@pytest.mark.unit
+def test_query_rows_returns_lists(monkeypatch):
+    fake_cur = mock.MagicMock()
+    fake_cur.__enter__ = mock.MagicMock(return_value=fake_cur)
+    fake_cur.__exit__ = mock.MagicMock(return_value=False)
+    fake_cur.fetchall.return_value = [(1, "a"), (2, "b")]
+    fake_conn = mock.MagicMock()
+    fake_conn.cursor.return_value = fake_cur
+
+    from libs.postgres_client import query_rows
+
+    rows = query_rows("SELECT 1, 'a'", client=fake_conn)
+    assert rows == [[1, "a"], [2, "b"]]
+
+
+@pytest.mark.unit
+def test_query_dicts_returns_dicts(monkeypatch):
+    fake_cur = mock.MagicMock()
+    fake_cur.__enter__ = mock.MagicMock(return_value=fake_cur)
+    fake_cur.__exit__ = mock.MagicMock(return_value=False)
+    fake_cur.description = [("id", None), ("name", None)]
+    fake_cur.fetchall.return_value = [(1, "a"), (2, "b")]
+    fake_conn = mock.MagicMock()
+    fake_conn.cursor.return_value = fake_cur
+
+    from libs.postgres_client import query_dicts
+
+    rows = query_dicts("SELECT id, name FROM t", client=fake_conn)
+    assert rows == [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]
+
+
+@pytest.mark.unit
+def test_transaction_context_commits_on_success(monkeypatch):
+    fake_conn = mock.MagicMock()
+    from libs.postgres_client import transaction
+
+    with transaction(fake_conn) as conn:
+        assert conn is fake_conn
+    fake_conn.commit.assert_called_once()
+    fake_conn.rollback.assert_not_called()
+
+
+@pytest.mark.unit
+def test_transaction_context_rolls_back_on_error(monkeypatch):
+    fake_conn = mock.MagicMock()
+    from libs.postgres_client import transaction
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with transaction(fake_conn):
+            raise RuntimeError("boom")
+    fake_conn.commit.assert_not_called()
+    fake_conn.rollback.assert_called_once()

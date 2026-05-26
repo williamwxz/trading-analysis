@@ -13,7 +13,8 @@ Required env vars (with defaults):
 """
 
 import os
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from typing import Any
 
 import psycopg
@@ -49,3 +50,53 @@ def execute(
     finally:
         if own:
             c.close()
+
+
+def query_rows(
+    sql: str,
+    params: Sequence[Any] | None = None,
+    client: Connection | None = None,
+) -> list[list[Any]]:
+    """Execute a query, return rows as list of lists."""
+    own = client is None
+    c = client or get_client()
+    try:
+        with c.cursor() as cur:
+            cur.execute(sql, params)
+            return [list(row) for row in cur.fetchall()]
+    finally:
+        if own:
+            c.close()
+
+
+def query_dicts(
+    sql: str,
+    params: Sequence[Any] | None = None,
+    client: Connection | None = None,
+) -> list[dict[str, Any]]:
+    """Execute a query, return rows as list of dicts."""
+    own = client is None
+    c = client or get_client()
+    try:
+        with c.cursor() as cur:
+            cur.execute(sql, params)
+            cols = [desc[0] for desc in cur.description] if cur.description else []
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+    finally:
+        if own:
+            c.close()
+
+
+@contextmanager
+def transaction(client: Connection) -> Iterator[Connection]:
+    """Context manager: commit on success, rollback on exception.
+
+    Caller-supplied connection only (does not open one). Use with `get_client()`
+    explicitly or with a long-lived connection.
+    """
+    try:
+        yield client
+        client.commit()
+    except Exception:
+        client.rollback()
+        raise
