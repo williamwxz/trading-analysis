@@ -10,7 +10,10 @@ existing 48h bootstrap and writes a fresh checkpoint at the new version.
 
 import hashlib
 import json
+from datetime import datetime
 from typing import Any
+
+from psycopg import Connection
 
 from libs.computation.anchor_state import AnchorState
 
@@ -51,3 +54,110 @@ def compute_state_hash(state: AnchorState) -> str:
     ]
     encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+_UPSERT_CHECKPOINT_SQL = """
+INSERT INTO streaming.pnl_checkpoint (
+    mode, strategy_table_name,
+    pnl, price, position,
+    bar_ts, revision_ts,
+    strategy_id, strategy_name, underlying, config_timeframe,
+    weighting, strategy_instance_id, final_signal, benchmark,
+    updated_at
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+ON CONFLICT (mode, strategy_table_name) DO UPDATE SET
+    pnl = EXCLUDED.pnl,
+    price = EXCLUDED.price,
+    position = EXCLUDED.position,
+    bar_ts = EXCLUDED.bar_ts,
+    revision_ts = EXCLUDED.revision_ts,
+    strategy_id = EXCLUDED.strategy_id,
+    strategy_name = EXCLUDED.strategy_name,
+    underlying = EXCLUDED.underlying,
+    config_timeframe = EXCLUDED.config_timeframe,
+    weighting = EXCLUDED.weighting,
+    strategy_instance_id = EXCLUDED.strategy_instance_id,
+    final_signal = EXCLUDED.final_signal,
+    benchmark = EXCLUDED.benchmark,
+    updated_at = NOW();
+"""
+
+_UPSERT_COMMIT_STATE_SQL = """
+INSERT INTO streaming.pnl_commit_state (
+    mode, last_candle_ts, kafka_topic, kafka_partition,
+    kafka_offset, state_hash, schema_version, updated_at
+) VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+ON CONFLICT (mode) DO UPDATE SET
+    last_candle_ts  = EXCLUDED.last_candle_ts,
+    kafka_topic     = EXCLUDED.kafka_topic,
+    kafka_partition = EXCLUDED.kafka_partition,
+    kafka_offset    = EXCLUDED.kafka_offset,
+    state_hash      = EXCLUDED.state_hash,
+    schema_version  = EXCLUDED.schema_version,
+    updated_at      = NOW();
+"""
+
+
+def _checkpoint_row_params(mode: str, strategy_table_name: str, rec) -> tuple:
+    return (
+        mode,
+        strategy_table_name,
+        rec.pnl,
+        rec.price,
+        rec.position,
+        rec.bar_ts,
+        rec.revision_ts,
+        int(rec.strategy_id),
+        rec.strategy_name,
+        rec.underlying,
+        rec.config_timeframe,
+        rec.weighting,
+        rec.strategy_instance_id,
+        rec.final_signal,
+        rec.benchmark,
+    )
+
+
+def write_checkpoint(
+    *,
+    mode: str,
+    anchor_state: AnchorState,
+    kafka_topic: str,
+    kafka_partition: int,
+    kafka_offset: int,
+    last_candle_ts: datetime,
+    client: Connection,
+) -> None:
+    """Atomic UPSERT of checkpoint + commit_state for one mode in a single transaction.
+
+    On any database error, rolls back and re-raises. Caller wraps in try/except
+    for best-effort behavior — checkpoint_store does not silently swallow errors.
+
+    The full AnchorState is written every call (UPSERT semantics), so a single
+    successful call after an outage fully restores the checkpoint.
+    """
+    state_hash = compute_state_hash(anchor_state)
+    try:
+        with client.cursor() as cur:
+            keys = sorted(anchor_state.keys())
+            if keys:
+                params_list: list[tuple] = [
+                    _checkpoint_row_params(mode, k, anchor_state.get(k)) for k in keys
+                ]
+                cur.executemany(_UPSERT_CHECKPOINT_SQL, params_list)
+            cur.execute(
+                _UPSERT_COMMIT_STATE_SQL,
+                (
+                    mode,
+                    last_candle_ts,
+                    kafka_topic,
+                    kafka_partition,
+                    kafka_offset,
+                    state_hash,
+                    SCHEMA_VERSION,
+                ),
+            )
+        client.commit()
+    except Exception:
+        client.rollback()
+        raise

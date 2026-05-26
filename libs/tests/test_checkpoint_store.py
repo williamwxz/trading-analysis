@@ -1,6 +1,7 @@
 """Unit tests for libs.computation.checkpoint_store."""
 
 from datetime import UTC, datetime
+from unittest import mock
 
 import pytest
 
@@ -90,3 +91,89 @@ def test_schema_version_constant():
 
     assert isinstance(checkpoint_store.SCHEMA_VERSION, int)
     assert checkpoint_store.SCHEMA_VERSION >= 1
+
+
+@pytest.mark.unit
+def test_write_checkpoint_executes_two_upserts_in_transaction():
+    from libs.computation.checkpoint_store import write_checkpoint
+
+    state = _make_state({"strat_a": _rec(pnl=1.5, price=100.0, position=2.0)})
+
+    fake_cur = mock.MagicMock()
+    fake_cur.__enter__ = mock.MagicMock(return_value=fake_cur)
+    fake_cur.__exit__ = mock.MagicMock(return_value=False)
+    fake_conn = mock.MagicMock()
+    fake_conn.cursor.return_value = fake_cur
+
+    write_checkpoint(
+        mode="prod",
+        anchor_state=state,
+        kafka_topic="binance.price.ticks",
+        kafka_partition=0,
+        kafka_offset=42,
+        last_candle_ts=datetime(2024, 1, 1, 12, 0, tzinfo=UTC),
+        client=fake_conn,
+    )
+
+    # Expect at least two executes: one for pnl_checkpoint UPSERT (executemany),
+    # one for pnl_commit_state UPSERT (execute).
+    total_calls = fake_cur.execute.call_count + fake_cur.executemany.call_count
+    assert total_calls >= 2
+    fake_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_write_checkpoint_rolls_back_on_failure():
+    from libs.computation.checkpoint_store import write_checkpoint
+
+    state = _make_state({"strat_a": _rec()})
+
+    fake_cur = mock.MagicMock()
+    fake_cur.__enter__ = mock.MagicMock(return_value=fake_cur)
+    fake_cur.__exit__ = mock.MagicMock(return_value=False)
+    fake_cur.executemany.side_effect = RuntimeError("simulated postgres failure")
+    fake_conn = mock.MagicMock()
+    fake_conn.cursor.return_value = fake_cur
+
+    with pytest.raises(RuntimeError, match="simulated"):
+        write_checkpoint(
+            mode="prod",
+            anchor_state=state,
+            kafka_topic="binance.price.ticks",
+            kafka_partition=0,
+            kafka_offset=42,
+            last_candle_ts=datetime(2024, 1, 1, 12, 0, tzinfo=UTC),
+            client=fake_conn,
+        )
+    fake_conn.rollback.assert_called_once()
+    fake_conn.commit.assert_not_called()
+
+
+@pytest.mark.unit
+def test_write_checkpoint_empty_state_writes_commit_state_only():
+    """An empty AnchorState shouldn't crash — just no pnl_checkpoint rows."""
+    from libs.computation.checkpoint_store import write_checkpoint
+
+    state = AnchorState()
+
+    fake_cur = mock.MagicMock()
+    fake_cur.__enter__ = mock.MagicMock(return_value=fake_cur)
+    fake_cur.__exit__ = mock.MagicMock(return_value=False)
+    fake_conn = mock.MagicMock()
+    fake_conn.cursor.return_value = fake_cur
+
+    write_checkpoint(
+        mode="prod",
+        anchor_state=state,
+        kafka_topic="binance.price.ticks",
+        kafka_partition=0,
+        kafka_offset=42,
+        last_candle_ts=datetime(2024, 1, 1, 12, 0, tzinfo=UTC),
+        client=fake_conn,
+    )
+
+    # No executemany since there are no checkpoint rows; one explicit execute
+    # for pnl_commit_state.
+    assert fake_cur.executemany.call_count == 0
+    assert fake_cur.execute.call_count == 1
+    fake_conn.commit.assert_called_once()
