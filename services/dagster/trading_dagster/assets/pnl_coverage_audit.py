@@ -1,0 +1,131 @@
+"""PnL Coverage & Position Audit — Dagster Asset.
+
+Daily read-only check that walks every (underlying, strategy) in the six PnL
+tables (1-min + 1-hour, for prod / bt / real_trade) and fails the Dagster run
+on any missing minute or position drift.
+
+See docs/superpowers/specs/2026-05-26-pnl-coverage-audit-design.md.
+"""
+
+from __future__ import annotations
+
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from typing import Literal
+
+from dagster import (
+    AssetExecutionContext,
+    MaterializeResult,
+    ScheduleDefinition,
+    asset,
+    define_asset_job,
+)
+
+from libs.computation import TIMEFRAME_MAP, build_rt_lookup
+
+from ..utils.clickhouse_client import get_client, query_rows
+
+_log = logging.getLogger(__name__)
+
+# ── Configuration ───────────────────────────────────────────────────────────
+
+# Global earliest ts we ever consider — matches PROD_REAL_TRADE_START_DATE
+# in pnl_strategy_v2.py.
+GLOBAL_START_TS = "2026-02-27 00:00:00"
+
+# Phase 1 tolerances (minutes).
+START_TOLERANCE_MIN = 5
+STALE_END_TOLERANCE_MIN = 10  # actual_max_ts < now() - 10m → stale
+
+# Phase 3 tolerances.
+POS_TS_TOLERANCE_MIN = 1
+
+# Top-N offenders included in the failure summary.
+TOP_N_OFFENDERS = 10
+
+# ClickHouse per-query memory cap (500 MB).
+QUERY_MEMORY_CAP = 524_288_000
+
+# Parallel workers — matches existing pnl_strategy_v2 pattern.
+_MAX_WORKERS = 4
+
+# Tables in scope.
+Mode = Literal["prod", "bt", "real_trade"]
+
+_TARGET_TABLES: list[tuple[str, str, Mode]] = [
+    ("strategy_pnl_1min_prod_v2", "strategy_output_history_v2", "prod"),
+    ("strategy_pnl_1min_bt_v2", "strategy_output_history_bt_v2", "bt"),
+    ("strategy_pnl_1min_real_trade_v2", "strategy_output_history_v2", "real_trade"),
+]
+
+_HOUR_TABLES: list[tuple[str, str, Mode]] = [
+    ("strategy_pnl_1hour_prod_v2", "strategy_pnl_1min_prod_v2", "prod"),
+    ("strategy_pnl_1hour_bt_v2", "strategy_pnl_1min_bt_v2", "bt"),
+    ("strategy_pnl_1hour_real_trade_v2", "strategy_pnl_1min_real_trade_v2", "real_trade"),
+]
+
+
+# ── Data classes ────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class StratStat:
+    """Target-table per-strategy stats from Q_stat."""
+    actual_min_ts: datetime
+    actual_max_ts: datetime
+    actual_rows: int
+
+
+@dataclass(frozen=True)
+class SourceFirstBar:
+    """Source per-strategy first-bar info derived from Q_src / Q_src_rt."""
+    expected_min_ts: datetime
+    tf_minutes: int
+
+
+@dataclass(frozen=True)
+class GapDescriptor:
+    """One internal gap detected by Q_gap, after price-gap exemption."""
+    stn: str
+    gap_end: datetime
+    gap_minutes: int
+
+
+@dataclass(frozen=True)
+class PositionChange:
+    """One row in either source_changes or target_changes."""
+    effective_ts: datetime
+    position: float
+
+
+@dataclass
+class Violation:
+    """One detected problem for a (table, underlying, strategy)."""
+    table: str
+    underlying: str
+    stn: str
+    category: Literal["start_gap", "stale_end", "internal_holes", "position_mismatch"]
+    detail: str
+    # For ranking the worst offenders in the summary.
+    severity_minutes: int = 0
+
+
+@dataclass
+class AuditReport:
+    """All violations collected across one audit run."""
+    violations: list[Violation] = field(default_factory=list)
+    tables_checked: int = 0
+    strategies_checked: int = 0
+    duration_secs: float = 0.0
+
+    def has_failures(self) -> bool:
+        return bool(self.violations)
+
+
+# ── Implementation goes in subsequent tasks ─────────────────────────────────
+
+
+def pnl_coverage_audit_asset():
+    """Placeholder — replaced in Task 11."""
+    raise NotImplementedError
