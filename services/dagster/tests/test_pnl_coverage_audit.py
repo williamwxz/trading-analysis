@@ -359,3 +359,31 @@ class TestPhase3Hour:
         hour_rows = [(_dt("2026-03-05 09:00:00"), 0.0)]  # no prior min change
         v = _check_phase3_hour("t1h", "FET", "S", hour_rows, target_min_changes)
         assert v is None  # can't verify, skip silently
+
+
+# ── Report formatter ─────────────────────────────────────────────────────────
+
+
+class TestFormatReport:
+    def test_empty_report_returns_clean_message(self):
+        from services.dagster.trading_dagster.assets.pnl_coverage_audit import AuditReport
+        report = AuditReport()
+        msg = _format_report(report)
+        assert "CLEAN" in msg
+
+    def test_groups_by_table_and_sorts_top_n(self):
+        from services.dagster.trading_dagster.assets.pnl_coverage_audit import AuditReport
+        report = AuditReport()
+        # Three violations, two in the same table.
+        report.violations = [
+            Violation("t1", "FET", "S1", "start_gap", "...", severity_minutes=84000),
+            Violation("t1", "FET", "S2", "start_gap", "...", severity_minutes=1000),
+            Violation("t2", "ETH", "S3", "stale_end", "...", severity_minutes=30),
+        ]
+        msg = _format_report(report)
+        # Both tables represented.
+        assert "[t1]" in msg
+        assert "[t2]" in msg
+        # Top offender (84000 min) listed first in t1.
+        t1_block = msg[msg.index("[t1]") : msg.index("[t2]")]
+        assert t1_block.index("S1") < t1_block.index("S2")

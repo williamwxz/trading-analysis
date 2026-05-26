@@ -185,11 +185,6 @@ def _check_phase1(
     return None
 
 
-# ── Stubs replaced in later tasks ─────────────────────────────────────────
-# Phase 1 implementation lives above this block. The functions below are
-# placeholder stubs so that test files can import the full surface area now
-# even though Tasks 3-8 haven't been implemented yet.
-
 def _check_phase2(
     underlying: str,
     stn: str,
@@ -373,8 +368,39 @@ def _compute_source_changes_rt(
             prev_position = pos
     return changes
 
-def _format_report(*args, **kwargs):
-    raise NotImplementedError
+def _format_report(report: AuditReport) -> str:
+    """Render a human-readable summary of violations grouped by table.
+
+    Within each table, top N offenders by severity_minutes appear first.
+    """
+    if not report.violations:
+        return f"PnL COVERAGE & POSITION AUDIT CLEAN — {report.tables_checked} tables, {report.strategies_checked} strategies, {report.duration_secs:.1f}s"
+
+    by_table: dict[str, list[Violation]] = {}
+    for v in report.violations:
+        by_table.setdefault(v.table, []).append(v)
+
+    lines: list[str] = ["PnL COVERAGE & POSITION AUDIT FAILED", ""]
+    for table in sorted(by_table.keys()):
+        violations = by_table[table]
+        # Per-category counts.
+        by_cat: dict[str, int] = {}
+        for v in violations:
+            by_cat[v.category] = by_cat.get(v.category, 0) + 1
+
+        lines.append(f"[{table}]")
+        for cat in ("start_gap", "stale_end", "internal_holes", "position_mismatch"):
+            if cat in by_cat:
+                lines.append(f"  {cat}: {by_cat[cat]} strategies")
+
+        # Top-N offenders.
+        worst = sorted(violations, key=lambda v: v.severity_minutes, reverse=True)[:TOP_N_OFFENDERS]
+        lines.append(f"  Top {len(worst)} worst:")
+        for v in worst:
+            lines.append(f"    {v.underlying} {v.stn[:80]}  {v.category}  {v.detail}")
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 # ── Asset placeholder ────────────────────────────────────────────────────────
