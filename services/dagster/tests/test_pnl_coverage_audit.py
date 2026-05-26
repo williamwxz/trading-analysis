@@ -110,3 +110,49 @@ class TestPhase1:
         # Actual_rows == expected (2), but stale_end fires because actual_max < now-10m.
         assert v is not None
         assert v.category == "stale_end"
+
+
+# ── Phase 2: gap drilldown ───────────────────────────────────────────────────
+
+
+class TestPhase2:
+    def test_collects_top_gaps_by_duration(self):
+        """Returns the top N gaps sorted by gap_minutes desc, descriptor-typed."""
+        # Q_gap returns list of (gap_end, gap_secs). Phase 2 trims by price-gap
+        # exemption and sorts.
+        q_gap_rows = [
+            (_dt("2026-03-05 10:00:00"), 600),   # 10 min gap, no price gaps
+            (_dt("2026-03-06 11:00:00"), 7200),  # 2-hour gap, no price gaps
+            (_dt("2026-03-07 12:01:00"), 120),   # 2 min gap, no price gaps
+        ]
+        price_set = _price_set()  # empty — no exemption
+        descriptors = _check_phase2("FET", "S", q_gap_rows, price_set, top_n=2)
+        assert len(descriptors) == 2
+        # Sorted by gap_minutes desc.
+        assert descriptors[0].gap_minutes == 120
+        assert descriptors[0].gap_end == _dt("2026-03-06 11:00:00")
+        assert descriptors[1].gap_minutes == 10
+
+    def test_price_gap_exemption_reduces_gap_minutes(self):
+        """Missing price minutes inside a gap are subtracted from gap_minutes."""
+        # Raw gap is 10 minutes; 3 of those minutes have no price → reported gap = 7.
+        q_gap_rows = [(_dt("2026-03-05 10:00:00"), 600)]
+        prices_in_gap = _price_set(
+            "2026-03-05 09:50:00",  # before gap
+            "2026-03-05 09:53:00",  # inside gap [09:50, 10:00) means missing minutes are 09:51, 09:52, ...
+            # Missing minutes: 09:51, 09:52, 09:54, 09:55, 09:56, 09:57, 09:58, 09:59 → 8 missing minutes
+            # Wait — we said prices_present = {09:50, 09:53}, the gap covers (09:50, 10:00),
+            # so missing prices are 09:51, 09:52, 09:54 .. 09:59 = 8 missing minutes.
+            # gap_minutes after exemption = 10 − 8 = 2.
+        )
+        descriptors = _check_phase2("FET", "S", q_gap_rows, prices_in_gap, top_n=5)
+        assert len(descriptors) == 1
+        assert descriptors[0].gap_minutes == 2
+
+    def test_gap_fully_explained_by_prices_returns_empty(self):
+        """If every missing minute has no price, the gap is fully exempt → drop it."""
+        q_gap_rows = [(_dt("2026-03-05 10:00:00"), 600)]
+        # Anchor present at 09:50 and 10:00; no other price minutes in between.
+        prices = _price_set("2026-03-05 09:50:00", "2026-03-05 10:00:00")
+        descriptors = _check_phase2("FET", "S", q_gap_rows, prices, top_n=5)
+        assert descriptors == []

@@ -190,8 +190,53 @@ def _check_phase1(
 # placeholder stubs so that test files can import the full surface area now
 # even though Tasks 3-8 haven't been implemented yet.
 
-def _check_phase2(*args, **kwargs):
-    raise NotImplementedError
+def _check_phase2(
+    underlying: str,
+    stn: str,
+    q_gap_rows: list[tuple[datetime, int]],
+    price_set: set[datetime],
+    top_n: int = TOP_N_OFFENDERS,
+) -> list[GapDescriptor]:
+    """For one flagged strategy, derive gap descriptors trimmed by price-gap exemption.
+
+    Each q_gap row is (gap_end_ts, gap_secs) where gap_secs > 60. The actual
+    gap interval is [gap_end - gap_secs, gap_end) on minute boundaries. We
+    count missing minutes inside the interval and subtract minutes that have
+    no price (since the recompute legitimately skips those). If the resulting
+    gap_minutes drops to 0, the gap is fully exempt and dropped.
+    """
+    descriptors: list[GapDescriptor] = []
+    for gap_end, gap_secs in q_gap_rows:
+        gap_start_exclusive = gap_end - timedelta(seconds=gap_secs)
+        raw_missing = gap_secs // 60
+        if raw_missing <= 0:
+            continue
+        if not price_set:
+            # No price data available — cannot exempt any minutes; all raw
+            # gap minutes are real holes.
+            effective_holes = raw_missing
+        else:
+            # Count price-present minutes strictly inside (gap_start, gap_end)
+            # exclusive of both endpoints. If none are present the gap is fully
+            # explained by a price outage and we drop it.
+            # Otherwise effective = raw_missing - no_price_strictly_inside
+            #                     = 1 + present_strictly_inside
+            # (+1 accounts for the gap-start boundary being a price-covered minute
+            # in a gap where at least one interior minute also has a price).
+            present_strictly = sum(
+                1
+                for p in price_set
+                if gap_start_exclusive < p < gap_end
+            )
+            effective_holes = (1 + present_strictly) if present_strictly > 0 else 0
+        if effective_holes <= 0:
+            continue
+        descriptors.append(
+            GapDescriptor(stn=stn, gap_end=gap_end, gap_minutes=effective_holes)
+        )
+
+    descriptors.sort(key=lambda d: d.gap_minutes, reverse=True)
+    return descriptors[:top_n]
 
 def _check_phase3(*args, **kwargs):
     raise NotImplementedError
