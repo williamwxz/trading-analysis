@@ -189,6 +189,9 @@ LIMIT 1 BY strategy_table_name, strategy_id, strategy_name, underlying, config_t
     return result
 
 
+_RT_BAR_LOOKBACK_MINUTES = max(TIMEFRAME_MAP.values())  # 1440 — covers 1d bars
+
+
 def fetch_new_bars_real_trade(
     source_table: str,
     underlying: str,
@@ -196,16 +199,25 @@ def fetch_new_bars_real_trade(
     ts_end: str,
     client=None,
 ) -> List[dict]:
-    """Fetch real_trade revisions for bars in [ts_start, ts_end).
+    """Fetch real_trade revisions for bars whose execution window overlaps [ts_start, ts_end).
+
+    The lower bound on bar ts is extended by _RT_BAR_LOOKBACK_MINUTES (1440 min) so that
+    bars with a large revision lag (e.g. 1d strategies where execution_ts = revision_ts + 59s
+    arrives ~24h after bar open) are included even when their bar ts falls just before ts_start.
+    Without this, the bar covering [ts_start, ts_start+tf) is excluded from the fetch and
+    creates a gap at the window boundary on every recompute run.
+
+    The extra bars fetched before ts_start are harmless: _process_underlying_recent clamps
+    minute_cur = max(first_active_minute, window_start), so no rows are written before ts_start.
 
     Each revision includes:
     - execution_ts = toStartOfMinute(revision_ts + 59s) — when position takes effect
     - closing_ts   = ts + tf_minutes — bar close time
-
-    compute_real_trade_pnl applies the acceptance filter in Python using the same
-    tuple guard as AnchorState.should_apply_revision: accept iff
-    (ts, revision_ts) > (prev_accepted.ts, prev_accepted.revision_ts).
     """
+    fetch_start = (
+        datetime.strptime(ts_start[:19], "%Y-%m-%d %H:%M:%S")
+        - timedelta(minutes=_RT_BAR_LOOKBACK_MINUTES)
+    ).strftime("%Y-%m-%d %H:%M:%S")
     tf_expr = _TF_EXPR
     sql = f"""\
 SELECT
@@ -226,7 +238,7 @@ SELECT
 FROM analytics.{source_table}
 WHERE underlying = '{underlying}'
   AND strategy_table_name NOT LIKE 'manual_probe%'
-  AND toDateTime(ts) >= toDateTime('{ts_start}')
+  AND toDateTime(ts) >= toDateTime('{fetch_start}')
   AND toDateTime(ts) < toDateTime('{ts_end}')
 ORDER BY strategy_table_name, ts, revision_ts
 """
