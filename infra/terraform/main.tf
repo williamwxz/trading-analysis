@@ -83,7 +83,7 @@ locals {
       enable_real_trade = "true"
       enable_bt         = "false"
       group_id          = "flink-pnl-consumer-v2"
-      desired_count     = 0
+      desired_count     = 1
       dry_run           = "false"
       clickhouse_user   = "streaming"
     }
