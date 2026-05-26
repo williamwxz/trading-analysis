@@ -177,3 +177,106 @@ def test_write_checkpoint_empty_state_writes_commit_state_only():
     assert fake_cur.executemany.call_count == 0
     assert fake_cur.execute.call_count == 1
     fake_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_read_checkpoint_returns_none_when_no_commit_state():
+    from libs.computation.checkpoint_store import read_checkpoint
+
+    fake_cur = mock.MagicMock()
+    fake_cur.__enter__ = mock.MagicMock(return_value=fake_cur)
+    fake_cur.__exit__ = mock.MagicMock(return_value=False)
+    fake_cur.description = [
+        ("mode",),
+        ("last_candle_ts",),
+        ("kafka_topic",),
+        ("kafka_partition",),
+        ("kafka_offset",),
+        ("state_hash",),
+        ("schema_version",),
+    ]
+    fake_cur.fetchall.return_value = []
+    fake_conn = mock.MagicMock()
+    fake_conn.cursor.return_value = fake_cur
+
+    result = read_checkpoint(mode="prod", client=fake_conn)
+    assert result is None
+
+
+@pytest.mark.unit
+def test_read_checkpoint_returns_load_result():
+    from libs.computation.checkpoint_store import CheckpointLoadResult, read_checkpoint
+
+    # Two separate cursor uses: one for pnl_commit_state, one for pnl_checkpoint.
+    cs_cur = mock.MagicMock()
+    cs_cur.__enter__ = mock.MagicMock(return_value=cs_cur)
+    cs_cur.__exit__ = mock.MagicMock(return_value=False)
+    cs_cur.description = [
+        ("mode",),
+        ("last_candle_ts",),
+        ("kafka_topic",),
+        ("kafka_partition",),
+        ("kafka_offset",),
+        ("state_hash",),
+        ("schema_version",),
+    ]
+    cs_cur.fetchall.return_value = [
+        (
+            "prod",
+            datetime(2024, 1, 1, 12, 0, tzinfo=UTC),
+            "binance.price.ticks",
+            0,
+            100,
+            "deadbeef",
+            1,
+        )
+    ]
+
+    cp_cur = mock.MagicMock()
+    cp_cur.__enter__ = mock.MagicMock(return_value=cp_cur)
+    cp_cur.__exit__ = mock.MagicMock(return_value=False)
+    cp_cur.description = [
+        ("strategy_table_name",),
+        ("pnl",),
+        ("price",),
+        ("position",),
+        ("bar_ts",),
+        ("revision_ts",),
+        ("strategy_id",),
+        ("strategy_name",),
+        ("underlying",),
+        ("config_timeframe",),
+        ("weighting",),
+        ("strategy_instance_id",),
+        ("final_signal",),
+        ("benchmark",),
+    ]
+    cp_cur.fetchall.return_value = [
+        (
+            "strat_a",
+            1.5,
+            100.0,
+            2.0,
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, tzinfo=UTC),
+            1,
+            "s",
+            "BTC",
+            "1m",
+            1.0,
+            "i",
+            0.0,
+            0.0,
+        )
+    ]
+
+    fake_conn = mock.MagicMock()
+    fake_conn.cursor.side_effect = [cs_cur, cp_cur]
+
+    result = read_checkpoint(mode="prod", client=fake_conn)
+    assert isinstance(result, CheckpointLoadResult)
+    assert result.commit_state.kafka_offset == 100
+    assert result.commit_state.state_hash == "deadbeef"
+    assert result.commit_state.schema_version == 1
+    assert "strat_a" in result.anchor_state.keys()
+    assert result.anchor_state.get("strat_a").pnl == 1.5

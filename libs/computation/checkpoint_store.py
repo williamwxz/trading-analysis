@@ -10,12 +10,13 @@ existing 48h bootstrap and writes a fresh checkpoint at the new version.
 
 import hashlib
 import json
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from psycopg import Connection
 
-from libs.computation.anchor_state import AnchorState
+from libs.computation.anchor_state import AnchorRecord, AnchorState
 
 # Bump on any incompatible change to AnchorRecord fields or canonical encoding.
 SCHEMA_VERSION = 1
@@ -161,3 +162,87 @@ def write_checkpoint(
     except Exception:
         client.rollback()
         raise
+
+
+@dataclass(frozen=True)
+class CommitStateRow:
+    mode: str
+    last_candle_ts: datetime
+    kafka_topic: str
+    kafka_partition: int
+    kafka_offset: int
+    state_hash: str
+    schema_version: int
+
+
+@dataclass(frozen=True)
+class CheckpointLoadResult:
+    commit_state: CommitStateRow
+    anchor_state: AnchorState
+
+
+_SELECT_COMMIT_STATE = """
+SELECT mode, last_candle_ts, kafka_topic, kafka_partition,
+       kafka_offset, state_hash, schema_version
+FROM streaming.pnl_commit_state
+WHERE mode = %s
+"""
+
+_SELECT_CHECKPOINT_ROWS = """
+SELECT strategy_table_name, pnl, price, position,
+       bar_ts, revision_ts,
+       strategy_id, strategy_name, underlying, config_timeframe,
+       weighting, strategy_instance_id, final_signal, benchmark
+FROM streaming.pnl_checkpoint
+WHERE mode = %s
+"""
+
+
+def read_checkpoint(*, mode: str, client: Connection) -> "CheckpointLoadResult | None":
+    """Return the persisted checkpoint for `mode`, or None if no commit_state row.
+
+    Reads both tables in the same connection but separate cursors. The two reads are
+    not in a single transaction — the writer guarantees consistency via its own
+    transaction; readers see whatever the last successful write produced.
+    """
+    with client.cursor() as cur:
+        cur.execute(_SELECT_COMMIT_STATE, (mode,))
+        commit_rows = cur.fetchall()
+    if not commit_rows:
+        return None
+    row = commit_rows[0]
+    commit_state = CommitStateRow(
+        mode=row[0],
+        last_candle_ts=row[1],
+        kafka_topic=row[2],
+        kafka_partition=row[3],
+        kafka_offset=row[4],
+        state_hash=row[5],
+        schema_version=row[6],
+    )
+
+    with client.cursor() as cur:
+        cur.execute(_SELECT_CHECKPOINT_ROWS, (mode,))
+        checkpoint_rows = cur.fetchall()
+
+    anchor_state = AnchorState()
+    for r in checkpoint_rows:
+        anchor_state.set(
+            r[0],
+            AnchorRecord(
+                pnl=r[1],
+                price=r[2],
+                position=r[3],
+                bar_ts=r[4],
+                revision_ts=r[5],
+                strategy_id=r[6],
+                strategy_name=r[7],
+                underlying=r[8],
+                config_timeframe=r[9],
+                weighting=r[10],
+                strategy_instance_id=r[11],
+                final_signal=r[12],
+                benchmark=r[13],
+            ),
+        )
+    return CheckpointLoadResult(commit_state=commit_state, anchor_state=anchor_state)
