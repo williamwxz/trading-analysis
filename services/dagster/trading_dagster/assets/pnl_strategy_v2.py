@@ -706,7 +706,7 @@ def pnl_prod_v2_full_asset(context: AssetExecutionContext) -> MaterializeResult:
     },
 )
 def pnl_real_trade_v2_full_asset(context: AssetExecutionContext) -> MaterializeResult:
-    """Delete last chunk and recompute real_trade PnL from anchors, pausing the real-trade consumer."""
+    """Delete last chunk and recompute real_trade PnL from anchors, pausing then resuming the real-trade consumer."""
     return _recompute_pnl_recent(
         context,
         target_table="strategy_pnl_1min_real_trade_v2",
@@ -715,7 +715,7 @@ def pnl_real_trade_v2_full_asset(context: AssetExecutionContext) -> MaterializeR
         mode="real_trade",
         ecs_service="trading-analysis-pnl-consumer-real-trade",
         max_workers=1,
-        ecs_resume_count=0,
+        ecs_resume_count=1,
     )
 
 
