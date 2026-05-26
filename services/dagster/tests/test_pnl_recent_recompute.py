@@ -338,10 +338,11 @@ class TestRecomputePnlRecent:
     @patch("trading_dagster.assets.pnl_strategy_v2.execute")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlying_resume_dt", return_value=None)
+    @patch("trading_dagster.assets.pnl_strategy_v2._get_source_min_ts", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
     def test_consumer_paused_before_recompute(
-        self, mock_gc, mock_get_und, mock_resume, mock_fa, mock_exec, mock_qd, mock_prices, mock_insert, mock_boto3
+        self, mock_gc, mock_get_und, mock_src_min, mock_resume, mock_fa, mock_exec, mock_qd, mock_prices, mock_insert, mock_boto3
     ):
         """ECS update_service(desiredCount=0) must be called before any DELETE or INSERT."""
         from trading_dagster.assets.pnl_strategy_v2 import _recompute_pnl_recent
@@ -378,10 +379,11 @@ class TestRecomputePnlRecent:
     @patch("trading_dagster.assets.pnl_strategy_v2.execute")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlying_resume_dt", return_value=None)
+    @patch("trading_dagster.assets.pnl_strategy_v2._get_source_min_ts", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
     def test_consumer_resumed_even_on_failure(
-        self, mock_gc, mock_get_und, mock_resume, mock_fa, mock_exec, mock_qd, mock_prices, mock_insert, mock_boto3
+        self, mock_gc, mock_get_und, mock_src_min, mock_resume, mock_fa, mock_exec, mock_qd, mock_prices, mock_insert, mock_boto3
     ):
         """ECS update_service(desiredCount=1) must be called even when recompute raises."""
         from trading_dagster.assets.pnl_strategy_v2 import _recompute_pnl_recent
@@ -416,10 +418,11 @@ class TestRecomputePnlRecent:
     @patch("trading_dagster.assets.pnl_strategy_v2.execute")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlying_resume_dt", return_value=None)
+    @patch("trading_dagster.assets.pnl_strategy_v2._get_source_min_ts", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
     def test_bt_ecs_resume_count_is_zero(
-        self, mock_gc, mock_get_und, mock_resume, mock_fa, mock_exec, mock_qd, mock_prices, mock_insert, mock_boto3
+        self, mock_gc, mock_get_und, mock_src_min, mock_resume, mock_fa, mock_exec, mock_qd, mock_prices, mock_insert, mock_boto3
     ):
         """bt asset must restore ECS desiredCount=0 so the bt consumer stays stopped."""
         from trading_dagster.assets.pnl_strategy_v2 import _recompute_pnl_recent
@@ -450,10 +453,11 @@ class TestRecomputePnlRecent:
 
     @patch("trading_dagster.assets.pnl_strategy_v2.boto3")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlying_resume_dt", return_value=None)
+    @patch("trading_dagster.assets.pnl_strategy_v2._get_source_min_ts", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
     def test_consumer_resumed_even_when_pause_waiter_fails(
-        self, mock_gc, mock_get_und, mock_resume, mock_boto3
+        self, mock_gc, mock_get_und, mock_src_min, mock_resume, mock_boto3
     ):
         """ECS update_service(desiredCount=1) must be called even when the pause waiter raises."""
         from trading_dagster.assets.pnl_strategy_v2 import _recompute_pnl_recent
@@ -485,10 +489,11 @@ class TestRecomputePnlRecent:
     @patch("trading_dagster.assets.pnl_strategy_v2.execute")
     @patch("trading_dagster.assets.pnl_strategy_v2.fetch_anchors")
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlying_resume_dt", return_value=None)
+    @patch("trading_dagster.assets.pnl_strategy_v2._get_source_min_ts", return_value=None)
     @patch("trading_dagster.assets.pnl_strategy_v2._get_underlyings")
     @patch("trading_dagster.assets.pnl_strategy_v2.get_client")
     def test_default_window_start_is_prod_real_trade_start_date(
-        self, mock_gc, mock_get_und, mock_resume, mock_fa, mock_exec, mock_qd, mock_prices, mock_insert, mock_boto3
+        self, mock_gc, mock_get_und, mock_src_min, mock_resume, mock_fa, mock_exec, mock_qd, mock_prices, mock_insert, mock_boto3
     ):
         """When underlying has no existing data, window_start falls back to PROD_REAL_TRADE_START_DATE."""
         from trading_dagster.assets.pnl_strategy_v2 import _recompute_pnl_recent, PROD_REAL_TRADE_START_DATE
