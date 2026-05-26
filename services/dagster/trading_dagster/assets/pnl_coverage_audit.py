@@ -281,8 +281,48 @@ def _check_phase3(
             )
     return None
 
-def _check_phase3_hour(*args, **kwargs):
-    raise NotImplementedError
+def _check_phase3_hour(
+    table: str,
+    underlying: str,
+    stn: str,
+    hour_rows: list[tuple[datetime, float]],
+    target_min_changes: list[PositionChange],
+) -> Violation | None:
+    """For each (U, S, hour) row in the 1-hour table, verify position equals the
+    latest 1-min change at minute <= hour + 1h.
+
+    hour_rows: list of (hour_ts, position) from the 1-hour target table.
+    target_min_changes: position-change sequence from the corresponding 1-min table.
+    """
+    if not target_min_changes:
+        return None
+    # Sorted ascending by effective_ts in both inputs.
+    for hour_ts, hour_position in hour_rows:
+        cutoff = hour_ts + timedelta(hours=1)
+        # Find the latest min-change with effective_ts < cutoff.
+        latest: PositionChange | None = None
+        for change in target_min_changes:
+            if change.effective_ts < cutoff:
+                latest = change
+            else:
+                break
+        if latest is None:
+            # No prior 1-min change — cannot verify this slot, skip silently.
+            continue
+        if latest.position != hour_position:
+            return Violation(
+                table=table,
+                underlying=underlying,
+                stn=stn,
+                category="position_mismatch",
+                detail=(
+                    f"hour slot {hour_ts:%Y-%m-%d %H:%M:%S}: "
+                    f"hour_position={hour_position} != latest_min_position={latest.position} "
+                    f"(latest min change at {latest.effective_ts:%Y-%m-%d %H:%M:%S})"
+                ),
+                severity_minutes=1,
+            )
+    return None
 
 def _compute_source_changes_prod_bt(
     bars: list[tuple[str, float]],

@@ -325,3 +325,37 @@ class TestPhase3Min:
         v = _check_phase3("t", "FET", "S", source, target)
         assert v is not None
         assert v.category == "position_mismatch"
+
+
+# ── Phase 3 (hour table): slot position match ────────────────────────────────
+
+
+class TestPhase3Hour:
+    def test_hour_slots_match_minute_argmax(self):
+        """For each hour slot, position should equal the latest 1-min position <= hour+1h."""
+        # 1-min target had changes at 09:05 → 1.0, 09:30 → -1.0
+        # Hour slot 09:00 should reflect argMax(position, minute_ts) = -1.0
+        # (because 09:30 is the latest minute_ts in [09:00, 10:00))
+        target_min_changes = [
+            PositionChange(_dt("2026-03-05 09:05:00"), 1.0),
+            PositionChange(_dt("2026-03-05 09:30:00"), -1.0),
+        ]
+        hour_rows = [
+            (_dt("2026-03-05 09:00:00"), -1.0),  # correct
+        ]
+        v = _check_phase3_hour("t1h", "FET", "S", hour_rows, target_min_changes)
+        assert v is None
+
+    def test_hour_slot_position_drift_fails(self):
+        target_min_changes = [PositionChange(_dt("2026-03-05 09:30:00"), -1.0)]
+        hour_rows = [(_dt("2026-03-05 09:00:00"), 1.0)]  # wrong
+        v = _check_phase3_hour("t1h", "FET", "S", hour_rows, target_min_changes)
+        assert v is not None
+        assert v.category == "position_mismatch"
+
+    def test_hour_slot_with_no_prior_minute_change_skips(self):
+        """If a 1-hour row exists before any 1-min change, we cannot compare — skip."""
+        target_min_changes = [PositionChange(_dt("2026-03-05 10:00:00"), 1.0)]
+        hour_rows = [(_dt("2026-03-05 09:00:00"), 0.0)]  # no prior min change
+        v = _check_phase3_hour("t1h", "FET", "S", hour_rows, target_min_changes)
+        assert v is None  # can't verify, skip silently
