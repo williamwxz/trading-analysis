@@ -5,6 +5,7 @@ from datetime import datetime
 import pytest
 
 from services.dagster.trading_dagster.assets.pnl_coverage_audit import (
+    AuditReport,
     GapDescriptor,
     PositionChange,
     SourceFirstBar,
@@ -387,3 +388,64 @@ class TestFormatReport:
         # Top offender (84000 min) listed first in t1.
         t1_block = msg[msg.index("[t1]") : msg.index("[t2]")]
         assert t1_block.index("S1") < t1_block.index("S2")
+
+
+# ── Driver: per-underlying audit ─────────────────────────────────────────────
+
+
+class TestAuditUnderlying:
+    def test_clean_underlying_returns_no_violations(self, monkeypatch):
+        """All phases pass → empty violations list."""
+        from services.dagster.trading_dagster.assets import pnl_coverage_audit as mod
+
+        monkeypatch.setattr(mod, "_fetch_q_stat", lambda t, u, c: {
+            "S1": StratStat(_dt("2026-03-05 09:05:00"), _dt("2026-05-26 09:55:00"), 2),
+        })
+        monkeypatch.setattr(mod, "_fetch_q_px", lambda u, c: _price_set(
+            "2026-03-05 09:05:00", "2026-05-26 09:55:00"))
+        monkeypatch.setattr(mod, "_fetch_q_src_prod_bt", lambda st, u, c: {
+            "S1": [("2026-03-05 09:00:00", 1.0)],
+        })
+        monkeypatch.setattr(mod, "_fetch_q_src_tf", lambda st, u, c: {"S1": 5})
+        monkeypatch.setattr(mod, "_fetch_q_trans", lambda t, u, s, c: [
+            PositionChange(_dt("2026-03-05 09:05:00"), 1.0),
+        ])
+        monkeypatch.setattr(mod, "_fetch_q_gap", lambda t, u, s, c: [])
+
+        report = mod._audit_underlying(
+            target_table="strategy_pnl_1min_prod_v2",
+            source_table="strategy_output_history_v2",
+            mode="prod",
+            underlying="FET",
+            client=None,
+            now_ts=_dt("2026-05-26 10:00:00"),
+        )
+        assert report.violations == []
+
+    def test_start_gap_is_detected(self, monkeypatch):
+        from services.dagster.trading_dagster.assets import pnl_coverage_audit as mod
+
+        # Target starts 2 months late.
+        monkeypatch.setattr(mod, "_fetch_q_stat", lambda t, u, c: {
+            "S1": StratStat(_dt("2026-05-02 20:44:00"), _dt("2026-05-26 09:55:00"), 100),
+        })
+        monkeypatch.setattr(mod, "_fetch_q_px", lambda u, c: _price_set("2026-03-05 09:05:00"))
+        monkeypatch.setattr(mod, "_fetch_q_src_prod_bt", lambda st, u, c: {
+            "S1": [("2026-03-05 09:00:00", 1.0)],
+        })
+        monkeypatch.setattr(mod, "_fetch_q_src_tf", lambda st, u, c: {"S1": 5})
+        monkeypatch.setattr(mod, "_fetch_q_trans", lambda t, u, s, c: [
+            PositionChange(_dt("2026-05-02 20:45:00"), 1.0),
+        ])
+        monkeypatch.setattr(mod, "_fetch_q_gap", lambda t, u, s, c: [])
+
+        report = mod._audit_underlying(
+            target_table="strategy_pnl_1min_prod_v2",
+            source_table="strategy_output_history_v2",
+            mode="prod",
+            underlying="FET",
+            client=None,
+            now_ts=_dt("2026-05-26 10:00:00"),
+        )
+        # Phase 1 should report start_gap and skip phase 3 for that strategy.
+        assert any(v.category == "start_gap" for v in report.violations)

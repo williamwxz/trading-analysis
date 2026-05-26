@@ -608,6 +608,112 @@ SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
     return out
 
 
+# ── Per-underlying driver ────────────────────────────────────────────────────
+
+
+def _audit_underlying(
+    target_table: str,
+    source_table: str,
+    mode: Mode,
+    underlying: str,
+    client,
+    now_ts: datetime,
+) -> AuditReport:
+    """Run phases 1-3 for all strategies of one (target_table, underlying)."""
+    report = AuditReport()
+
+    # ── Fetch shared per-U projections ───────────────────────────────────────
+    stat_by_stn = _fetch_q_stat(target_table, underlying, client)
+    if not stat_by_stn:
+        return report  # target has nothing for this U — nothing to verify
+    price_set = _fetch_q_px(underlying, client)
+
+    if mode == "real_trade":
+        rt_revs = _fetch_q_src_rt(underlying, client)
+        # Build first-bar info per stn from accepted revisions.
+        src_first_by_stn: dict[str, SourceFirstBar] = {}
+        # Group revs by stn first.
+        revs_by_stn: dict[str, list[dict]] = {}
+        for rev in rt_revs:
+            revs_by_stn.setdefault(rev["strategy_table_name"], []).append(rev)
+        for stn, revs in revs_by_stn.items():
+            lookup = build_rt_lookup(revs)
+            entries = lookup.get(stn, [])
+            if not entries:
+                continue
+            tf = TIMEFRAME_MAP.get(entries[0].rev["config_timeframe"], 5)
+            src_first_by_stn[stn] = SourceFirstBar(
+                expected_min_ts=entries[0].execution_ts, tf_minutes=tf
+            )
+    else:
+        bars_by_stn = _fetch_q_src_prod_bt(source_table, underlying, client)
+        tf_by_stn = _fetch_q_src_tf(source_table, underlying, client)
+        src_first_by_stn = {}
+        for stn, bars in bars_by_stn.items():
+            if not bars:
+                continue
+            tf = tf_by_stn.get(stn, 5)
+            first_bar_ts = datetime.strptime(str(bars[0][0])[:19], "%Y-%m-%d %H:%M:%S")
+            src_first_by_stn[stn] = SourceFirstBar(
+                expected_min_ts=first_bar_ts + timedelta(minutes=tf),
+                tf_minutes=tf,
+            )
+
+    # ── Per-strategy loop ────────────────────────────────────────────────────
+    for stn, stat in stat_by_stn.items():
+        report.strategies_checked += 1
+        source = src_first_by_stn.get(stn)
+        if source is None:
+            # Target has rows for a strategy not in source — orphaned.
+            report.violations.append(
+                Violation(
+                    table=target_table,
+                    underlying=underlying,
+                    stn=stn,
+                    category="position_mismatch",  # closest existing category
+                    detail="strategy present in target but not in source",
+                    severity_minutes=stat.actual_rows,
+                )
+            )
+            continue
+
+        # Phase 1
+        v1 = _check_phase1(target_table, underlying, stn, stat, source, price_set, now_ts)
+        if v1 is not None:
+            report.violations.append(v1)
+            # Phase 2 drilldown for any flagged strategy.
+            q_gap = _fetch_q_gap(target_table, underlying, stn, client)
+            gaps = _check_phase2(underlying, stn, q_gap, price_set)
+            for g in gaps:
+                report.violations.append(
+                    Violation(
+                        table=target_table,
+                        underlying=underlying,
+                        stn=stn,
+                        category="internal_holes",
+                        detail=f"gap ending {g.gap_end:%Y-%m-%d %H:%M:%S} ({g.gap_minutes}m)",
+                        severity_minutes=g.gap_minutes,
+                    )
+                )
+            # Skip Phase 3 for flagged strategies — usually the position
+            # sequence is misleading when coverage is broken.
+            continue
+
+        # Phase 3 (only when Phase 1 is clean)
+        target_changes = _fetch_q_trans(target_table, underlying, stn, client)
+        if mode == "real_trade":
+            source_changes = _compute_source_changes_rt(revs_by_stn.get(stn, []), stn)
+        else:
+            source_changes = _compute_source_changes_prod_bt(
+                bars_by_stn.get(stn, []), source.tf_minutes
+            )
+        v3 = _check_phase3(target_table, underlying, stn, source_changes, target_changes)
+        if v3 is not None:
+            report.violations.append(v3)
+
+    return report
+
+
 # ── Asset placeholder ────────────────────────────────────────────────────────
 
 
