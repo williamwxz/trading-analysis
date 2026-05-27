@@ -14,6 +14,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from enum import Enum
 
+from libs.clickhouse_client import query_rows
 from libs.computation.anchor_state import AnchorState
 from libs.computation.checkpoint_store import (
     SCHEMA_VERSION,
@@ -24,6 +25,7 @@ from libs.computation.checkpoint_store import (
 logger = logging.getLogger(__name__)
 
 _DATETIME_MIN_UTC = datetime.min.replace(tzinfo=UTC)
+_POSITION_TOLERANCE = 1e-9
 
 
 class FallbackReason(Enum):
@@ -191,3 +193,104 @@ def load_or_bootstrap(
         result.commit_state.last_candle_ts,
     )
     return result.anchor_state, None
+
+
+def clickhouse_invariant_check(
+    *,
+    mode: str,
+    result: CheckpointLoadResult,
+    ch_client,
+) -> FallbackReason | None:
+    """Verify checkpoint.position agrees with strategy_output_history_*.
+
+    Single ClickHouse query per mode. Compares per-strategy_instance_id.
+
+    Prod/bt: latest revision in [strategy_output_history_v2 | _bt_v2] as of
+    result.commit_state.last_candle_ts.
+
+    Real-trade: the *specific* (ts, revision_ts) pair stored on each checkpoint
+    record. If that exact revision is missing, fall back.
+
+    Returns None on agreement, FallbackReason.INVARIANT_MISMATCH otherwise.
+    """
+    history_table = {
+        "prod": "analytics.strategy_output_history_v2",
+        "bt": "analytics.strategy_output_history_bt_v2",
+        "real_trade": "analytics.strategy_output_history_v2",
+    }[mode]
+
+    expected_by_iid: dict[str, float] = {}
+    for key in result.anchor_state.keys():
+        rec = result.anchor_state.get(key)
+        if rec.strategy_instance_id:
+            expected_by_iid[rec.strategy_instance_id] = rec.position
+
+    if not expected_by_iid:
+        # No instance_ids to check — caller should have caught NO_STRATEGIES already.
+        return None
+
+    if mode == "real_trade":
+        # Verify the exact (ts, revision_ts) revisions referenced by checkpoint still
+        # exist in history with matching position. Build a join against inline VALUES.
+        tuples = []
+        for key in result.anchor_state.keys():
+            rec = result.anchor_state.get(key)
+            if not rec.strategy_instance_id:
+                continue
+            tuples.append(
+                (
+                    rec.strategy_instance_id,
+                    rec.bar_ts.isoformat(),
+                    rec.revision_ts.isoformat(),
+                )
+            )
+        if not tuples:
+            return None
+        values_clause = ", ".join(
+            f"('{iid}', '{ts}', '{rts}')" for iid, ts, rts in tuples
+        )
+        sql = f"""
+            SELECT
+                v.iid AS strategy_instance_id,
+                JSONExtractFloat(h.row_json, 'position') AS position
+            FROM (
+                SELECT iid, ts, revision_ts FROM (
+                    VALUES (
+                        'iid String, ts DateTime, revision_ts DateTime',
+                        {values_clause}
+                    )
+                )
+            ) v
+            INNER JOIN {history_table} h
+                ON v.iid = h.strategy_instance_id
+               AND v.ts = h.ts
+               AND v.revision_ts = h.revision_ts
+        """
+    else:
+        # Latest revision per strategy_instance_id, asof last_candle_ts.
+        as_of = result.commit_state.last_candle_ts.isoformat()
+        iid_list = ",".join(f"'{i}'" for i in expected_by_iid.keys())
+        sql = f"""
+            SELECT
+                strategy_instance_id,
+                JSONExtractFloat(argMin(row_json, revision_ts), 'position') AS position
+            FROM {history_table}
+            WHERE strategy_instance_id IN ({iid_list})
+              AND ts <= toDateTime('{as_of}')
+            GROUP BY strategy_instance_id
+        """
+
+    rows = query_rows(sql, client=ch_client)
+    actual_by_iid = {r[0]: float(r[1]) for r in rows}
+
+    for iid, expected_position in expected_by_iid.items():
+        actual = actual_by_iid.get(iid)
+        if actual is None or abs(actual - expected_position) > _POSITION_TOLERANCE:
+            logger.warning(
+                "invariant mismatch: iid=%s expected_position=%s actual_position=%s",
+                iid,
+                expected_position,
+                actual,
+            )
+            return FallbackReason.INVARIANT_MISMATCH
+    return None
