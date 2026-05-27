@@ -30,6 +30,7 @@ from confluent_kafka import (
 from streaming.binance_ws_consumer import INSTRUMENTS
 from streaming.models import CandleEvent
 
+from libs.clickhouse_client import get_client as ch_get_client
 from libs.clickhouse_client import insert_rows, query_dicts
 from libs.computation import (
     INSERT_COLUMNS,
@@ -45,9 +46,13 @@ from libs.computation import (
     fetch_strategies_for_candle,
     fetch_walk_rows,
 )
-from libs.computation.checkpoint_store import write_checkpoint
+from libs.computation.checkpoint_store import read_checkpoint, write_checkpoint
 from libs.postgres_client import (
-    get_client as pg_get_client,  # noqa: F401  (used in Task 16)
+    get_client as pg_get_client,
+)
+from pnl_consumer.cold_start import (
+    clickhouse_invariant_check,
+    load_or_bootstrap,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,6 +107,16 @@ _CHECKPOINT_ENABLED = (
 _CHECKPOINT_WRITE_ENABLED = (
     _CHECKPOINT_ENABLED
     and os.getenv("STREAMING_CHECKPOINT_WRITE_ENABLED", "true").lower() == "true"
+)
+_CHECKPOINT_READ_ENABLED = (
+    _CHECKPOINT_ENABLED
+    and os.getenv("STREAMING_CHECKPOINT_READ_ENABLED", "true").lower() == "true"
+)
+_INVARIANT_CHECK_ENABLED = (
+    os.getenv("STREAMING_CHECKPOINT_INVARIANT_CHECK_ENABLED", "true").lower() == "true"
+)
+_CHECKPOINT_FRESHNESS_SECONDS = int(
+    os.getenv("STREAMING_CHECKPOINT_FRESHNESS_SECONDS", "86400")
 )
 
 
@@ -917,38 +932,11 @@ def run() -> None:
         sink_cfg.bt,
     )
 
-    reference_ts = peek_reference_ts(os.environ["REDPANDA_BROKERS"], resolve_group_id())
-    if reference_ts is not None:
-        logger.info("Cold-start reference_ts from committed offset: %s", reference_ts)
-    else:
-        logger.info("No committed offset — using now() as reference_ts")
-
-    state_prod = AnchorState()
-    state_bt = AnchorState()
-    state_real_trade = AnchorState()
-
-    try:
-        if sink_cfg.prod:
-            state_prod = _bootstrap_state("prod", reference_ts)
-        if sink_cfg.bt:
-            state_bt = _bootstrap_bt_state(reference_ts)
-        if sink_cfg.real_trade:
-            state_real_trade = _bootstrap_state("real_trade", reference_ts)
-    except Exception:
-        logger.exception("Fatal error during bootstrap — exiting")
-        sys.exit(1)
-
-    # Per-mode Postgres connections for checkpoint writes (Task 16 sets real values).
-    pg_client_prod = None
-    pg_client_bt = None
-    pg_client_real_trade = None
-
-    cw_client = boto3.client(
-        "cloudwatch", region_name=os.environ.get("AWS_REGION", "ap-northeast-1")
-    )
     group_id = resolve_group_id()
     sink_label = group_id.removeprefix("pnl-consumer-") or group_id
 
+    # Build the Kafka consumer first so _committed_offset can call consumer.committed()
+    # during cold-start checkpoint resolution.
     consumer = Consumer(
         {
             "bootstrap.servers": os.environ["REDPANDA_BROKERS"],
@@ -960,9 +948,106 @@ def run() -> None:
     consumer.subscribe([TOPIC])
     logger.info("Subscribed to %s as group %s", TOPIC, group_id)
 
+    reference_ts = peek_reference_ts(os.environ["REDPANDA_BROKERS"], resolve_group_id())
+    if reference_ts is not None:
+        logger.info("Cold-start reference_ts from committed offset: %s", reference_ts)
+    else:
+        logger.info("No committed offset — using now() as reference_ts")
+
+    state_prod = AnchorState()
+    state_bt = AnchorState()
+    state_real_trade = AnchorState()
+
+    # Open one Postgres connection per active sink mode.
+    # (None if mode disabled or checkpoint disabled.)
+    pg_client_prod = None
+    pg_client_bt = None
+    pg_client_real_trade = None
+    if _CHECKPOINT_ENABLED and sink_cfg.prod:
+        pg_client_prod = pg_get_client()
+    if _CHECKPOINT_ENABLED and sink_cfg.bt:
+        pg_client_bt = pg_get_client()
+    if _CHECKPOINT_ENABLED and sink_cfg.real_trade:
+        pg_client_real_trade = pg_get_client()
+
+    now_utc = datetime.now(UTC)
+
+    def _committed_offset(topic_partitions) -> int:
+        """Max committed offset across the listed partitions."""
+        committed = consumer.committed(topic_partitions, timeout=5.0)
+        offsets = [tp.offset for tp in committed if tp.offset != OFFSET_INVALID]
+        return max(offsets) if offsets else 0
+
+    _partitions_for_offset = [TopicPartition(TOPIC, 0)]
+
+    def _maybe_load(mode: str, bootstrap_callable) -> AnchorState:
+        pg = {
+            "prod": pg_client_prod,
+            "bt": pg_client_bt,
+            "real_trade": pg_client_real_trade,
+        }[mode]
+        if not (_CHECKPOINT_READ_ENABLED and pg is not None):
+            return bootstrap_callable()
+        ch_for_invariant = ch_get_client() if _INVARIANT_CHECK_ENABLED else None
+        try:
+            state, reason = load_or_bootstrap(
+                mode=mode,
+                pg_client=pg,
+                kafka_committed_offset=_committed_offset(_partitions_for_offset),
+                now=now_utc,
+                max_age_seconds=_CHECKPOINT_FRESHNESS_SECONDS,
+                invariant_check_enabled=_INVARIANT_CHECK_ENABLED,
+                read_checkpoint_fn=read_checkpoint,
+                bootstrap_fn=bootstrap_callable,
+                invariant_check_fn=(
+                    (
+                        lambda *, mode, result: clickhouse_invariant_check(
+                            mode=mode, result=result, ch_client=ch_for_invariant
+                        )
+                    )
+                    if ch_for_invariant
+                    else None
+                ),
+            )
+            if reason is None:
+                logger.info("cold-start: checkpoint restored. mode=%s", mode)
+            else:
+                logger.info(
+                    "cold-start: fallback bootstrap (%s). mode=%s", reason.value, mode
+                )
+            return state
+        finally:
+            if ch_for_invariant is not None:
+                ch_for_invariant.close()
+
+    try:
+        if sink_cfg.prod:
+            state_prod = _maybe_load(
+                "prod", lambda: _bootstrap_state("prod", reference_ts)
+            )
+        if sink_cfg.bt:
+            state_bt = _maybe_load("bt", lambda: _bootstrap_bt_state(reference_ts))
+        if sink_cfg.real_trade:
+            state_real_trade = _maybe_load(
+                "real_trade", lambda: _bootstrap_state("real_trade", reference_ts)
+            )
+    except Exception:
+        logger.exception("Fatal error during bootstrap — exiting")
+        sys.exit(1)
+
+    cw_client = boto3.client(
+        "cloudwatch", region_name=os.environ.get("AWS_REGION", "ap-northeast-1")
+    )
+
     def _shutdown(signum, frame):
         logger.info("Shutdown signal received — closing consumer")
         consumer.close()
+        for _pg in (pg_client_prod, pg_client_bt, pg_client_real_trade):
+            if _pg is not None:
+                try:
+                    _pg.close()
+                except Exception:
+                    pass
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, _shutdown)
@@ -1084,6 +1169,12 @@ def run() -> None:
     except Exception:
         logger.exception("Fatal error in consumer loop")
         consumer.close()
+        for _pg in (pg_client_prod, pg_client_bt, pg_client_real_trade):
+            if _pg is not None:
+                try:
+                    _pg.close()
+                except Exception:
+                    pass
         sys.exit(1)
 
 
