@@ -1,6 +1,6 @@
 """Unit tests for pnl_coverage_audit pure-Python check functions."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -8,13 +8,16 @@ from services.dagster.trading_dagster.assets.pnl_coverage_audit import (
     AuditReport,
     GapDescriptor,
     PositionChange,
+    PositionMismatch,
     SourceFirstBar,
     StratStat,
+    TOP_N_OFFENDERS,
     Violation,
     _check_phase1,
     _check_phase2,
     _check_phase3,
     _check_phase3_hour,
+    _check_position_per_minute,
     _compute_source_changes_prod_bt,
     _compute_source_changes_rt,
     _format_report,
@@ -407,10 +410,12 @@ class TestAuditUnderlying:
             "S1": [("2026-03-05 09:00:00", 1.0)],
         })
         monkeypatch.setattr(mod, "_fetch_q_src_tf", lambda st, u, c: {"S1": 5})
-        monkeypatch.setattr(mod, "_fetch_q_trans", lambda t, u, s, c: [
-            PositionChange(_dt("2026-03-05 09:05:00"), 1.0),
-        ])
         monkeypatch.setattr(mod, "_fetch_q_gap", lambda t, u, s, c: [])
+        # Phase 3: target series with position matching source (1.0 from bar at 09:00, tf=5).
+        monkeypatch.setattr(mod, "_fetch_q_target_full", lambda t, u, s, c: [
+            (_dt("2026-03-05 09:05:00"), 1.0),
+            (_dt("2026-05-26 09:55:00"), 1.0),
+        ])
 
         report = mod._audit_underlying(
             target_table="strategy_pnl_1min_prod_v2",
@@ -434,10 +439,12 @@ class TestAuditUnderlying:
             "S1": [("2026-03-05 09:00:00", 1.0)],
         })
         monkeypatch.setattr(mod, "_fetch_q_src_tf", lambda st, u, c: {"S1": 5})
-        monkeypatch.setattr(mod, "_fetch_q_trans", lambda t, u, s, c: [
-            PositionChange(_dt("2026-05-02 20:45:00"), 1.0),
-        ])
         monkeypatch.setattr(mod, "_fetch_q_gap", lambda t, u, s, c: [])
+        # NEW: stub the per-minute target series. Use a position that matches source (1.0).
+        monkeypatch.setattr(mod, "_fetch_q_target_full", lambda t, u, s, c: [
+            (_dt("2026-05-02 20:45:00"), 1.0),
+            (_dt("2026-05-26 09:55:00"), 1.0),
+        ])
 
         report = mod._audit_underlying(
             target_table="strategy_pnl_1min_prod_v2",
@@ -447,8 +454,9 @@ class TestAuditUnderlying:
             client=None,
             now_ts=_dt("2026-05-26 10:00:00"),
         )
-        # Phase 1 should report start_gap and skip phase 3 for that strategy.
+        # Phase 1 reports start_gap; Phase 3 (now always runs) finds no mismatch.
         assert any(v.category == "start_gap" for v in report.violations)
+        assert not any(v.category == "position_mismatch" for v in report.violations)
 
 
 # ── Driver: per-table audit ──────────────────────────────────────────────────
@@ -478,3 +486,81 @@ class TestAuditTable:
         )
         assert len(report.violations) == 2
         assert report.strategies_checked == 2
+
+
+# ── Per-minute position check ────────────────────────────────────────────────
+
+
+class TestPositionPerMinute:
+    def test_clean_match_no_mismatches(self):
+        source = [
+            PositionChange(_dt("2026-03-05 09:05:00"), 1.0),
+            PositionChange(_dt("2026-03-05 09:10:00"), -1.0),
+        ]
+        target = [
+            (_dt("2026-03-05 09:05:00"), 1.0),
+            (_dt("2026-03-05 09:06:00"), 1.0),
+            (_dt("2026-03-05 09:09:00"), 1.0),
+            (_dt("2026-03-05 09:10:00"), -1.0),
+            (_dt("2026-03-05 09:11:00"), -1.0),
+        ]
+        mismatches, orphans, samples = _check_position_per_minute(source, target)
+        assert mismatches == 0
+        assert orphans == 0
+        assert samples == []
+
+    def test_detects_wrong_position(self):
+        source = [PositionChange(_dt("2026-03-05 09:05:00"), 1.0)]
+        target = [
+            (_dt("2026-03-05 09:05:00"), 1.0),
+            (_dt("2026-03-05 09:06:00"), -1.0),  # WRONG: should still be 1.0
+            (_dt("2026-03-05 09:07:00"), -1.0),  # WRONG
+        ]
+        mismatches, orphans, samples = _check_position_per_minute(source, target)
+        assert mismatches == 2
+        assert orphans == 0
+        assert len(samples) == 2
+        assert samples[0].ts == _dt("2026-03-05 09:06:00")
+        assert samples[0].expected == 1.0
+        assert samples[0].actual == -1.0
+
+    def test_orphan_rows_before_first_source_change(self):
+        source = [PositionChange(_dt("2026-03-05 09:10:00"), 1.0)]
+        target = [
+            (_dt("2026-03-05 09:05:00"), 0.0),  # orphan: before any source change
+            (_dt("2026-03-05 09:10:00"), 1.0),
+            (_dt("2026-03-05 09:11:00"), 1.0),
+        ]
+        mismatches, orphans, samples = _check_position_per_minute(source, target)
+        assert mismatches == 0
+        assert orphans == 1
+
+    def test_handles_position_transition_at_exact_ts(self):
+        """Target row AT source.effective_ts should use that source change (>= boundary)."""
+        source = [
+            PositionChange(_dt("2026-03-05 09:05:00"), 1.0),
+            PositionChange(_dt("2026-03-05 09:10:00"), -1.0),
+        ]
+        target = [
+            (_dt("2026-03-05 09:09:00"), 1.0),
+            (_dt("2026-03-05 09:10:00"), -1.0),  # AT boundary — uses -1.0
+            (_dt("2026-03-05 09:11:00"), -1.0),
+        ]
+        mismatches, _, _ = _check_position_per_minute(source, target)
+        assert mismatches == 0
+
+    def test_empty_inputs_return_zero(self):
+        assert _check_position_per_minute([], []) == (0, 0, [])
+        assert _check_position_per_minute([PositionChange(_dt("2026-03-05 09:00:00"), 1.0)], []) == (0, 0, [])
+        assert _check_position_per_minute([], [(_dt("2026-03-05 09:00:00"), 1.0)]) == (0, 0, [])
+
+    def test_samples_capped_at_top_n(self):
+        source = [PositionChange(_dt("2026-03-05 09:00:00"), 1.0)]
+        # 20 wrong rows.
+        target = [
+            (_dt("2026-03-05 09:00:00") + timedelta(minutes=i + 1), -1.0)
+            for i in range(20)
+        ]
+        mismatches, _, samples = _check_position_per_minute(source, target)
+        assert mismatches == 20
+        assert len(samples) == TOP_N_OFFENDERS

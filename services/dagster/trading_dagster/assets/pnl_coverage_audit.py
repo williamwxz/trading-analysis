@@ -97,6 +97,14 @@ class PositionChange:
     position: float
 
 
+@dataclass(frozen=True)
+class PositionMismatch:
+    """One target row whose position disagrees with the source's active bar."""
+    ts: datetime
+    expected: float
+    actual: float
+
+
 @dataclass
 class Violation:
     """One detected problem for a (table, underlying, strategy)."""
@@ -316,6 +324,44 @@ def _check_phase3_hour(
                 severity_minutes=1,
             )
     return None
+
+def _check_position_per_minute(
+    source_changes: list[PositionChange],
+    target_rows: list[tuple[datetime, float]],
+) -> tuple[int, int, list[PositionMismatch]]:
+    """Per-minute position correctness check.
+
+    Walks target_rows in ts order, maintaining a pointer into source_changes
+    so source_changes[ptr] is the latest change with effective_ts <= ts.
+    Returns (mismatch_count, orphan_count, sample_mismatches).
+
+    - mismatch_count: target rows whose position != active source position
+    - orphan_count: target rows BEFORE any source change (cannot verify)
+    - sample_mismatches: first TOP_N_OFFENDERS mismatches for the report
+    """
+    if not source_changes or not target_rows:
+        return 0, 0, []
+
+    mismatch_count = 0
+    orphan_count = 0
+    samples: list[PositionMismatch] = []
+    ptr = -1  # index of the active source change; -1 means before any change
+
+    for ts, actual_pos in target_rows:
+        # Advance ptr while the next source change is <= ts.
+        while ptr + 1 < len(source_changes) and source_changes[ptr + 1].effective_ts <= ts:
+            ptr += 1
+        if ptr < 0:
+            orphan_count += 1
+            continue
+        expected_pos = source_changes[ptr].position
+        if expected_pos != actual_pos:
+            mismatch_count += 1
+            if len(samples) < TOP_N_OFFENDERS:
+                samples.append(PositionMismatch(ts=ts, expected=expected_pos, actual=actual_pos))
+
+    return mismatch_count, orphan_count, samples
+
 
 def _compute_source_changes_prod_bt(
     bars: list[tuple[str, float]],
@@ -588,6 +634,25 @@ SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
     return [(r[0], int(r[1])) for r in rows]
 
 
+def _fetch_q_target_full(target_table: str, underlying: str, stn: str, client) -> list[tuple[datetime, float]]:
+    """Per-strategy full (ts, position) series from target table.
+
+    Bounded per-strategy: ~100k rows × ~16 bytes = ~1.6 MB. Memory-safe.
+    """
+    rows = query_rows(
+        f"""
+SELECT ts, position
+FROM analytics.{target_table}
+WHERE underlying = '{underlying}'
+  AND strategy_table_name = '{stn}'
+ORDER BY ts
+SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
+""",
+        client=client,
+    )
+    return [(r[0], float(r[1])) for r in rows]
+
+
 def _fetch_q_stat_hour(hour_table: str, underlying: str, client) -> dict[str, list[tuple[datetime, float]]]:
     """Q_stat variant for hour tables — returns per-strategy (ts, position) rows."""
     rows = query_rows(
@@ -704,21 +769,35 @@ def _audit_underlying(
                         severity_minutes=g.gap_minutes,
                     )
                 )
-            # Skip Phase 3 for flagged strategies — usually the position
-            # sequence is misleading when coverage is broken.
-            continue
+            # Continue to Phase 3 — position correctness is checked regardless
+            # of coverage state.
 
-        # Phase 3 (only when Phase 1 is clean)
-        target_changes = _fetch_q_trans(target_table, underlying, stn, client)
+        # Phase 3: per-minute position correctness (always runs).
+        target_full = _fetch_q_target_full(target_table, underlying, stn, client)
         if mode == "real_trade":
             source_changes = _compute_source_changes_rt(revs_by_stn.get(stn, []), stn)
         else:
             source_changes = _compute_source_changes_prod_bt(
                 bars_by_stn.get(stn, []), source.tf_minutes
             )
-        v3 = _check_phase3(target_table, underlying, stn, source_changes, target_changes)
-        if v3 is not None:
-            report.violations.append(v3)
+        mismatch_count, orphan_count, samples = _check_position_per_minute(
+            source_changes, target_full
+        )
+        if mismatch_count > 0:
+            sample_str = ", ".join(
+                f"{m.ts:%Y-%m-%d %H:%M:%S} exp={m.expected} got={m.actual}"
+                for m in samples
+            )
+            report.violations.append(
+                Violation(
+                    table=target_table,
+                    underlying=underlying,
+                    stn=stn,
+                    category="position_mismatch",
+                    detail=f"{mismatch_count} rows wrong (of {len(target_full)}); samples: {sample_str}",
+                    severity_minutes=mismatch_count,
+                )
+            )
 
     return report
 
