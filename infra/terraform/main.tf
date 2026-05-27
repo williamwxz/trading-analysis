@@ -48,6 +48,31 @@ variable "github_repo" {
   default     = "williamwxz/trading-analysis"
 }
 
+variable "supabase_host" {
+  type        = string
+  default     = ""
+  description = "Supabase Postgres host (set via TF_VAR_supabase_host)"
+}
+
+variable "supabase_user" {
+  type        = string
+  default     = "postgres"
+  description = "Supabase Postgres user"
+}
+
+variable "supabase_password" {
+  type        = string
+  default     = ""
+  sensitive   = true
+  description = "Supabase Postgres password (set via TF_VAR_supabase_password)"
+}
+
+variable "supabase_database" {
+  type        = string
+  default     = "postgres"
+  description = "Supabase Postgres database name"
+}
+
 locals {
   name_prefix = var.project
   common_tags = {
@@ -771,10 +796,10 @@ resource "aws_cloudwatch_dashboard" "streaming_throughput" {
           title  = "Candle Lag (seconds) — pnl-consumer by sink"
           region = "ap-northeast-1"
           metrics = [
-            ["trading-analysis", "CandleLagSeconds", "Sink", "price",      { label = "price" }],
-            ["trading-analysis", "CandleLagSeconds", "Sink", "prod",       { label = "prod" }],
+            ["trading-analysis", "CandleLagSeconds", "Sink", "price", { label = "price" }],
+            ["trading-analysis", "CandleLagSeconds", "Sink", "prod", { label = "prod" }],
             ["trading-analysis", "CandleLagSeconds", "Sink", "real-trade", { label = "real_trade" }],
-            ["trading-analysis", "CandleLagSeconds", "Sink", "bt",         { label = "bt" }]
+            ["trading-analysis", "CandleLagSeconds", "Sink", "bt", { label = "bt" }]
           ]
           stat   = "Maximum"
           period = 60
@@ -792,10 +817,10 @@ resource "aws_cloudwatch_dashboard" "streaming_throughput" {
           title  = "Candle Processing Timestamp — current ts per sink (Unix epoch)"
           region = "ap-northeast-1"
           metrics = [
-            ["trading-analysis", "CandleProcessingTs", "Sink", "price",      { label = "price" }],
-            ["trading-analysis", "CandleProcessingTs", "Sink", "prod",       { label = "prod" }],
+            ["trading-analysis", "CandleProcessingTs", "Sink", "price", { label = "price" }],
+            ["trading-analysis", "CandleProcessingTs", "Sink", "prod", { label = "prod" }],
             ["trading-analysis", "CandleProcessingTs", "Sink", "real-trade", { label = "real_trade" }],
-            ["trading-analysis", "CandleProcessingTs", "Sink", "bt",         { label = "bt" }]
+            ["trading-analysis", "CandleProcessingTs", "Sink", "bt", { label = "bt" }]
           ]
           stat   = "Maximum"
           period = 60
@@ -841,11 +866,30 @@ resource "aws_secretsmanager_secret" "clickhouse" {
 }
 
 resource "aws_secretsmanager_secret" "supabase" {
-  name = "${local.name_prefix}/supabase"
+  name                    = "${local.name_prefix}/supabase"
+  description             = "Supabase Postgres credentials for streaming pipeline checkpointing"
+  recovery_window_in_days = 0
+
   tags = local.common_tags
 
   lifecycle {
     create_before_destroy = true
+  }
+}
+
+resource "aws_secretsmanager_secret_version" "supabase" {
+  secret_id = aws_secretsmanager_secret.supabase.id
+  secret_string = jsonencode({
+    host     = var.supabase_host
+    port     = "6543"
+    user     = var.supabase_user
+    password = var.supabase_password
+    database = var.supabase_database
+    sslmode  = "require"
+  })
+
+  lifecycle {
+    ignore_changes = [secret_string]
   }
 }
 
@@ -998,8 +1042,8 @@ resource "aws_iam_role_policy" "ecs_task_policy" {
       },
       {
         # Dagster EcsRunLauncher: discover secrets to inject into run tasks
-        Effect = "Allow"
-        Action = ["secretsmanager:ListSecrets"]
+        Effect   = "Allow"
+        Action   = ["secretsmanager:ListSecrets"]
         Resource = "*"
       },
     ]
@@ -1166,9 +1210,9 @@ resource "aws_ecs_task_definition" "redpanda" {
   execution_role_arn       = aws_iam_role.ecs_execution.arn
 
   container_definitions = jsonencode([{
-    name      = "redpanda"
-    image     = "redpandadata/redpanda:latest"
-    essential = true
+    name       = "redpanda"
+    image      = "redpandadata/redpanda:latest"
+    essential  = true
     entryPoint = ["/bin/bash", "-c"]
     command = [
       "rpk redpanda start --smp 1 --memory 1500M --reserve-memory 0M --node-id 0 --kafka-addr PLAINTEXT://0.0.0.0:9092 --advertise-kafka-addr PLAINTEXT://redpanda.${local.name_prefix}.local:9092 --set redpanda.log_segment_ms=604800000 & sleep 15 && rpk topic create binance.price.ticks --brokers localhost:9092 --partitions 1 --replicas 1 && rpk topic alter-config binance.price.ticks --brokers localhost:9092 --set retention.ms=2592000000; wait"
@@ -1290,19 +1334,31 @@ resource "aws_ecs_task_definition" "pnl_consumer" {
     image     = "${aws_ecr_repository.pnl_consumer.repository_url}:latest"
     essential = true
     secrets = [
-      { name = "CLICKHOUSE_HOST",     valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
+      { name = "CLICKHOUSE_HOST", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
       { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
+      { name = "SUPABASE_HOST", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:host::" },
+      { name = "SUPABASE_PORT", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:port::" },
+      { name = "SUPABASE_USER", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:user::" },
+      { name = "SUPABASE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:password::" },
+      { name = "SUPABASE_DATABASE", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:database::" },
+      { name = "SUPABASE_SSLMODE", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:sslmode::" },
     ]
     environment = [
-      { name = "CLICKHOUSE_PORT",         value = "8443" },
-      { name = "CLICKHOUSE_USER",         value = each.value.clickhouse_user },
-      { name = "CLICKHOUSE_SECURE",       value = "true" },
-      { name = "REDPANDA_BROKERS",        value = "redpanda.${local.name_prefix}.local:9092" },
-      { name = "KAFKA_GROUP_ID",          value = each.value.group_id },
-      { name = "ENABLE_PRICE_SINK",       value = each.value.enable_price },
-      { name = "ENABLE_PROD_SINK",        value = each.value.enable_prod },
-      { name = "ENABLE_REAL_TRADE_SINK",  value = each.value.enable_real_trade },
-      { name = "ENABLE_BT_SINK",          value = each.value.enable_bt },
+      { name = "CLICKHOUSE_PORT", value = "8443" },
+      { name = "CLICKHOUSE_USER", value = each.value.clickhouse_user },
+      { name = "CLICKHOUSE_SECURE", value = "true" },
+      { name = "REDPANDA_BROKERS", value = "redpanda.${local.name_prefix}.local:9092" },
+      { name = "KAFKA_GROUP_ID", value = each.value.group_id },
+      { name = "ENABLE_PRICE_SINK", value = each.value.enable_price },
+      { name = "ENABLE_PROD_SINK", value = each.value.enable_prod },
+      { name = "ENABLE_REAL_TRADE_SINK", value = each.value.enable_real_trade },
+      { name = "ENABLE_BT_SINK", value = each.value.enable_bt },
+      # Checkpoint flags — defaults match Phase 2 (shadow mode: writes on, reads off).
+      { name = "STREAMING_CHECKPOINT_ENABLED", value = "true" },
+      { name = "STREAMING_CHECKPOINT_WRITE_ENABLED", value = "true" },
+      { name = "STREAMING_CHECKPOINT_READ_ENABLED", value = "false" },
+      { name = "STREAMING_CHECKPOINT_INVARIANT_CHECK_ENABLED", value = "true" },
+      { name = "STREAMING_CHECKPOINT_FRESHNESS_SECONDS", value = "86400" },
     ]
     healthCheck = {
       command     = ["CMD-SHELL", "python -c 'import os; os.kill(1, 0)'"]
@@ -1432,10 +1488,10 @@ resource "aws_ecs_service" "pnl_consumer" {
 resource "aws_cloudwatch_metric_alarm" "pnl_consumer_crash" {
   for_each = local.pnl_consumer_sinks
 
-  alarm_name          = "${local.name_prefix}-pnl-consumer-${each.key}-crash-loop"
-  alarm_description   = "pnl-consumer-${each.key} stopped >= 3 times in 10 min (crash loop)"
-  namespace           = "ECS/ContainerInsights"
-  metric_name         = "StoppedTaskCount"
+  alarm_name        = "${local.name_prefix}-pnl-consumer-${each.key}-crash-loop"
+  alarm_description = "pnl-consumer-${each.key} stopped >= 3 times in 10 min (crash loop)"
+  namespace         = "ECS/ContainerInsights"
+  metric_name       = "StoppedTaskCount"
   dimensions = {
     ClusterName = aws_ecs_cluster.main.name
     ServiceName = aws_ecs_service.pnl_consumer[each.key].name
@@ -1542,21 +1598,21 @@ resource "aws_ecs_task_definition" "flink_pnl" {
     image     = "${aws_ecr_repository.flink_pnl.repository_url}:latest"
     essential = true
     secrets = [
-      { name = "CLICKHOUSE_HOST",     valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
+      { name = "CLICKHOUSE_HOST", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
       { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
     ]
     environment = [
-      { name = "CLICKHOUSE_PORT",        value = "8443" },
-      { name = "CLICKHOUSE_USER",        value = each.value.clickhouse_user },
-      { name = "CLICKHOUSE_SECURE",      value = "true" },
-      { name = "REDPANDA_BROKERS",       value = "redpanda.${local.name_prefix}.local:9092" },
-      { name = "KAFKA_GROUP_ID",         value = each.value.group_id },
-      { name = "AWS_REGION",             value = var.aws_region },
-      { name = "ENABLE_PRICE_SINK",      value = each.value.enable_price },
-      { name = "ENABLE_PROD_SINK",       value = each.value.enable_prod },
-      { name = "ENABLE_BT_SINK",         value = each.value.enable_bt },
+      { name = "CLICKHOUSE_PORT", value = "8443" },
+      { name = "CLICKHOUSE_USER", value = each.value.clickhouse_user },
+      { name = "CLICKHOUSE_SECURE", value = "true" },
+      { name = "REDPANDA_BROKERS", value = "redpanda.${local.name_prefix}.local:9092" },
+      { name = "KAFKA_GROUP_ID", value = each.value.group_id },
+      { name = "AWS_REGION", value = var.aws_region },
+      { name = "ENABLE_PRICE_SINK", value = each.value.enable_price },
+      { name = "ENABLE_PROD_SINK", value = each.value.enable_prod },
+      { name = "ENABLE_BT_SINK", value = each.value.enable_bt },
       { name = "ENABLE_REAL_TRADE_SINK", value = each.value.enable_real_trade },
-      { name = "DRY_RUN",                value = each.value.dry_run },
+      { name = "DRY_RUN", value = each.value.dry_run },
     ]
     logConfiguration = {
       logDriver = "awslogs"
@@ -1595,10 +1651,10 @@ resource "aws_ecs_service" "flink_pnl" {
 resource "aws_cloudwatch_metric_alarm" "flink_pnl_crash" {
   for_each = local.flink_pnl_sinks
 
-  alarm_name          = "${local.name_prefix}-flink-pnl-${each.key}-crash-loop"
-  alarm_description   = "flink-pnl-${each.key} stopped >= 3 times in 10 min (crash loop)"
-  namespace           = "ECS/ContainerInsights"
-  metric_name         = "StoppedTaskCount"
+  alarm_name        = "${local.name_prefix}-flink-pnl-${each.key}-crash-loop"
+  alarm_description = "flink-pnl-${each.key} stopped >= 3 times in 10 min (crash loop)"
+  namespace         = "ECS/ContainerInsights"
+  metric_name       = "StoppedTaskCount"
   dimensions = {
     ClusterName = aws_ecs_cluster.main.name
     ServiceName = aws_ecs_service.flink_pnl[each.key].name
