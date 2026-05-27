@@ -9,6 +9,11 @@ from dagster import Definitions
 from ..assets.binance_futures_ohlcv import (
     binance_futures_backfill_asset,
 )
+from ..assets.pnl_coverage_audit import (
+    pnl_coverage_audit_asset,
+    pnl_coverage_audit_job,
+    pnl_coverage_audit_schedule,
+)
 from ..assets.pnl_strategy_v2 import (
     pnl_bt_v2_full_asset,
     pnl_hourly_rollup_asset,
@@ -29,6 +34,8 @@ all_assets = [
     pnl_bt_v2_full_asset,
     # Hourly rollup (streaming supplement — runs every hour via schedule)
     pnl_hourly_rollup_asset,
+    # Daily coverage & position audit (read-only, fails on gaps)
+    pnl_coverage_audit_asset,
     # Infra checks
     postgres_cleanup_asset,
 ]
@@ -38,6 +45,6 @@ all_sensors = build_automation_sensors()
 defs = Definitions(
     assets=all_assets,
     sensors=all_sensors,
-    schedules=[pnl_hourly_rollup_schedule],
-    jobs=[pnl_hourly_rollup_job],
+    schedules=[pnl_hourly_rollup_schedule, pnl_coverage_audit_schedule],
+    jobs=[pnl_hourly_rollup_job, pnl_coverage_audit_job],
 )
