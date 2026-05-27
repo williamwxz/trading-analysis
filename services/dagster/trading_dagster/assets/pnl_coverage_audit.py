@@ -647,10 +647,21 @@ def _audit_underlying(
         bars_by_stn = _fetch_q_src_prod_bt(source_table, underlying, client)
         tf_by_stn = _fetch_q_src_tf(source_table, underlying, client)
         src_first_by_stn = {}
+        # Sorted known timeframe values (minutes) for snap-to-nearest inference.
+        _TF_VALUES = sorted(TIMEFRAME_MAP.values())
         for stn, bars in bars_by_stn.items():
             if not bars:
                 continue
             tf = tf_by_stn.get(stn, 5)
+            # When config_timeframe is absent from row_json, _fetch_q_src_tf
+            # returns the fallback default (5). Infer the actual timeframe from
+            # the spacing between the first two source bars instead.
+            if tf == 5 and len(bars) >= 2:
+                ts0 = datetime.strptime(str(bars[0][0])[:19], "%Y-%m-%d %H:%M:%S")
+                ts1 = datetime.strptime(str(bars[1][0])[:19], "%Y-%m-%d %H:%M:%S")
+                spacing_min = int((ts1 - ts0).total_seconds() // 60)
+                if spacing_min > 0:
+                    tf = min(_TF_VALUES, key=lambda t: abs(t - spacing_min))
             first_bar_ts = datetime.strptime(str(bars[0][0])[:19], "%Y-%m-%d %H:%M:%S")
             src_first_by_stn[stn] = SourceFirstBar(
                 expected_min_ts=first_bar_ts + timedelta(minutes=tf),
