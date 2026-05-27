@@ -120,4 +120,8 @@ class AnchorState:
         - No existing anchor (datetime.min defaults): first revision always applies.
         """
         rec = self._store.get(strategy_table_name, AnchorRecord())
+        # When the anchor holds the uninitialized sentinel (datetime.min, naive),
+        # any real revision is always newer — avoid a naive/aware TypeError.
+        if rec.bar_ts is _DATETIME_MIN and rec.revision_ts is _DATETIME_MIN:
+            return True
         return (new_bar_ts, new_revision_ts) > (rec.bar_ts, rec.revision_ts)
