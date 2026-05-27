@@ -106,10 +106,11 @@ WITH expected AS (
     ) AS minutes
 ),
 src AS (
-    -- Strategies active in the window in source history
+    -- Strategies active in source. 7-day lookback ensures 1d-timeframe strategies
+    -- (which emit one bar/day and may have last bar >24h ago) are included.
     SELECT DISTINCT strategy_table_name, any(underlying) AS underlying
     FROM analytics.{SOURCE_TABLE}
-    WHERE ts >= toDateTime('{window_start}') - INTERVAL 1 DAY
+    WHERE ts >= toDateTime('{window_start}') - INTERVAL 7 DAY
       AND ts <  toDateTime('{window_end}')
       AND strategy_table_name NOT LIKE 'manual_probe%'
     GROUP BY strategy_table_name
