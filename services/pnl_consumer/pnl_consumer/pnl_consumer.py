@@ -27,6 +27,8 @@ from confluent_kafka import (
     KafkaException,
     TopicPartition,
 )
+from streaming.binance_ws_consumer import INSTRUMENTS
+from streaming.models import CandleEvent
 
 from libs.clickhouse_client import insert_rows, query_dicts
 from libs.computation import (
@@ -43,8 +45,10 @@ from libs.computation import (
     fetch_strategies_for_candle,
     fetch_walk_rows,
 )
-from streaming.binance_ws_consumer import INSTRUMENTS
-from streaming.models import CandleEvent
+from libs.computation.checkpoint_store import write_checkpoint
+from libs.postgres_client import (
+    get_client as pg_get_client,  # noqa: F401  (used in Task 16)
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +95,50 @@ _MODE_CONFIG = {
         "real_trade": True,
     },
 }
+
+_CHECKPOINT_ENABLED = (
+    os.getenv("STREAMING_CHECKPOINT_ENABLED", "true").lower() == "true"
+)
+_CHECKPOINT_WRITE_ENABLED = (
+    _CHECKPOINT_ENABLED
+    and os.getenv("STREAMING_CHECKPOINT_WRITE_ENABLED", "true").lower() == "true"
+)
+
+
+def _try_write_checkpoint(
+    *,
+    mode: str,
+    anchor_state: AnchorState,
+    pg_client,
+    kafka_topic: str,
+    kafka_partition: int,
+    kafka_offset: int,
+    last_candle_ts: datetime,
+) -> None:
+    """Best-effort checkpoint write. Logs and continues on any failure.
+
+    Never raises. Failures increment a future Prometheus counter and write a
+    log line — callers must not assume success.
+    """
+    if not _CHECKPOINT_WRITE_ENABLED or pg_client is None:
+        return
+    try:
+        write_checkpoint(
+            mode=mode,
+            anchor_state=anchor_state,
+            kafka_topic=kafka_topic,
+            kafka_partition=kafka_partition,
+            kafka_offset=kafka_offset,
+            last_candle_ts=last_candle_ts,
+            client=pg_client,
+        )
+    except Exception as exc:
+        logger.warning(
+            "checkpoint write failed (continuing). mode=%s offset=%d err=%s",
+            mode,
+            kafka_offset,
+            type(exc).__name__,
+        )
 
 
 @dataclass
@@ -335,7 +383,9 @@ def _bootstrap_state(
     # Walk pnl/price anchors: last pnl row per strategy just before walk_ts.
     # This ensures prev_pnl and prev_price agree with the stored rows in [walk_ts, ref_ts),
     # preventing mismatch when Dagster refreshed rows in the 46h gap between seed_ts and walk_ts.
-    walk_anchor_pnl, walk_anchor_price = _fetch_walk_anchors(cfg["pnl_table"], walk_ts, _UNDERLYINGS)
+    walk_anchor_pnl, walk_anchor_price = _fetch_walk_anchors(
+        cfg["pnl_table"], walk_ts, _UNDERLYINGS
+    )
 
     state = AnchorState()
     for seed in seeds:
@@ -395,7 +445,12 @@ def _bootstrap_state(
         # Use previous price as fallback when current price is missing (0.0 from coalesce).
         effective_price = wr.price if wr.price != 0.0 else pp
 
-        if not is_bt and pp != 0.0 and effective_price != 0.0 and wr.cumulative_pnl != 0.0:
+        if (
+            not is_bt
+            and pp != 0.0
+            and effective_price != 0.0
+            and wr.cumulative_pnl != 0.0
+        ):
             recomputed = pp_pnl + wr.position * (effective_price - pp) / pp
             deviation = abs(recomputed - wr.cumulative_pnl)
             if deviation > _PNL_CRASH_TOLERANCE:
@@ -694,6 +749,18 @@ def _flush_candle(
     expected_prod: int = 0,
     expected_bt: int = 0,
     expected_real_trade: int = 0,
+    *,
+    sink_config: "SinkConfig | None" = None,
+    state_prod: "AnchorState | None" = None,
+    state_bt: "AnchorState | None" = None,
+    state_real_trade: "AnchorState | None" = None,
+    pg_client_prod=None,
+    pg_client_bt=None,
+    pg_client_real_trade=None,
+    kafka_topic: str = "",
+    kafka_partition: int = 0,
+    kafka_offset: int = 0,
+    last_candle_ts: "datetime | None" = None,
 ) -> None:
     """Write one candle's rows to ClickHouse, then commit its Kafka offset.
 
@@ -733,6 +800,39 @@ def _flush_candle(
         )
     if pnl_bt_rows:
         insert_rows("analytics.strategy_pnl_1min_bt_v2", INSERT_COLUMNS, pnl_bt_rows)
+
+    # Best-effort checkpoint writes per active mode, before Kafka commit.
+    if sink_config is not None and last_candle_ts is not None:
+        if sink_config.prod and state_prod is not None:
+            _try_write_checkpoint(
+                mode="prod",
+                anchor_state=state_prod,
+                pg_client=pg_client_prod,
+                kafka_topic=kafka_topic,
+                kafka_partition=kafka_partition,
+                kafka_offset=kafka_offset,
+                last_candle_ts=last_candle_ts,
+            )
+        if sink_config.bt and state_bt is not None:
+            _try_write_checkpoint(
+                mode="bt",
+                anchor_state=state_bt,
+                pg_client=pg_client_bt,
+                kafka_topic=kafka_topic,
+                kafka_partition=kafka_partition,
+                kafka_offset=kafka_offset,
+                last_candle_ts=last_candle_ts,
+            )
+        if sink_config.real_trade and state_real_trade is not None:
+            _try_write_checkpoint(
+                mode="real_trade",
+                anchor_state=state_real_trade,
+                pg_client=pg_client_real_trade,
+                kafka_topic=kafka_topic,
+                kafka_partition=kafka_partition,
+                kafka_offset=kafka_offset,
+                last_candle_ts=last_candle_ts,
+            )
 
     # Commit the offset only after all inserts confirmed.
     try:
@@ -837,6 +937,11 @@ def run() -> None:
     except Exception:
         logger.exception("Fatal error during bootstrap — exiting")
         sys.exit(1)
+
+    # Per-mode Postgres connections for checkpoint writes (Task 16 sets real values).
+    pg_client_prod = None
+    pg_client_bt = None
+    pg_client_real_trade = None
 
     cw_client = boto3.client(
         "cloudwatch", region_name=os.environ.get("AWS_REGION", "ap-northeast-1")
@@ -944,6 +1049,17 @@ def run() -> None:
                 expected_prod=prod_fetched,
                 expected_bt=bt_fetched,
                 expected_real_trade=rt_fetched,
+                sink_config=sink_cfg,
+                state_prod=state_prod,
+                state_bt=state_bt,
+                state_real_trade=state_real_trade,
+                pg_client_prod=pg_client_prod,
+                pg_client_bt=pg_client_bt,
+                pg_client_real_trade=pg_client_real_trade,
+                kafka_topic=msg.topic(),
+                kafka_partition=msg.partition(),
+                kafka_offset=msg.offset(),
+                last_candle_ts=candle.ts,
             )
             emit_candle_metrics(
                 candle.ts,
