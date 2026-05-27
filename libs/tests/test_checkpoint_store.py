@@ -204,6 +204,38 @@ def test_read_checkpoint_returns_none_when_no_commit_state():
 
 
 @pytest.mark.unit
+def test_compute_state_hash_stable_across_naive_and_aware_datetimes():
+    """Postgres TIMESTAMPTZ returns UTC-aware datetimes; in-memory may be naive.
+    compute_state_hash must produce the same hash for both forms."""
+    from libs.computation.anchor_state import AnchorRecord, AnchorState
+    from libs.computation.checkpoint_store import compute_state_hash
+
+    naive = AnchorState()
+    naive.set("a", AnchorRecord(
+        pnl=1.5, price=100.0, position=2.0,
+        bar_ts=datetime(2024, 1, 1, 12, 0),  # naive
+        revision_ts=datetime(2024, 1, 1, 12, 0, 30),  # naive
+        strategy_id=1, strategy_name="s", underlying="BTC",
+        config_timeframe="1m", weighting=1.0,
+        strategy_instance_id="i", final_signal=0.0, benchmark=0.0,
+    ))
+
+    aware = AnchorState()
+    aware.set("a", AnchorRecord(
+        pnl=1.5, price=100.0, position=2.0,
+        bar_ts=datetime(2024, 1, 1, 12, 0, tzinfo=UTC),  # UTC-aware
+        revision_ts=datetime(2024, 1, 1, 12, 0, 30, tzinfo=UTC),  # UTC-aware
+        strategy_id=1, strategy_name="s", underlying="BTC",
+        config_timeframe="1m", weighting=1.0,
+        strategy_instance_id="i", final_signal=0.0, benchmark=0.0,
+    ))
+
+    # After the _strip_tz normalization in _canonical_record, both forms must
+    # produce the same hash.
+    assert compute_state_hash(naive) == compute_state_hash(aware)
+
+
+@pytest.mark.unit
 def test_read_checkpoint_returns_load_result():
     from libs.computation.checkpoint_store import CheckpointLoadResult, read_checkpoint
 

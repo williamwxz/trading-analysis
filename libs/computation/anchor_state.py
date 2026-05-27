@@ -118,10 +118,20 @@ class AnchorState:
         - new_bar_ts == anchor.bar_ts and new_revision_ts <= anchor.revision_ts: already seen — ignore.
         - new_bar_ts > anchor.bar_ts OR same bar with newer revision_ts: apply.
         - No existing anchor (datetime.min defaults): first revision always applies.
+
+        Normalizes all datetimes to naive before comparison to avoid TypeError when
+        ClickHouse (naive) and Postgres roundtrip (UTC-aware) values are mixed.
         """
         rec = self._store.get(strategy_table_name, AnchorRecord())
         # When the anchor holds the uninitialized sentinel (datetime.min, naive),
         # any real revision is always newer — avoid a naive/aware TypeError.
         if rec.bar_ts is _DATETIME_MIN and rec.revision_ts is _DATETIME_MIN:
             return True
-        return (new_bar_ts, new_revision_ts) > (rec.bar_ts, rec.revision_ts)
+        # Strip tzinfo so naive/aware mixing never raises TypeError.
+        def _strip(dt: datetime) -> datetime:
+            return dt.replace(tzinfo=None) if dt.tzinfo is not None else dt
+
+        return (_strip(new_bar_ts), _strip(new_revision_ts)) > (
+            _strip(rec.bar_ts),
+            _strip(rec.revision_ts),
+        )

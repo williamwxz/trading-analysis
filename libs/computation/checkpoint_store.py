@@ -25,14 +25,19 @@ SCHEMA_VERSION = 1
 _FLOAT_DECIMALS = 12
 
 
+def _strip_tz(dt: datetime) -> datetime:
+    """Normalize a datetime to naive form (drop tzinfo if present)."""
+    return dt.replace(tzinfo=None) if dt.tzinfo is not None else dt
+
+
 def _canonical_record(rec) -> dict[str, Any]:
     """One AnchorRecord → dict in canonical form (sorted keys, rounded floats)."""
     return {
         "pnl": round(rec.pnl, _FLOAT_DECIMALS),
         "price": round(rec.price, _FLOAT_DECIMALS),
         "position": round(rec.position, _FLOAT_DECIMALS),
-        "bar_ts": rec.bar_ts.isoformat(),
-        "revision_ts": rec.revision_ts.isoformat(),
+        "bar_ts": _strip_tz(rec.bar_ts).isoformat(),
+        "revision_ts": _strip_tz(rec.revision_ts).isoformat(),
         "strategy_id": int(rec.strategy_id),
         "strategy_name": rec.strategy_name,
         "underlying": rec.underlying,
@@ -233,8 +238,8 @@ def read_checkpoint(*, mode: str, client: Connection) -> "CheckpointLoadResult |
                 pnl=r[1],
                 price=r[2],
                 position=r[3],
-                bar_ts=r[4],
-                revision_ts=r[5],
+                bar_ts=_strip_tz(r[4]),
+                revision_ts=_strip_tz(r[5]),
                 strategy_id=r[6],
                 strategy_name=r[7],
                 underlying=r[8],

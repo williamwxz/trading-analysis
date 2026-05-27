@@ -19,6 +19,7 @@ from libs.computation.anchor_state import AnchorState
 from libs.computation.checkpoint_store import (
     SCHEMA_VERSION,
     CheckpointLoadResult,
+    _strip_tz,
     compute_state_hash,
 )
 
@@ -175,7 +176,15 @@ def load_or_bootstrap(
 
     # 3. Optional ClickHouse invariant cross-check.
     if invariant_check_enabled and invariant_check_fn is not None:
-        inv_reason = invariant_check_fn(mode=mode, result=result)
+        try:
+            inv_reason = invariant_check_fn(mode=mode, result=result)
+        except Exception as exc:
+            logger.warning(
+                "cold-start: invariant check raised %s; falling back. mode=%s",
+                type(exc).__name__,
+                mode,
+            )
+            return bootstrap_fn(), FallbackReason.INVARIANT_MISMATCH
         if inv_reason is not None:
             logger.warning(
                 "cold-start: invariant check failed, falling back. mode=%s reason=%s",
@@ -231,7 +240,7 @@ def clickhouse_invariant_check(
 
     if mode == "real_trade":
         # Verify the exact (ts, revision_ts) revisions referenced by checkpoint still
-        # exist in history with matching position. Build a join against inline VALUES.
+        # exist in history with matching position. Use ClickHouse tuple-IN form.
         tuples = []
         for key in result.anchor_state.keys():
             rec = result.anchor_state.get(key)
@@ -240,35 +249,28 @@ def clickhouse_invariant_check(
             tuples.append(
                 (
                     rec.strategy_instance_id,
-                    rec.bar_ts.isoformat(),
-                    rec.revision_ts.isoformat(),
+                    _strip_tz(rec.bar_ts).strftime('%Y-%m-%d %H:%M:%S'),
+                    _strip_tz(rec.revision_ts).strftime('%Y-%m-%d %H:%M:%S'),
                 )
             )
         if not tuples:
             return None
-        values_clause = ", ".join(
-            f"('{iid}', '{ts}', '{rts}')" for iid, ts, rts in tuples
+        tuples_sql = ", ".join(
+            f"('{iid}', toDateTime('{ts}'), toDateTime('{rts}'))"
+            for iid, ts, rts in tuples
         )
         sql = f"""
             SELECT
-                v.iid AS strategy_instance_id,
-                JSONExtractFloat(h.row_json, 'position') AS position
-            FROM (
-                SELECT iid, ts, revision_ts FROM (
-                    VALUES (
-                        'iid String, ts DateTime, revision_ts DateTime',
-                        {values_clause}
-                    )
-                )
-            ) v
-            INNER JOIN {history_table} h
-                ON v.iid = h.strategy_instance_id
-               AND v.ts = h.ts
-               AND v.revision_ts = h.revision_ts
+                strategy_instance_id,
+                JSONExtractFloat(row_json, 'position') AS position
+            FROM {history_table}
+            WHERE (strategy_instance_id, ts, revision_ts) IN ({tuples_sql})
         """
     else:
         # Latest revision per strategy_instance_id, asof last_candle_ts.
-        as_of = result.commit_state.last_candle_ts.isoformat()
+        as_of = _strip_tz(result.commit_state.last_candle_ts).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
         iid_list = ",".join(f"'{i}'" for i in expected_by_iid.keys())
         sql = f"""
             SELECT
