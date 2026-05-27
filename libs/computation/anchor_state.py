@@ -9,9 +9,9 @@ provides:
   - should_apply_revision(): real_trade revision guard — tuple comparison
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import KeysView
+from typing import Any, KeysView
 
 _DATETIME_MIN = datetime.min
 
@@ -48,6 +48,17 @@ class AnchorState:
 
     def set(self, strategy_table_name: str, record: AnchorRecord) -> None:
         self._store[strategy_table_name] = record
+
+    def update(self, strategy_table_name: str, **fields: Any) -> None:
+        """Merge fields into the existing AnchorRecord, preserving everything else.
+
+        Use this when you want to advance a subset of fields (e.g. pnl/price/position)
+        without dropping metadata (strategy_instance_id, underlying, etc.) that was set
+        by an earlier ``set`` or ``compute_pnl`` call. If no record exists yet, this
+        creates one from defaults plus the given fields.
+        """
+        rec = self._store.get(strategy_table_name, AnchorRecord())
+        self._store[strategy_table_name] = replace(rec, **fields)
 
     def has(self, strategy_table_name: str) -> bool:
         return strategy_table_name in self._store

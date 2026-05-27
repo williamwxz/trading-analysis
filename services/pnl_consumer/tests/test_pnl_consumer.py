@@ -10,8 +10,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from libs.computation import AnchorRecord, AnchorState, StrategyBar, StrategyRevision
+from libs.computation.bootstrap import BootstrapSeed, WalkRow
 from pnl_consumer.pnl_consumer import (
     SinkConfig,
+    _bootstrap_state,
     _flush_candle,
     emit_candle_metrics,
     process_candle,
@@ -585,3 +587,74 @@ def test_carry_forward_metadata_updated_after_new_bar():
     pnl_rows = [r for r in rows if r["_sink"] == "pnl_prod"]
     assert len(pnl_rows) == 1
     assert pnl_rows[0]["_row"][10] == -1.0  # new position carried forward
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _bootstrap_state: walk must preserve seed metadata
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_bootstrap_state_walk_preserves_seed_metadata():
+    """Regression: the walk loop must merge into the seed-loaded AnchorRecord, not
+    replace it. Before this fix, the walk overwrote state with a fresh record
+    carrying only pnl/price/position/bar_ts/revision_ts, wiping
+    strategy_instance_id/underlying/etc. to defaults. That broke carry-forward
+    (returned None on empty strategy_instance_id) and the per-candle underlying
+    gate, so most strategies stopped emitting rows after a restart.
+    """
+    bar_ts = datetime(2026, 5, 25, 12, 0, 0)
+    revision_ts = datetime(2026, 5, 25, 12, 1, 0)
+    walk_ts = datetime(2026, 5, 26, 1, 0, 0)
+
+    seed = BootstrapSeed(
+        strategy_table_name="strat_rt_BTC_1h",
+        strategy_instance_id="inst_BTC_001",
+        pnl=10.0,
+        price=70000.0,
+        position=1.0,
+        underlying="BTC",
+        strategy_id=7,
+        strategy_name="trend",
+        config_timeframe="1h",
+        weighting=1.0,
+        final_signal=1.0,
+        benchmark=0.01,
+        bar_ts=bar_ts,
+        revision_ts=revision_ts,
+    )
+    # Walk anchor before this row: pnl=11.0 price=70500.0
+    # Recompute check inside _bootstrap_state: 11.0 + 1.0 * (71000-70500)/70500 ≈ 11.00709
+    expected_pnl = 11.0 + 1.0 * (71000.0 - 70500.0) / 70500.0
+    walk_row = WalkRow(
+        strategy_table_name="strat_rt_BTC_1h",
+        strategy_instance_id="inst_BTC_001",
+        ts=walk_ts,
+        cumulative_pnl=expected_pnl,
+        price=71000.0,
+        position=1.0,
+        bar_ts=bar_ts,
+        revision_ts=revision_ts,
+    )
+
+    with (
+        patch(f"{_MOD}.fetch_bootstrap_seeds", return_value=[seed]),
+        patch(f"{_MOD}._fetch_walk_anchors", return_value=({"strat_rt_BTC_1h": 11.0}, {"strat_rt_BTC_1h": 70500.0})),
+        patch(f"{_MOD}.fetch_walk_rows", return_value=[walk_row]),
+    ):
+        state = _bootstrap_state("real_trade", reference_ts=datetime(2026, 5, 26, 3, 0, 0))
+
+    rec = state.get("strat_rt_BTC_1h")
+    # Walk advanced pnl/price/position
+    assert rec.pnl == pytest.approx(expected_pnl)
+    assert rec.price == pytest.approx(71000.0)
+    assert rec.position == 1.0
+    # And kept the seed metadata — these would all be defaults if the walk wiped them.
+    assert rec.strategy_instance_id == "inst_BTC_001"
+    assert rec.underlying == "BTC"
+    assert rec.strategy_id == 7
+    assert rec.strategy_name == "trend"
+    assert rec.config_timeframe == "1h"
+    assert rec.weighting == 1.0
+    assert rec.final_signal == 1.0
+    assert rec.benchmark == pytest.approx(0.01)
