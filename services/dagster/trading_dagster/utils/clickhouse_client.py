@@ -12,12 +12,12 @@ import clickhouse_connect
 from clickhouse_connect.driver.client import Client
 
 
-def get_client() -> Client:
+def get_client(username: Optional[str] = None) -> Client:
     """Create a ClickHouse Cloud client from env vars."""
     return clickhouse_connect.get_client(
         host=os.getenv("CLICKHOUSE_HOST", "localhost"),
         port=int(os.getenv("CLICKHOUSE_PORT", "8443")),
-        username=os.getenv("CLICKHOUSE_USER", "default"),
+        username=username or os.getenv("CLICKHOUSE_USER", "default"),
         password=os.getenv("CLICKHOUSE_PASSWORD", ""),
         secure=os.getenv("CLICKHOUSE_SECURE", "true").lower() == "true",
         connect_timeout=15,

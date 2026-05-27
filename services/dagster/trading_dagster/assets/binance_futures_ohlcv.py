@@ -25,7 +25,7 @@ from ..utils.exchange_price_service import ExchangePriceDataService
 START_DATE = "2020-06-14"
 INSTRUMENTS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
-    "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
+    "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT", "FETUSDT",
 ]
 TARGET_TABLE = "analytics.futures_price_1min"
 INSERT_COLUMNS = ["exchange", "instrument", "ts", "open", "high", "low", "close", "volume"]
@@ -72,7 +72,7 @@ def binance_futures_backfill_asset(context: AssetExecutionContext) -> Materializ
     start_dt = datetime.strptime(partition_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     end_dt = start_dt + timedelta(days=1)
     
-    client = get_client()
+    client = get_client(username="dev_ro3")
     total_inserted = 0
 
     start_dt_str = start_dt.strftime('%Y-%m-%d %H:%M:%S')

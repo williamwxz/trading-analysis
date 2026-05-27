@@ -1,22 +1,19 @@
-"""Backfill prod PnL rows for strategies with missing or incomplete history.
+"""Backfill real_trade PnL rows for strategies with missing or incomplete history.
 
 Detects two failure modes:
-  1. Start gaps: a strategy's first prod row is more than 2 hours after its
-     first source execution_ts (closing_ts = ts + tf_minutes), or it is absent
-     entirely from strategy_pnl_1min_prod_v2.
-  2. Mid-history gaps: a strategy has prod rows before AND after some date range
-     but has zero rows during that range.  Detected by comparing the count of
-     distinct covered days to the expected number of days between the strategy's
-     first and last prod row.
+  1. Strategy completely absent from strategy_pnl_1min_real_trade_v2.
+  2. Strategy present but with a gap: its earliest rt row is later than its
+     earliest execution_ts in the source (pre-7-day-window history missing),
+     or its rt coverage ends before the source's last bar's coverage end
+     (7-day Dagster window left a trailing gap).
 
-For both failure modes the fix is the same: DELETE all existing prod rows for
-the affected strategy, then recompute its full history from scratch using
-build_prod_lookup + active_prod_bar_at.
+For affected strategies: DELETE all existing rt rows for that strategy, then
+recompute full history from scratch using build_rt_lookup.
 
-Pauses trading-analysis-pnl-consumer before writing, resumes in finally.
+Pauses pnl-consumer-real-trade before writing, resumes after.
 
 Usage:
-    python scripts/backfill_prod_missing_strategies.py [--dry-run]
+    python scripts/backfill_rt_missing_strategies.py [--dry-run]
 """
 
 import argparse
@@ -38,10 +35,10 @@ from libs.computation import (
     INSERT_COLUMNS,
     AnchorRecord,
     AnchorState,
-    active_prod_bar_at,
+    active_rt_revision_at,
     build_pnl_row,
-    build_prod_lookup,
-    fetch_new_bars_prod,
+    build_rt_lookup,
+    fetch_new_bars_real_trade,
     fetch_prices_multi,
     first_active_minute,
     last_active_minute,
@@ -52,13 +49,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 SOURCE_TABLE = "strategy_output_history_v2"
-TARGET_TABLE = "strategy_pnl_1min_prod_v2"
-HOUR_TABLE = "strategy_pnl_1hour_prod_v2"
-LABEL = "production"
+TARGET_TABLE = "strategy_pnl_1min_real_trade_v2"
+HOUR_TABLE = "strategy_pnl_1hour_real_trade_v2"
+LABEL = "real_trade"
 ECS_CLUSTER = "trading-analysis"
-ECS_SERVICE = "trading-analysis-pnl-consumer-prod"
+ECS_SERVICE = "trading-analysis-pnl-consumer-real-trade"
 ECS_REGION = "ap-northeast-1"
-BATCH_SIZE = 50_000
 
 
 def _parse_ts(s) -> datetime:
@@ -75,13 +71,17 @@ def get_client():
     )
 
 
-def find_start_gap_strategies(client) -> dict[str, list[str]]:
+def find_gap_strategies(client) -> dict[str, list[str]]:
     """Return {underlying: [strategy_table_name, ...]} for strategies with missing early history.
 
     A strategy is flagged if:
-      - It exists in the source but has no rows in the prod table, OR
-      - Its earliest prod row is more than 2 hours after its earliest source
-        closing_ts (approximated as revision_ts + 59s, same proxy as RT script).
+      - It exists in the source but has no rows in the rt table, OR
+      - Its earliest rt row is more than 2 hours after its earliest source execution_ts
+        (history gap at the start — pre-7-day-window data was never written).
+
+    Trailing gaps (rt hasn't caught up to the latest source bar yet) are NOT flagged
+    here — those are handled by the running pnl-consumer (streaming) and the Dagster
+    rolling-window recompute.
     """
     sql = """
     WITH
@@ -94,48 +94,22 @@ def find_start_gap_strategies(client) -> dict[str, list[str]]:
         WHERE strategy_table_name NOT LIKE 'manual_probe%'
         GROUP BY strategy_table_name, underlying
     ),
-    prod AS (
+    rt AS (
         SELECT
             strategy_table_name,
-            min(ts) AS first_prod_ts
-        FROM analytics.strategy_pnl_1min_prod_v2
+            min(ts) AS first_rt_ts
+        FROM analytics.strategy_pnl_1min_real_trade_v2
         GROUP BY strategy_table_name
     )
     SELECT src.strategy_table_name, src.underlying
     FROM src
-    LEFT JOIN prod ON src.strategy_table_name = prod.strategy_table_name
+    LEFT JOIN rt ON src.strategy_table_name = rt.strategy_table_name
     WHERE
         -- completely absent
-        prod.strategy_table_name IS NULL
-        -- gap at start: prod begins more than 2h after first execution
-        OR prod.first_prod_ts > src.first_exec_ts + INTERVAL 2 HOUR
+        rt.strategy_table_name IS NULL
+        -- gap at start: rt begins more than 2h after first execution
+        OR rt.first_rt_ts > src.first_exec_ts + INTERVAL 2 HOUR
     ORDER BY src.underlying, src.strategy_table_name
-    """
-    rows = client.query(sql).result_rows
-    by_underlying: dict[str, list[str]] = {}
-    for stn, und in rows:
-        by_underlying.setdefault(und, []).append(stn)
-    return by_underlying
-
-
-def find_midgap_strategies(client) -> dict[str, list[str]]:
-    """Return {underlying: [strategy_table_name, ...]} for strategies with mid-history holes.
-
-    A strategy has a mid-history gap if the count of distinct days it has prod
-    rows is less than the number of calendar days between its first and last
-    prod row.  This means at least one day in its prod coverage window has
-    zero rows.
-    """
-    sql = """
-    SELECT
-        strategy_table_name,
-        any(underlying) AS underlying
-    FROM analytics.strategy_pnl_1min_prod_v2
-    GROUP BY strategy_table_name
-    HAVING
-        count(DISTINCT toStartOfDay(ts))
-        < dateDiff('day', min(ts), max(ts)) + 1
-    ORDER BY underlying, strategy_table_name
     """
     rows = client.query(sql).result_rows
     by_underlying: dict[str, list[str]] = {}
@@ -174,7 +148,7 @@ def backfill_underlying(underlying: str, stns: list[str], dry_run: bool, client)
     ts_start, ts_end = get_ts_range(stns, client)
     log.info(f"[{underlying}] window: [{ts_start}, {ts_end}]")
 
-    all_bars = fetch_new_bars_prod(SOURCE_TABLE, underlying, ts_start, ts_end, client)
+    all_bars = fetch_new_bars_real_trade(SOURCE_TABLE, underlying, ts_start, ts_end, client)
     stn_set = set(stns)
     all_bars = [b for b in all_bars if b["strategy_table_name"] in stn_set]
     if not all_bars:
@@ -184,17 +158,14 @@ def backfill_underlying(underlying: str, stns: list[str], dry_run: bool, client)
     prices_map = fetch_prices_multi([underlying], ts_start, ts_end, client, extend_minutes=1440)
     prices = prices_map.pop(underlying, {})
 
-    lookup = build_prod_lookup(all_bars)
-    minute_start = first_active_minute(lookup, is_rt=False)
-    minute_end = last_active_minute(lookup, is_rt=False)
+    lookup = build_rt_lookup(all_bars)
+    minute_start = first_active_minute(lookup, is_rt=True)
+    minute_end = last_active_minute(lookup, is_rt=True)
     if minute_start is None or minute_end is None:
         log.info(f"[{underlying}] empty lookup — skipping")
         return 0
 
-    log.info(
-        f"[{underlying}] iterating "
-        f"{int((minute_end - minute_start).total_seconds() // 60)} minutes"
-    )
+    log.info(f"[{underlying}] iterating {int((minute_end - minute_start).total_seconds() // 60)} minutes")
 
     # Delete all existing rows for these strategies so recompute is clean.
     if not dry_run:
@@ -210,6 +181,7 @@ def backfill_underlying(underlying: str, stns: list[str], dry_run: bool, client)
     total_rows = 0
     minute_cur = minute_start
 
+    BATCH_SIZE = 50_000
     batch: list[list] = []
 
     while minute_cur < minute_end:
@@ -220,24 +192,24 @@ def backfill_underlying(underlying: str, stns: list[str], dry_run: bool, client)
             continue
 
         for stn in stn_set:
-            entry = active_prod_bar_at(lookup, stn, minute_cur)
+            entry = active_rt_revision_at(lookup, stn, minute_cur)
             if entry is None:
                 continue
-            bar = entry.bar
+            rev = entry.rev
             if not state.has(stn):
                 state.set(stn, AnchorRecord(pnl=0.0, price=price, position=0.0))
             meta = AnchorRecord(
-                strategy_id=bar["strategy_id"],
-                strategy_name=bar["strategy_name"],
-                underlying=bar["underlying"],
-                config_timeframe=bar["config_timeframe"],
-                weighting=bar["weighting"],
-                strategy_instance_id=bar.get("strategy_instance_id", ""),
-                final_signal=bar["final_signal"],
-                benchmark=bar["bar_benchmark"],
+                strategy_id=rev["strategy_id"],
+                strategy_name=rev["strategy_name"],
+                underlying=rev["underlying"],
+                config_timeframe=rev["config_timeframe"],
+                weighting=rev["weighting"],
+                strategy_instance_id=rev.get("strategy_instance_id", ""),
+                final_signal=rev["final_signal"],
+                benchmark=rev["bar_benchmark"],
             )
-            cpnl = state.compute_pnl(stn, price, bar["position"], meta=meta)
-            batch.append(build_pnl_row(stn, bar, price, cpnl, LABEL, ts_str, now_str))
+            cpnl = state.compute_pnl(stn, price, rev["position"], meta=meta)
+            batch.append(build_pnl_row(stn, rev, price, cpnl, LABEL, ts_str, now_str))
 
         if len(batch) >= BATCH_SIZE:
             if not dry_run:
@@ -291,7 +263,7 @@ FROM (
 GROUP BY strategy_table_name, strategy_id, strategy_name, underlying,
          config_timeframe, source, version, toStartOfHour(minute_ts)
 """)
-    log.info("Hour table refresh done")
+    log.info(f"Hour table refresh done")
 
 
 def pause_consumer(boto_client) -> None:
@@ -319,30 +291,13 @@ def main():
 
     client = get_client()
 
-    start_gap = find_start_gap_strategies(client)
-    midgap = find_midgap_strategies(client)
-
-    # Merge both maps; a strategy may appear in both — deduplicate per underlying.
-    combined: dict[str, set[str]] = {}
-    for und, stns in start_gap.items():
-        combined.setdefault(und, set()).update(stns)
-    for und, stns in midgap.items():
-        combined.setdefault(und, set()).update(stns)
-
-    if not combined:
-        log.info("No strategies with gaps found — nothing to do")
+    gap_strategies = find_gap_strategies(client)
+    if not gap_strategies:
+        log.info("No strategies with history gaps found — nothing to do")
         return
 
-    gap_strategies = {und: sorted(stns) for und, stns in combined.items()}
-
     total_stns = sum(len(v) for v in gap_strategies.values())
-    start_count = sum(len(v) for v in start_gap.values())
-    mid_count = sum(len(v) for v in midgap.values())
-    log.info(
-        f"Found {total_stns} unique strategies with gaps across "
-        f"{len(gap_strategies)} underlyings "
-        f"({start_count} start-gap, {mid_count} mid-gap, may overlap)"
-    )
+    log.info(f"Found {total_stns} strategies with gaps across {len(gap_strategies)} underlyings")
     for und, stns in sorted(gap_strategies.items()):
         log.info(f"  [{und}] {len(stns)} strategies")
 
