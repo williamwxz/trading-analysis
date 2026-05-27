@@ -1,0 +1,319 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "refresh": "1m",
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "Streaming Checkpoint Health",
+  "uid": "streaming-checkpoint",
+  "version": 1,
+  "tags": ["streaming", "pnl-consumer", "checkpoint"],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 100,
+      "title": "Checkpoint Recovery",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 1
+      },
+      "id": 1,
+      "targets": [
+        {
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "logGroupNames": [
+            "/ecs/trading-analysis"
+          ],
+          "region": "ap-northeast-1",
+          "queryString": "fields @timestamp, @message | filter @message like /cold-start: (checkpoint restored|sanity check failed|invariant check failed|no checkpoint row)/ | stats count() as count by @message | sort count desc",
+          "refId": "A"
+        }
+      ],
+      "title": "Cold-start outcomes (last 6h)",
+      "type": "logs",
+      "options": {
+        "showLabels": "auto",
+        "showTime": true,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": 1
+      }
+    },
+    {
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "id": 2,
+      "targets": [
+        {
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "logGroupNames": [
+            "/ecs/trading-analysis"
+          ],
+          "region": "ap-northeast-1",
+          "queryString": "fields @timestamp, @message, @logStream | filter @message like /cold-start: (sanity check failed|invariant check failed|no checkpoint row)/ | sort @timestamp desc | limit 100",
+          "refId": "A"
+        }
+      ],
+      "title": "Cold-start fallback details (last 6h)",
+      "type": "logs",
+      "options": {
+        "showLabels": "auto",
+        "showTime": true,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": 1
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "id": 101,
+      "title": "Checkpoint Write",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "id": 3,
+      "targets": [
+        {
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "logGroupNames": [
+            "/ecs/trading-analysis"
+          ],
+          "region": "ap-northeast-1",
+          "queryString": "fields @timestamp, @message | filter @message like /checkpoint (write|update)/ | stats count() as count by @message | sort count desc",
+          "refId": "A"
+        }
+      ],
+      "title": "Checkpoint write operations (last 6h)",
+      "type": "logs",
+      "options": {
+        "showLabels": "auto",
+        "showTime": true,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": 1
+      }
+    },
+    {
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "id": 4,
+      "targets": [
+        {
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "logGroupNames": [
+            "/ecs/trading-analysis"
+          ],
+          "region": "ap-northeast-1",
+          "queryString": "fields @timestamp, @message, @logStream | filter @message like /checkpoint write failed/ | sort @timestamp desc | limit 100",
+          "refId": "A"
+        }
+      ],
+      "title": "Checkpoint write failures (last 6h)",
+      "type": "logs",
+      "options": {
+        "showLabels": "auto",
+        "showTime": true,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": 1
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "id": 102,
+      "title": "Checkpoint Lag",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 35
+      },
+      "id": 5,
+      "targets": [
+        {
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "logGroupNames": [
+            "/ecs/trading-analysis"
+          ],
+          "region": "ap-northeast-1",
+          "queryString": "fields @timestamp, @message | filter @message like /checkpoint lag/ | sort @timestamp desc | limit 200",
+          "refId": "A"
+        }
+      ],
+      "title": "Checkpoint lag warnings (last 6h)",
+      "type": "logs",
+      "options": {
+        "showLabels": "auto",
+        "showTime": true,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": 1
+      }
+    }
+  ]
+}
