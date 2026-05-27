@@ -7,8 +7,6 @@ on any missing minute or position drift.
 See docs/superpowers/specs/2026-05-26-pnl-coverage-audit-design.md.
 """
 
-from __future__ import annotations
-
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -714,9 +712,145 @@ def _audit_underlying(
     return report
 
 
-# ── Asset placeholder ────────────────────────────────────────────────────────
+def _list_underlyings(target_table: str, client) -> list[str]:
+    """Distinct underlyings present in the target table."""
+    rows = query_rows(
+        f"SELECT DISTINCT underlying FROM analytics.{target_table} "
+        f"WHERE underlying IS NOT NULL AND underlying != ''",
+        client=client,
+    )
+    return sorted(str(r[0]) for r in rows)
 
 
-def pnl_coverage_audit_asset():
-    """Placeholder — replaced in Task 11."""
-    raise NotImplementedError
+def _audit_table(
+    target_table: str,
+    source_table: str,
+    mode: Mode,
+    client,
+    now_ts: datetime,
+) -> AuditReport:
+    """Run audit over all underlyings of one target table.
+
+    Uses ThreadPoolExecutor for per-underlying parallelism. Each thread gets
+    its own ClickHouse client (created on demand) since `clickhouse-connect`
+    clients are not thread-safe to share.
+    """
+    underlyings = _list_underlyings(target_table, client)
+    aggregate = AuditReport()
+
+    def _run(u: str) -> AuditReport:
+        # Per-thread client; cheap to create.
+        thread_client = get_client()
+        return _audit_underlying(
+            target_table=target_table,
+            source_table=source_table,
+            mode=mode,
+            underlying=u,
+            client=thread_client,
+            now_ts=now_ts,
+        )
+
+    with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+        futures = {pool.submit(_run, u): u for u in underlyings}
+        for future in as_completed(futures):
+            sub = future.result()
+            aggregate.violations.extend(sub.violations)
+            aggregate.strategies_checked += sub.strategies_checked
+
+    return aggregate
+
+
+def _audit_hour_table(
+    hour_table: str,
+    min_table: str,
+    client,
+) -> AuditReport:
+    """Run hour-slot position check (Phase 3 variant) for one 1-hour table.
+
+    Coverage checks (Phase 1) for the 1-hour table are derived from the 1-min
+    presence — we don't repeat Phase 1 here. We only verify the argMax
+    position at each hour slot matches the latest preceding minute change.
+    """
+    aggregate = AuditReport()
+    underlyings = _list_underlyings(hour_table, client)
+    for u in underlyings:
+        hr_by_stn = _fetch_q_stat_hour(hour_table, u, client)
+        for stn, rows in hr_by_stn.items():
+            target_min_changes = _fetch_q_trans(min_table, u, stn, client)
+            v = _check_phase3_hour(hour_table, u, stn, rows, target_min_changes)
+            aggregate.strategies_checked += 1
+            if v is not None:
+                aggregate.violations.append(v)
+    return aggregate
+
+
+@asset(
+    name="pnl_coverage_audit",
+    group_name="strategy_pnl",
+    compute_kind="clickhouse",
+    description="Daily read-only audit of PnL tables: per-(U, S) coverage + position-boundary checks.",
+    op_tags={"dagster/timeout": 3600},
+)
+def pnl_coverage_audit_asset(context: AssetExecutionContext) -> MaterializeResult:
+    """Audit all six PnL tables; raise RuntimeError on any violation."""
+    import time as _time
+
+    started = _time.time()
+    now_ts = datetime.now(tz=UTC).replace(tzinfo=None)
+    full_report = AuditReport()
+
+    for target, source, mode in _TARGET_TABLES:
+        context.log.info(f"[audit] starting {target} ({mode})")
+        sub = _audit_table(
+            target_table=target,
+            source_table=source,
+            mode=mode,
+            client=get_client(),
+            now_ts=now_ts,
+        )
+        context.log.info(
+            f"[audit] {target}: {sub.strategies_checked} strategies, {len(sub.violations)} violations"
+        )
+        full_report.violations.extend(sub.violations)
+        full_report.strategies_checked += sub.strategies_checked
+        full_report.tables_checked += 1
+
+    for hour, min_t, _mode in _HOUR_TABLES:
+        context.log.info(f"[audit] starting hour table {hour}")
+        sub = _audit_hour_table(hour_table=hour, min_table=min_t, client=get_client())
+        context.log.info(
+            f"[audit] {hour}: {sub.strategies_checked} strategies, {len(sub.violations)} violations"
+        )
+        full_report.violations.extend(sub.violations)
+        full_report.strategies_checked += sub.strategies_checked
+        full_report.tables_checked += 1
+
+    full_report.duration_secs = _time.time() - started
+    report_str = _format_report(full_report)
+    context.log.info(report_str)
+
+    if full_report.has_failures():
+        raise RuntimeError(report_str)
+
+    return MaterializeResult(
+        metadata={
+            "tables_checked": full_report.tables_checked,
+            "strategies_checked": full_report.strategies_checked,
+            "duration_secs": round(full_report.duration_secs, 1),
+        }
+    )
+
+
+# ── Job & schedule definitions ──────────────────────────────────────────────
+
+pnl_coverage_audit_job = define_asset_job(
+    name="pnl_coverage_audit_job",
+    selection=["pnl_coverage_audit"],
+)
+
+pnl_coverage_audit_schedule = ScheduleDefinition(
+    name="pnl_coverage_audit_schedule",
+    cron_schedule="0 6 * * *",
+    job=pnl_coverage_audit_job,
+    execution_timezone="UTC",
+)

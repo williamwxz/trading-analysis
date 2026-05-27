@@ -449,3 +449,32 @@ class TestAuditUnderlying:
         )
         # Phase 1 should report start_gap and skip phase 3 for that strategy.
         assert any(v.category == "start_gap" for v in report.violations)
+
+
+# ── Driver: per-table audit ──────────────────────────────────────────────────
+
+
+class TestAuditTable:
+    def test_loops_underlyings_collects_all_violations(self, monkeypatch):
+        from services.dagster.trading_dagster.assets import pnl_coverage_audit as mod
+
+        # Two underlyings each with one violation.
+        def fake_audit_underlying(target_table, source_table, mode, underlying, client, now_ts):
+            r = AuditReport()
+            r.strategies_checked = 1
+            r.violations = [Violation(target_table, underlying, "S1", "start_gap", "...", 100)]
+            return r
+
+        monkeypatch.setattr(mod, "_audit_underlying", fake_audit_underlying)
+        monkeypatch.setattr(mod, "_list_underlyings", lambda t, c: ["FET", "ETH"])
+        monkeypatch.setattr(mod, "get_client", lambda: None)
+
+        report = mod._audit_table(
+            target_table="strategy_pnl_1min_prod_v2",
+            source_table="strategy_output_history_v2",
+            mode="prod",
+            client=None,
+            now_ts=_dt("2026-05-26 10:00:00"),
+        )
+        assert len(report.violations) == 2
+        assert report.strategies_checked == 2
