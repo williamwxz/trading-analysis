@@ -26,8 +26,9 @@ def test_skips_instrument_when_full_day_present():
         result = binance_futures_backfill_asset(ctx)
         assert result.metadata["total_rows"] == 0
 
-    # query_scalar called once per instrument (10 instruments)
-    assert mock_qs.call_count == 10
+    # query_scalar called once per instrument
+    from trading_dagster.assets.binance_futures_ohlcv import INSTRUMENTS
+    assert mock_qs.call_count == len(INSTRUMENTS)
     # No DELETE and no Binance fetch when all instruments are full
     mock_exec.assert_not_called()
     mock_svc.fetch_ohlcv_times_series_df.assert_not_called()
