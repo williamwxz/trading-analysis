@@ -511,65 +511,71 @@ def _src_time_windows(end_dt: datetime | None = None) -> list[tuple[str, str]]:
     return windows
 
 
-def _fetch_q_src_prod_bt(source_table: str, underlying: str, client) -> dict[str, list[tuple[str, float]]]:
-    """Q_src (prod/bt): first-revision (ts, position) per strategy for one U.
+def _fetch_q_src_prod_bt_single(
+    source_table: str, underlying: str, stn: str, client
+) -> tuple[list[tuple[str, float]], str | None]:
+    """Q_src (prod/bt) for ONE strategy: first-revision (ts, position) bars + tf.
 
-    Chronological windows + per-window ORDER BY ts keep the concatenated lists in
-    ascending-ts order; LIMIT 1 BY (stn, ts) keeps the first revision per bar.
+    Fetching a single strategy at a time keeps only one strategy's history
+    resident — the audit's peak-memory driver — instead of every strategy's
+    full history for the underlying at once. A single-strategy scan stays far
+    under QUERY_MEMORY_CAP, so it needs no time-chunking (unlike the
+    all-strategies scan it replaces).
+
+    Bars come back in ascending-ts order; tf_raw is the strategy's
+    config_timeframe (None when the strategy has no source rows). manual_probe%
+    strategies are excluded, so they return ([], None) and are flagged as
+    orphans upstream.
     """
-    out: dict[str, list[tuple[str, float]]] = {}
-    for ws, we in _src_time_windows():
-        rows = query_rows(
-            f"""
-SELECT strategy_table_name, ts_str, position
+    rows = query_rows(
+        f"""
+SELECT ts_str, position, tf
 FROM (
   SELECT
-    strategy_table_name,
     toString(ts)                            AS ts_str,
     ts                                      AS ts_raw,
-    JSONExtractFloat(row_json, 'position')  AS position
+    JSONExtractFloat(row_json, 'position')  AS position,
+    config_timeframe                        AS tf
   FROM analytics.{source_table}
   WHERE underlying = '{underlying}'
+    AND strategy_table_name = '{stn}'
     AND strategy_table_name NOT LIKE 'manual_probe%'
-    AND ts >= toDateTime('{ws}') AND ts < toDateTime('{we}')
-  ORDER BY strategy_table_name, ts, revision_ts
-  LIMIT 1 BY strategy_table_name, ts
+    AND ts >= toDateTime('{GLOBAL_START_TS}')
+  ORDER BY ts, revision_ts
+  LIMIT 1 BY ts
 )
-ORDER BY strategy_table_name, ts_raw
+ORDER BY ts_raw
 SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
 """,
-            client=client,
-        )
-        for r in rows:
-            out.setdefault(str(r[0]), []).append((str(r[1]), float(r[2])))
-    return out
+        client=client,
+    )
+    bars = [(str(r[0]), float(r[1])) for r in rows]
+    tf_raw = str(rows[0][2]) if rows else None
+    return bars, tf_raw
 
 
-def _fetch_q_src_tf(source_table: str, underlying: str, client) -> dict[str, int]:
-    """Per-strategy config_timeframe (in minutes) for one U.
+def _derive_source_first_bar(
+    bars: list[tuple[str, float]], tf_raw: str | None, tf_values: list[int]
+) -> SourceFirstBar | None:
+    """Build SourceFirstBar (prod/bt) from a strategy's first-revision bars.
 
-    config_timeframe is constant per strategy, so the first chunk that sees a
-    strategy wins.
+    config_timeframe maps to minutes; when absent (fallback 5) the timeframe is
+    inferred by snapping the first two bars' spacing to the nearest known value.
+    Returns None when the strategy has no source bars (orphan).
     """
-    out: dict[str, int] = {}
-    for ws, we in _src_time_windows():
-        rows = query_rows(
-            f"""
-SELECT strategy_table_name, any(config_timeframe)
-FROM analytics.{source_table}
-WHERE underlying = '{underlying}'
-  AND strategy_table_name NOT LIKE 'manual_probe%'
-  AND ts >= toDateTime('{ws}') AND ts < toDateTime('{we}')
-GROUP BY strategy_table_name
-SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
-""",
-            client=client,
-        )
-        for r in rows:
-            stn = str(r[0])
-            if stn not in out:
-                out[stn] = TIMEFRAME_MAP.get(str(r[1]), 5)
-    return out
+    if not bars:
+        return None
+    tf = TIMEFRAME_MAP.get(str(tf_raw), 5)
+    if tf == 5 and len(bars) >= 2:
+        ts0 = datetime.strptime(str(bars[0][0])[:19], "%Y-%m-%d %H:%M:%S")
+        ts1 = datetime.strptime(str(bars[1][0])[:19], "%Y-%m-%d %H:%M:%S")
+        spacing_min = int((ts1 - ts0).total_seconds() // 60)
+        if spacing_min > 0:
+            tf = min(tf_values, key=lambda t: abs(t - spacing_min))
+    first_bar_ts = datetime.strptime(str(bars[0][0])[:19], "%Y-%m-%d %H:%M:%S")
+    return SourceFirstBar(
+        expected_min_ts=first_bar_ts + timedelta(minutes=tf), tf_minutes=tf
+    )
 
 
 def _fetch_q_src_rt(underlying: str, client) -> list[dict]:
@@ -739,34 +745,22 @@ def _audit_underlying(
                 expected_min_ts=entries[0].execution_ts, tf_minutes=tf
             )
     else:
-        bars_by_stn = _fetch_q_src_prod_bt(source_table, underlying, client)
-        tf_by_stn = _fetch_q_src_tf(source_table, underlying, client)
-        src_first_by_stn = {}
+        # prod/bt source bars are fetched per-strategy inside the loop below so
+        # only one strategy's history is resident at a time (peak-memory driver).
         # Sorted known timeframe values (minutes) for snap-to-nearest inference.
         _TF_VALUES = sorted(TIMEFRAME_MAP.values())
-        for stn, bars in bars_by_stn.items():
-            if not bars:
-                continue
-            tf = tf_by_stn.get(stn, 5)
-            # When config_timeframe is absent from row_json, _fetch_q_src_tf
-            # returns the fallback default (5). Infer the actual timeframe from
-            # the spacing between the first two source bars instead.
-            if tf == 5 and len(bars) >= 2:
-                ts0 = datetime.strptime(str(bars[0][0])[:19], "%Y-%m-%d %H:%M:%S")
-                ts1 = datetime.strptime(str(bars[1][0])[:19], "%Y-%m-%d %H:%M:%S")
-                spacing_min = int((ts1 - ts0).total_seconds() // 60)
-                if spacing_min > 0:
-                    tf = min(_TF_VALUES, key=lambda t: abs(t - spacing_min))
-            first_bar_ts = datetime.strptime(str(bars[0][0])[:19], "%Y-%m-%d %H:%M:%S")
-            src_first_by_stn[stn] = SourceFirstBar(
-                expected_min_ts=first_bar_ts + timedelta(minutes=tf),
-                tf_minutes=tf,
-            )
 
     # ── Per-strategy loop ────────────────────────────────────────────────────
     for stn, stat in stat_by_stn.items():
         report.strategies_checked += 1
-        source = src_first_by_stn.get(stn)
+        if mode == "real_trade":
+            source = src_first_by_stn.get(stn)
+            bars: list[tuple[str, float]] = []
+        else:
+            bars, tf_raw = _fetch_q_src_prod_bt_single(
+                source_table, underlying, stn, client
+            )
+            source = _derive_source_first_bar(bars, tf_raw, _TF_VALUES)
         if source is None:
             # Target has rows for a strategy not in source — orphaned.
             report.violations.append(
@@ -807,9 +801,7 @@ def _audit_underlying(
         if mode == "real_trade":
             source_changes = _compute_source_changes_rt(revs_by_stn.get(stn, []), stn)
         else:
-            source_changes = _compute_source_changes_prod_bt(
-                bars_by_stn.get(stn, []), source.tf_minutes
-            )
+            source_changes = _compute_source_changes_prod_bt(bars, source.tf_minutes)
         mismatch_count, orphan_count, samples = _check_position_per_minute(
             source_changes, target_full
         )
