@@ -1259,7 +1259,7 @@ locals {
       enable_prod       = "false"
       enable_real_trade = "true"
       enable_bt         = "false"
-      group_id          = "pnl-consumer-real-trade-4"
+      group_id          = "pnl-consumer-real-trade-5"
       desired_count     = 1
       clickhouse_user   = "streaming"
     }

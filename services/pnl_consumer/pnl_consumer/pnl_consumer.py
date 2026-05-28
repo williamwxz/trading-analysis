@@ -416,15 +416,16 @@ def _bootstrap_state(
 
         prev_pnl[stn] = wr.cumulative_pnl
         prev_price[stn] = effective_price
-        state.set(
+        # update() preserves seed-loaded metadata (strategy_instance_id, underlying,
+        # etc.). Using set() with a fresh AnchorRecord here would clobber those
+        # fields to defaults and break carry-forward in the live loop.
+        state.update(
             stn,
-            AnchorRecord(
-                pnl=wr.cumulative_pnl,
-                price=effective_price,
-                position=wr.position,
-                bar_ts=wr.bar_ts,
-                revision_ts=wr.revision_ts,
-            ),
+            pnl=wr.cumulative_pnl,
+            price=effective_price,
+            position=wr.position,
+            bar_ts=wr.bar_ts,
+            revision_ts=wr.revision_ts,
         )
 
     logger.info(
