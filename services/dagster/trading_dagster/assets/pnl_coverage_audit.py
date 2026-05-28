@@ -43,20 +43,12 @@ POS_TS_TOLERANCE_MIN = 1
 # Top-N offenders included in the failure summary.
 TOP_N_OFFENDERS = 10
 
-# ClickHouse per-query memory cap (500 MB) — kept deliberately low. The
-# source-history scans that read the row_json column (to extract `position`)
-# are time-chunked (see _SRC_CHUNK_DAYS) so each query stays well under this cap
-# even on strategy_output_history_bt_v2, which has ~8M rows per underlying.
+# ClickHouse per-query memory cap (500 MB). Source scans are time-chunked
+# (_SRC_CHUNK_DAYS) to stay under it on the multi-year bt history.
 QUERY_MEMORY_CAP = 524_288_000
 
-# Smaller read-block size for queries that scan the row_json column. The default
-# 65536-row block can allocate >500 MB worth of row_json at once; reading in
-# smaller blocks keeps per-block memory bounded.
-SCAN_BLOCK_SIZE = 8192
-
-# Time-chunk width for source row_json scans. A full-history scan of row_json
-# buffers too much (a 1-month ETH bt window exceeds 500 MB; 1 week stays well
-# under). Source position scans iterate the history in chunks of this many days.
+# Time-chunk width (days) for source scans. The bt source spans 2020->2026; a
+# full-history scan exceeds the cap, a 1-week window stays well under.
 _SRC_CHUNK_DAYS = 7
 
 # Parallel workers — matches existing pnl_strategy_v2 pattern.
@@ -506,9 +498,7 @@ SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
 
 
 def _src_time_windows(end_dt: datetime | None = None) -> list[tuple[str, str]]:
-    """Yield [start, end) string windows of _SRC_CHUNK_DAYS spanning the audited
-    history. Source row_json scans run per-window to bound per-query memory.
-    """
+    """[start, end) string windows of _SRC_CHUNK_DAYS spanning the audited history."""
     start = datetime.strptime(GLOBAL_START_TS[:19], "%Y-%m-%d %H:%M:%S")
     end = (end_dt or datetime.now(tz=UTC).replace(tzinfo=None)) + timedelta(days=1)
     windows: list[tuple[str, str]] = []
@@ -524,11 +514,8 @@ def _src_time_windows(end_dt: datetime | None = None) -> list[tuple[str, str]]:
 def _fetch_q_src_prod_bt(source_table: str, underlying: str, client) -> dict[str, list[tuple[str, float]]]:
     """Q_src (prod/bt): first-revision (ts, position) per strategy for one U.
 
-    Reads `position` out of row_json in _SRC_CHUNK_DAYS-wide time chunks so a
-    single query never buffers the whole history's row_json (which exceeds the
-    500 MB cap on strategy_output_history_bt_v2). Windows are chronological and
-    each is internally ordered by ts, so the concatenated per-strategy lists stay
-    in ascending-ts order. LIMIT 1 BY (stn, ts) keeps the first revision per bar.
+    Chronological windows + per-window ORDER BY ts keep the concatenated lists in
+    ascending-ts order; LIMIT 1 BY (stn, ts) keeps the first revision per bar.
     """
     out: dict[str, list[tuple[str, float]]] = {}
     for ws, we in _src_time_windows():
@@ -549,7 +536,7 @@ FROM (
   LIMIT 1 BY strategy_table_name, ts
 )
 ORDER BY strategy_table_name, ts_raw
-SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}, max_block_size = {SCAN_BLOCK_SIZE}
+SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
 """,
             client=client,
         )
@@ -561,11 +548,8 @@ SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}, max_block_size = {SCAN_BLOCK_SIZ
 def _fetch_q_src_tf(source_table: str, underlying: str, client) -> dict[str, int]:
     """Per-strategy config_timeframe (in minutes) for one U.
 
-    config_timeframe is a dedicated column (no row_json), but the bt source spans
-    years (toYYYYMM partitions back to 2020), so an unbounded scan still OOMs.
-    Restrict to the audited window [GLOBAL_START_TS, now] and read in time chunks;
-    config_timeframe is constant per strategy so any chunk that sees a strategy
-    yields its value. GROUP BY any() keeps aggregation state tiny.
+    config_timeframe is constant per strategy, so the first chunk that sees a
+    strategy wins.
     """
     out: dict[str, int] = {}
     for ws, we in _src_time_windows():
@@ -577,7 +561,7 @@ WHERE underlying = '{underlying}'
   AND strategy_table_name NOT LIKE 'manual_probe%'
   AND ts >= toDateTime('{ws}') AND ts < toDateTime('{we}')
 GROUP BY strategy_table_name
-SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}, max_block_size = {SCAN_BLOCK_SIZE}
+SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
 """,
             client=client,
         )
@@ -589,14 +573,9 @@ SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}, max_block_size = {SCAN_BLOCK_SIZ
 
 
 def _fetch_q_src_rt(underlying: str, client) -> list[dict]:
-    """Q_src_rt: all revisions for one U, in (stn, ts, revision_ts) order.
+    """Q_src_rt: all revisions for one U, enriched for build_rt_lookup.
 
-    Returns rows already enriched with the fields that build_rt_lookup expects:
-    ts, revision_ts, execution_ts, closing_ts, position, config_timeframe,
-    strategy_table_name. Reads row_json (for position) in _SRC_CHUNK_DAYS-wide
-    time chunks to bound per-query memory; build_rt_lookup re-sorts per strategy
-    so cross-chunk ordering is irrelevant. config_timeframe is read from the
-    dedicated column, not row_json.
+    build_rt_lookup re-sorts per strategy, so cross-chunk ordering is irrelevant.
     """
     out: list[dict] = []
     for ws, we in _src_time_windows():
@@ -614,7 +593,7 @@ WHERE underlying = '{underlying}'
   AND strategy_table_name NOT LIKE 'manual_probe%'
   AND ts >= toDateTime('{ws}') AND ts < toDateTime('{we}')
 ORDER BY strategy_table_name, ts, revision_ts
-SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}, max_block_size = {SCAN_BLOCK_SIZE}
+SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
 """,
             client=client,
         )
