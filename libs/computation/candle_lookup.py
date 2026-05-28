@@ -11,7 +11,14 @@ from datetime import datetime
 
 from libs.clickhouse_client import query_dicts
 
-_LOOKBACK = "1 DAY"
+# 2-day lookback so 1d-timeframe bars stay in the candidate window for their full
+# active life. A 1d bar's ts is at midnight; its revision (real_trade execution_ts)
+# arrives ~24h later and the position holds until the next day's bar — so a 1d bar
+# can be the active bar for a candle up to ~2 days after its ts. A 1-day lookback
+# dropped these, leaving 1d strategies missing from the live stream (prod & rt).
+# argMax / LIMIT 1 BY still selects the latest bar, so widening is safe for all
+# timeframes — it only widens the candidate set, never changes which bar wins.
+_LOOKBACK = "2 DAY"
 
 _TF_MINUTES_EXPR_NO_ALIAS = """\
 multiIf(
