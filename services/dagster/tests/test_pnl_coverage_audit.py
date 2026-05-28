@@ -406,10 +406,11 @@ class TestAuditUnderlying:
         })
         monkeypatch.setattr(mod, "_fetch_q_px", lambda u, c: _price_set(
             "2026-03-05 09:05:00", "2026-05-26 09:55:00"))
-        monkeypatch.setattr(mod, "_fetch_q_src_prod_bt", lambda st, u, c: {
-            "S1": [("2026-03-05 09:00:00", 1.0)],
-        })
-        monkeypatch.setattr(mod, "_fetch_q_src_tf", lambda st, u, c: {"S1": 5})
+        monkeypatch.setattr(
+            mod,
+            "_fetch_q_src_prod_bt_single",
+            lambda st, u, stn, c: ([("2026-03-05 09:00:00", 1.0)], "5m"),
+        )
         monkeypatch.setattr(mod, "_fetch_q_gap", lambda t, u, s, c: [])
         # Phase 3: target series with position matching source (1.0 from bar at 09:00, tf=5).
         monkeypatch.setattr(mod, "_fetch_q_target_full", lambda t, u, s, c: [
@@ -435,10 +436,11 @@ class TestAuditUnderlying:
             "S1": StratStat(_dt("2026-05-02 20:44:00"), _dt("2026-05-26 09:55:00"), 100),
         })
         monkeypatch.setattr(mod, "_fetch_q_px", lambda u, c: _price_set("2026-03-05 09:05:00"))
-        monkeypatch.setattr(mod, "_fetch_q_src_prod_bt", lambda st, u, c: {
-            "S1": [("2026-03-05 09:00:00", 1.0)],
-        })
-        monkeypatch.setattr(mod, "_fetch_q_src_tf", lambda st, u, c: {"S1": 5})
+        monkeypatch.setattr(
+            mod,
+            "_fetch_q_src_prod_bt_single",
+            lambda st, u, stn, c: ([("2026-03-05 09:00:00", 1.0)], "5m"),
+        )
         monkeypatch.setattr(mod, "_fetch_q_gap", lambda t, u, s, c: [])
         # NEW: stub the per-minute target series. Use a position that matches source (1.0).
         monkeypatch.setattr(mod, "_fetch_q_target_full", lambda t, u, s, c: [
