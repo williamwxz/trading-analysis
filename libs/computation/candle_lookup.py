@@ -11,7 +11,11 @@ from datetime import datetime
 
 from libs.clickhouse_client import query_dicts
 
-_LOOKBACK = "1 DAY"
+# 2-day lookback: a 1d bar stays the active bar up to ~2 days after its ts
+# (execution_ts ≈ next midnight, held until the following day's bar). A 1-day
+# window dropped 1d strategies from the live stream. argMax / LIMIT 1 BY still
+# pick the latest bar, so widening only grows the candidate set — safe for all tf.
+_LOOKBACK = "2 DAY"
 
 _TF_MINUTES_EXPR_NO_ALIAS = """\
 multiIf(

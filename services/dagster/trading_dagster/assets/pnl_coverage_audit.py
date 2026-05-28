@@ -43,8 +43,13 @@ POS_TS_TOLERANCE_MIN = 1
 # Top-N offenders included in the failure summary.
 TOP_N_OFFENDERS = 10
 
-# ClickHouse per-query memory cap (500 MB).
+# ClickHouse per-query memory cap (500 MB). Source scans are time-chunked
+# (_SRC_CHUNK_DAYS) to stay under it on the multi-year bt history.
 QUERY_MEMORY_CAP = 524_288_000
+
+# Time-chunk width (days) for source scans. The bt source spans 2020->2026; a
+# full-history scan exceeds the cap, a 1-week window stays well under.
+_SRC_CHUNK_DAYS = 7
 
 # Parallel workers — matches existing pnl_strategy_v2 pattern.
 _MAX_WORKERS = 4
@@ -492,97 +497,122 @@ SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
     return {r[0] for r in rows}
 
 
+def _src_time_windows(end_dt: datetime | None = None) -> list[tuple[str, str]]:
+    """[start, end) string windows of _SRC_CHUNK_DAYS spanning the audited history."""
+    start = datetime.strptime(GLOBAL_START_TS[:19], "%Y-%m-%d %H:%M:%S")
+    end = (end_dt or datetime.now(tz=UTC).replace(tzinfo=None)) + timedelta(days=1)
+    windows: list[tuple[str, str]] = []
+    cur = start
+    step = timedelta(days=_SRC_CHUNK_DAYS)
+    while cur < end:
+        nxt = min(cur + step, end)
+        windows.append((cur.strftime("%Y-%m-%d %H:%M:%S"), nxt.strftime("%Y-%m-%d %H:%M:%S")))
+        cur = nxt
+    return windows
+
+
 def _fetch_q_src_prod_bt(source_table: str, underlying: str, client) -> dict[str, list[tuple[str, float]]]:
     """Q_src (prod/bt): first-revision (ts, position) per strategy for one U.
 
-    Also returns the (constant) tf as part of a sibling query — captured by
-    _fetch_q_src_tf below.
+    Chronological windows + per-window ORDER BY ts keep the concatenated lists in
+    ascending-ts order; LIMIT 1 BY (stn, ts) keeps the first revision per bar.
     """
-    rows = query_rows(
-        f"""
-SELECT
-  strategy_table_name,
-  toString(ts),
-  argMin(JSONExtract(row_json, 'position', 'Float64'), revision_ts)
-FROM analytics.{source_table}
-WHERE underlying = '{underlying}'
-  AND strategy_table_name NOT LIKE 'manual_probe%'
-GROUP BY strategy_table_name, ts
-ORDER BY strategy_table_name, ts
+    out: dict[str, list[tuple[str, float]]] = {}
+    for ws, we in _src_time_windows():
+        rows = query_rows(
+            f"""
+SELECT strategy_table_name, ts_str, position
+FROM (
+  SELECT
+    strategy_table_name,
+    toString(ts)                            AS ts_str,
+    ts                                      AS ts_raw,
+    JSONExtractFloat(row_json, 'position')  AS position
+  FROM analytics.{source_table}
+  WHERE underlying = '{underlying}'
+    AND strategy_table_name NOT LIKE 'manual_probe%'
+    AND ts >= toDateTime('{ws}') AND ts < toDateTime('{we}')
+  ORDER BY strategy_table_name, ts, revision_ts
+  LIMIT 1 BY strategy_table_name, ts
+)
+ORDER BY strategy_table_name, ts_raw
 SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
 """,
-        client=client,
-    )
-    out: dict[str, list[tuple[str, float]]] = {}
-    for r in rows:
-        stn = str(r[0])
-        out.setdefault(stn, []).append((str(r[1]), float(r[2])))
+            client=client,
+        )
+        for r in rows:
+            out.setdefault(str(r[0]), []).append((str(r[1]), float(r[2])))
     return out
 
 
 def _fetch_q_src_tf(source_table: str, underlying: str, client) -> dict[str, int]:
-    """Per-strategy config_timeframe (in minutes) for one U."""
-    rows = query_rows(
-        f"""
-SELECT strategy_table_name,
-       any(JSONExtractString(row_json, 'config_timeframe'))
+    """Per-strategy config_timeframe (in minutes) for one U.
+
+    config_timeframe is constant per strategy, so the first chunk that sees a
+    strategy wins.
+    """
+    out: dict[str, int] = {}
+    for ws, we in _src_time_windows():
+        rows = query_rows(
+            f"""
+SELECT strategy_table_name, any(config_timeframe)
 FROM analytics.{source_table}
 WHERE underlying = '{underlying}'
   AND strategy_table_name NOT LIKE 'manual_probe%'
+  AND ts >= toDateTime('{ws}') AND ts < toDateTime('{we}')
 GROUP BY strategy_table_name
 SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
 """,
-        client=client,
-    )
-    out: dict[str, int] = {}
-    for r in rows:
-        tf_str = str(r[1])
-        out[str(r[0])] = TIMEFRAME_MAP.get(tf_str, 5)
+            client=client,
+        )
+        for r in rows:
+            stn = str(r[0])
+            if stn not in out:
+                out[stn] = TIMEFRAME_MAP.get(str(r[1]), 5)
     return out
 
 
 def _fetch_q_src_rt(underlying: str, client) -> list[dict]:
-    """Q_src_rt: all revisions for one U, in (stn, ts, revision_ts) order.
+    """Q_src_rt: all revisions for one U, enriched for build_rt_lookup.
 
-    Returns rows already enriched with the fields that build_rt_lookup expects:
-    ts, revision_ts, execution_ts, closing_ts, position, config_timeframe,
-    strategy_table_name.
+    build_rt_lookup re-sorts per strategy, so cross-chunk ordering is irrelevant.
     """
-    rows = query_rows(
-        f"""
+    out: list[dict] = []
+    for ws, we in _src_time_windows():
+        rows = query_rows(
+            f"""
 SELECT
   strategy_table_name,
   toString(ts),
   toString(revision_ts),
   toString(toStartOfMinute(revision_ts + INTERVAL 59 SECOND)) AS execution_ts,
   JSONExtract(row_json, 'position', 'Float64') AS position,
-  JSONExtractString(row_json, 'config_timeframe') AS tf
+  config_timeframe AS tf
 FROM analytics.strategy_output_history_v2
 WHERE underlying = '{underlying}'
   AND strategy_table_name NOT LIKE 'manual_probe%'
+  AND ts >= toDateTime('{ws}') AND ts < toDateTime('{we}')
 ORDER BY strategy_table_name, ts, revision_ts
 SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
 """,
-        client=client,
-    )
-    out: list[dict] = []
-    for r in rows:
-        stn, ts_s, rev_s, exec_s, position, tf = r
-        tf_minutes = TIMEFRAME_MAP.get(tf, 5)
-        # closing_ts = ts + tf_minutes
-        ts_dt = datetime.strptime(str(ts_s)[:19], "%Y-%m-%d %H:%M:%S")
-        closing_dt = ts_dt + timedelta(minutes=tf_minutes)
-        out.append(
-            {
-                "strategy_table_name": str(stn),
-                "ts": str(ts_s),
-                "revision_ts": str(rev_s),
-                "execution_ts": str(exec_s),
-                "closing_ts": closing_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                "position": float(position),
-                "config_timeframe": str(tf),
-            }
+            client=client,
         )
+        for r in rows:
+            stn, ts_s, rev_s, exec_s, position, tf = r
+            tf_minutes = TIMEFRAME_MAP.get(tf, 5)
+            ts_dt = datetime.strptime(str(ts_s)[:19], "%Y-%m-%d %H:%M:%S")
+            closing_dt = ts_dt + timedelta(minutes=tf_minutes)
+            out.append(
+                {
+                    "strategy_table_name": str(stn),
+                    "ts": str(ts_s),
+                    "revision_ts": str(rev_s),
+                    "execution_ts": str(exec_s),
+                    "closing_ts": closing_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    "position": float(position),
+                    "config_timeframe": str(tf),
+                }
+            )
     return out
 
 
