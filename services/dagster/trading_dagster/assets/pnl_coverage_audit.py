@@ -43,8 +43,15 @@ POS_TS_TOLERANCE_MIN = 1
 # Top-N offenders included in the failure summary.
 TOP_N_OFFENDERS = 10
 
-# ClickHouse per-query memory cap (500 MB).
-QUERY_MEMORY_CAP = 524_288_000
+# ClickHouse per-query memory cap (2 GB). The source-history scans over the
+# full retained history read the large row_json column; 500 MB was too small
+# for strategy_output_history_bt_v2 (large JSON blobs).
+QUERY_MEMORY_CAP = 2_147_483_648
+
+# Smaller read-block size for queries that scan the row_json column. The default
+# 65536-row block can allocate >500 MB worth of row_json at once; reading in
+# smaller blocks keeps per-block memory bounded.
+SCAN_BLOCK_SIZE = 8192
 
 # Parallel workers — matches existing pnl_strategy_v2 pattern.
 _MAX_WORKERS = 4
@@ -498,18 +505,26 @@ def _fetch_q_src_prod_bt(source_table: str, underlying: str, client) -> dict[str
     Also returns the (constant) tf as part of a sibling query — captured by
     _fetch_q_src_tf below.
     """
+    # LIMIT 1 BY (stn, ts) over the table sort key picks the first revision per
+    # bar without buffering all row_json blobs through argMin — mirrors the OOM
+    # fix in libs.computation.fetch_bars.fetch_new_bars_bt.
     rows = query_rows(
         f"""
-SELECT
-  strategy_table_name,
-  toString(ts),
-  argMin(JSONExtract(row_json, 'position', 'Float64'), revision_ts)
-FROM analytics.{source_table}
-WHERE underlying = '{underlying}'
-  AND strategy_table_name NOT LIKE 'manual_probe%'
-GROUP BY strategy_table_name, ts
-ORDER BY strategy_table_name, ts
-SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
+SELECT strategy_table_name, ts_str, position
+FROM (
+  SELECT
+    strategy_table_name,
+    toString(ts)                            AS ts_str,
+    ts                                      AS ts_raw,
+    JSONExtractFloat(row_json, 'position')  AS position
+  FROM analytics.{source_table}
+  WHERE underlying = '{underlying}'
+    AND strategy_table_name NOT LIKE 'manual_probe%'
+  ORDER BY strategy_table_name, ts, revision_ts
+  LIMIT 1 BY strategy_table_name, ts
+)
+ORDER BY strategy_table_name, ts_raw
+SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}, max_block_size = {SCAN_BLOCK_SIZE}
 """,
         client=client,
     )
@@ -522,15 +537,22 @@ SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
 
 def _fetch_q_src_tf(source_table: str, underlying: str, client) -> dict[str, int]:
     """Per-strategy config_timeframe (in minutes) for one U."""
+    # config_timeframe is constant per strategy, so one row per stn suffices.
+    # LIMIT 1 BY avoids an any()-aggregation that must scan every row_json.
     rows = query_rows(
         f"""
-SELECT strategy_table_name,
-       any(JSONExtractString(row_json, 'config_timeframe'))
-FROM analytics.{source_table}
-WHERE underlying = '{underlying}'
-  AND strategy_table_name NOT LIKE 'manual_probe%'
-GROUP BY strategy_table_name
-SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
+SELECT strategy_table_name, config_timeframe
+FROM (
+  SELECT
+    strategy_table_name,
+    JSONExtractString(row_json, 'config_timeframe') AS config_timeframe
+  FROM analytics.{source_table}
+  WHERE underlying = '{underlying}'
+    AND strategy_table_name NOT LIKE 'manual_probe%'
+  ORDER BY strategy_table_name, ts
+  LIMIT 1 BY strategy_table_name
+)
+SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}, max_block_size = {SCAN_BLOCK_SIZE}
 """,
         client=client,
     )
@@ -561,7 +583,7 @@ FROM analytics.strategy_output_history_v2
 WHERE underlying = '{underlying}'
   AND strategy_table_name NOT LIKE 'manual_probe%'
 ORDER BY strategy_table_name, ts, revision_ts
-SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
+SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}, max_block_size = {SCAN_BLOCK_SIZE}
 """,
         client=client,
     )
