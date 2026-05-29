@@ -568,3 +568,57 @@ class TestPositionPerMinute:
         mismatches, _, samples = _check_position_per_minute(source, target)
         assert mismatches == 20
         assert len(samples) == TOP_N_OFFENDERS
+
+
+# ── Target-side reads must be bounded to GLOBAL_START_TS ──
+
+
+class TestTargetReadsBounded:
+    """Every target-side query must filter ts >= GLOBAL_START_TS.
+
+    Streaming keeps Python memory bounded, but without the ts bound these
+    queries still scan the bt target's full 2020->now history (1.24B rows) every
+    run — high ClickHouse query memory and runtime. The audit only compares
+    against source/price data starting at GLOBAL_START_TS, so target reads must
+    match that window.
+    """
+
+    def _cap(self, monkeypatch):
+        from services.dagster.trading_dagster.assets import pnl_coverage_audit as mod
+
+        captured: list[str] = []
+        monkeypatch.setattr(
+            mod, "query_rows", lambda sql, client=None, **k: captured.append(sql) or []
+        )
+
+        def fake_stream(sql, client=None, **k):
+            captured.append(sql)
+            return iter(())
+
+        monkeypatch.setattr(mod, "query_rows_stream", fake_stream)
+        return mod, captured
+
+    def test_fetch_q_stat_is_bounded(self, monkeypatch):
+        mod, cap = self._cap(monkeypatch)
+        mod._fetch_q_stat("strategy_pnl_1min_bt_v2", "BTC", None)
+        assert mod.GLOBAL_START_TS in cap[0]
+
+    def test_iter_q_target_full_is_bounded(self, monkeypatch):
+        mod, cap = self._cap(monkeypatch)
+        list(mod._iter_q_target_full("strategy_pnl_1min_bt_v2", "BTC", "S1", None))
+        assert mod.GLOBAL_START_TS in cap[0]
+
+    def test_fetch_q_gap_is_bounded(self, monkeypatch):
+        mod, cap = self._cap(monkeypatch)
+        mod._fetch_q_gap("strategy_pnl_1min_bt_v2", "BTC", "S1", None)
+        assert mod.GLOBAL_START_TS in cap[0]
+
+    def test_fetch_q_trans_is_bounded(self, monkeypatch):
+        mod, cap = self._cap(monkeypatch)
+        mod._fetch_q_trans("strategy_pnl_1min_bt_v2", "BTC", "S1", None)
+        assert mod.GLOBAL_START_TS in cap[0]
+
+    def test_fetch_q_stat_hour_is_bounded(self, monkeypatch):
+        mod, cap = self._cap(monkeypatch)
+        mod._fetch_q_stat_hour("strategy_pnl_1hour_bt_v2", "BTC", None)
+        assert mod.GLOBAL_START_TS in cap[0]

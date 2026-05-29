@@ -477,6 +477,7 @@ def _fetch_q_stat(target_table: str, underlying: str, client) -> dict[str, Strat
 SELECT strategy_table_name, min(ts), max(ts), count()
 FROM analytics.{target_table}
 WHERE underlying = '{underlying}'
+  AND ts >= toDateTime('{GLOBAL_START_TS}')
 GROUP BY strategy_table_name
 SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
 """,
@@ -725,6 +726,7 @@ FROM (
   FROM analytics.{target_table}
   WHERE underlying = '{underlying}'
     AND strategy_table_name = '{stn}'
+    AND ts >= toDateTime('{GLOBAL_START_TS}')
 )
 WHERE position != prev_pos OR rn = 1
 ORDER BY ts
@@ -747,6 +749,7 @@ SELECT gap_end, gap_secs FROM (
   FROM analytics.{target_table}
   WHERE underlying = '{underlying}'
     AND strategy_table_name = '{stn}'
+    AND ts >= toDateTime('{GLOBAL_START_TS}')
 )
 WHERE prev_ts_secs > 0 AND gap_secs > 60
 ORDER BY gap_secs DESC
@@ -775,6 +778,7 @@ SELECT ts, position
 FROM analytics.{target_table}
 WHERE underlying = '{underlying}'
   AND strategy_table_name = '{stn}'
+  AND ts >= toDateTime('{GLOBAL_START_TS}')
 ORDER BY ts
 SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
 """,
@@ -790,6 +794,7 @@ def _fetch_q_stat_hour(hour_table: str, underlying: str, client) -> dict[str, li
 SELECT strategy_table_name, ts, position
 FROM analytics.{hour_table}
 WHERE underlying = '{underlying}'
+  AND ts >= toDateTime('{GLOBAL_START_TS}')
 ORDER BY strategy_table_name, ts
 SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
 """,
