@@ -28,11 +28,10 @@ def _dt(s: str) -> datetime:
     return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
 
 
-def _price_set(*ts_strings: str) -> set[datetime]:
-    return {_dt(s) for s in ts_strings}
-
-
 # ── Phase 1: coverage ────────────────────────────────────────────────────────
+#
+# _check_phase1 now takes ``expected_minutes`` (the price-window count the driver
+# computes server-side) instead of a materialized price set.
 
 class TestPhase1:
     def test_clean_match_returns_no_violation(self):
@@ -43,9 +42,10 @@ class TestPhase1:
             actual_rows=3,
         )
         source = SourceFirstBar(expected_min_ts=_dt("2026-03-05 09:05:00"), tf_minutes=5)
-        prices = _price_set("2026-03-05 09:05:00", "2026-03-05 09:06:00", "2026-05-26 09:55:00")
+        # 3 price minutes in [expected_min, now-5m]; actual_rows == 3 → no holes.
+        expected_minutes = 3
         now = _dt("2026-05-26 10:00:00")
-        v = _check_phase1("t", "FET", "S", stat, source, prices, now)
+        v = _check_phase1("t", "FET", "S", stat, source, expected_minutes, now)
         assert v is None
 
     def test_detects_start_gap(self):
@@ -56,9 +56,9 @@ class TestPhase1:
             actual_rows=1000,
         )
         source = SourceFirstBar(expected_min_ts=_dt("2026-03-05 09:05:00"), tf_minutes=5)
-        prices = {_dt("2026-05-26 09:58:00")}
         now = _dt("2026-05-26 10:00:00")
-        v = _check_phase1("t", "FET", "S", stat, source, prices, now)
+        # start_gap is checked before internal_holes, so the count is irrelevant.
+        v = _check_phase1("t", "FET", "S", stat, source, 1, now)
         assert v is not None
         assert v.category == "start_gap"
         assert "2026-03-05" in v.detail
@@ -72,45 +72,38 @@ class TestPhase1:
             actual_rows=1000,
         )
         source = SourceFirstBar(expected_min_ts=_dt("2026-03-05 09:05:00"), tf_minutes=5)
-        prices = {_dt("2026-03-05 09:05:00")}
         now = _dt("2026-05-26 10:00:00")  # 30 min ahead of actual_max
-        v = _check_phase1("t", "FET", "S", stat, source, prices, now)
+        v = _check_phase1("t", "FET", "S", stat, source, 1, now)
         assert v is not None
         assert v.category == "stale_end"
 
     def test_detects_internal_holes(self):
-        """actual_rows < |price_set ∩ [expected_min, now-5m]| → internal_holes."""
+        """actual_rows < expected_minutes → internal_holes."""
         stat = StratStat(
             actual_min_ts=_dt("2026-03-05 09:05:00"),
             actual_max_ts=_dt("2026-03-05 09:55:00"),
             actual_rows=2,
         )
         source = SourceFirstBar(expected_min_ts=_dt("2026-03-05 09:05:00"), tf_minutes=5)
-        prices = _price_set(
-            "2026-03-05 09:05:00",
-            "2026-03-05 09:10:00",
-            "2026-03-05 09:15:00",
-            "2026-03-05 09:55:00",
-        )
+        # 4 price minutes in the window vs 2 actual rows → 2 missing.
+        expected_minutes = 4
         now = _dt("2026-03-05 10:00:00")
-        v = _check_phase1("t", "FET", "S", stat, source, prices, now)
+        v = _check_phase1("t", "FET", "S", stat, source, expected_minutes, now)
         assert v is not None
         assert v.category == "internal_holes"
         # 4 expected minutes vs 2 actual → 2 missing.
         assert "2" in v.detail
 
-    def test_price_gap_exemption(self):
-        """Minutes missing in price_set are not counted as missing rows."""
+    def test_stale_end_takes_priority_over_holes(self):
+        """stale_end is checked before internal_holes regardless of the count."""
         stat = StratStat(
             actual_min_ts=_dt("2026-03-05 09:05:00"),
             actual_max_ts=_dt("2026-03-05 09:15:00"),
             actual_rows=2,
         )
         source = SourceFirstBar(expected_min_ts=_dt("2026-03-05 09:05:00"), tf_minutes=5)
-        # Only 2 price minutes exist in the window.
-        prices = _price_set("2026-03-05 09:05:00", "2026-03-05 09:15:00")
         now = _dt("2026-03-05 09:30:00")  # 15m past max; well past actual_max
-        v = _check_phase1("t", "FET", "S", stat, source, prices, now)
+        v = _check_phase1("t", "FET", "S", stat, source, 2, now)
         # Actual_rows == expected (2), but stale_end fires because actual_max < now-10m.
         assert v is not None
         assert v.category == "stale_end"
@@ -123,14 +116,16 @@ class TestPhase2:
     def test_collects_top_gaps_by_duration(self):
         """Returns the top N gaps sorted by gap_minutes desc, descriptor-typed."""
         # Q_gap returns list of (gap_end, gap_secs). Phase 2 trims by price-gap
-        # exemption and sorts.
+        # exemption and sorts. has_prices=False → no exemption.
         q_gap_rows = [
-            (_dt("2026-03-05 10:00:00"), 600),   # 10 min gap, no price gaps
-            (_dt("2026-03-06 11:00:00"), 7200),  # 2-hour gap, no price gaps
-            (_dt("2026-03-07 12:01:00"), 120),   # 2 min gap, no price gaps
+            (_dt("2026-03-05 10:00:00"), 600),   # 10 min gap
+            (_dt("2026-03-06 11:00:00"), 7200),  # 2-hour gap
+            (_dt("2026-03-07 12:01:00"), 120),   # 2 min gap
         ]
-        price_set = _price_set()  # empty — no exemption
-        descriptors = _check_phase2("FET", "S", q_gap_rows, price_set, top_n=2)
+        present_counts = [0, 0, 0]  # ignored when has_prices=False
+        descriptors = _check_phase2(
+            "FET", "S", q_gap_rows, present_counts, has_prices=False, top_n=2
+        )
         assert len(descriptors) == 2
         # Sorted by gap_minutes desc.
         assert descriptors[0].gap_minutes == 120
@@ -139,26 +134,24 @@ class TestPhase2:
 
     def test_price_gap_exemption_reduces_gap_minutes(self):
         """Missing price minutes inside a gap are subtracted from gap_minutes."""
-        # Raw gap is 10 minutes; 3 of those minutes have no price → reported gap = 7.
+        # Raw gap is 10 minutes over (09:50, 10:00). One price present strictly
+        # inside (e.g. 09:53) → effective = 1 + 1 = 2.
         q_gap_rows = [(_dt("2026-03-05 10:00:00"), 600)]
-        prices_in_gap = _price_set(
-            "2026-03-05 09:50:00",  # before gap
-            "2026-03-05 09:53:00",  # inside gap [09:50, 10:00) means missing minutes are 09:51, 09:52, ...
-            # Missing minutes: 09:51, 09:52, 09:54, 09:55, 09:56, 09:57, 09:58, 09:59 → 8 missing minutes
-            # Wait — we said prices_present = {09:50, 09:53}, the gap covers (09:50, 10:00),
-            # so missing prices are 09:51, 09:52, 09:54 .. 09:59 = 8 missing minutes.
-            # gap_minutes after exemption = 10 − 8 = 2.
+        present_counts = [1]
+        descriptors = _check_phase2(
+            "FET", "S", q_gap_rows, present_counts, has_prices=True, top_n=5
         )
-        descriptors = _check_phase2("FET", "S", q_gap_rows, prices_in_gap, top_n=5)
         assert len(descriptors) == 1
         assert descriptors[0].gap_minutes == 2
 
     def test_gap_fully_explained_by_prices_returns_empty(self):
-        """If every missing minute has no price, the gap is fully exempt → drop it."""
+        """If no price minute lies strictly inside, the gap is fully exempt → drop it."""
         q_gap_rows = [(_dt("2026-03-05 10:00:00"), 600)]
-        # Anchor present at 09:50 and 10:00; no other price minutes in between.
-        prices = _price_set("2026-03-05 09:50:00", "2026-03-05 10:00:00")
-        descriptors = _check_phase2("FET", "S", q_gap_rows, prices, top_n=5)
+        # Anchors present only at the boundaries 09:50 and 10:00 → 0 strictly inside.
+        present_counts = [0]
+        descriptors = _check_phase2(
+            "FET", "S", q_gap_rows, present_counts, has_prices=True, top_n=5
+        )
         assert descriptors == []
 
 
@@ -404,19 +397,24 @@ class TestAuditUnderlying:
         monkeypatch.setattr(mod, "_fetch_q_stat", lambda t, u, c: {
             "S1": StratStat(_dt("2026-03-05 09:05:00"), _dt("2026-05-26 09:55:00"), 2),
         })
-        monkeypatch.setattr(mod, "_fetch_q_px", lambda u, c: _price_set(
-            "2026-03-05 09:05:00", "2026-05-26 09:55:00"))
+        monkeypatch.setattr(mod, "_has_prices", lambda u, c: True)
+        # Source bar at 09:00, tf=5 → first-bar 09:05, one change at 09:05 (pos 1.0).
         monkeypatch.setattr(
             mod,
-            "_fetch_q_src_prod_bt_single",
-            lambda st, u, stn, c: ([("2026-03-05 09:00:00", 1.0)], "5m"),
+            "_load_source_prod_bt",
+            lambda st, u, stn, c, tfv: (
+                SourceFirstBar(_dt("2026-03-05 09:05:00"), 5),
+                [PositionChange(_dt("2026-03-05 09:05:00"), 1.0)],
+            ),
         )
+        # actual_rows == 2 matches expected_minutes → no internal_holes.
+        monkeypatch.setattr(mod, "_count_prices", lambda u, s, e, c: 2)
         monkeypatch.setattr(mod, "_fetch_q_gap", lambda t, u, s, c: [])
-        # Phase 3: target series with position matching source (1.0 from bar at 09:00, tf=5).
-        monkeypatch.setattr(mod, "_fetch_q_target_full", lambda t, u, s, c: [
+        # Phase 3: streamed target series, position matches source (1.0).
+        monkeypatch.setattr(mod, "_iter_q_target_full", lambda t, u, s, c: iter([
             (_dt("2026-03-05 09:05:00"), 1.0),
             (_dt("2026-05-26 09:55:00"), 1.0),
-        ])
+        ]))
 
         report = mod._audit_underlying(
             target_table="strategy_pnl_1min_prod_v2",
@@ -435,18 +433,22 @@ class TestAuditUnderlying:
         monkeypatch.setattr(mod, "_fetch_q_stat", lambda t, u, c: {
             "S1": StratStat(_dt("2026-05-02 20:44:00"), _dt("2026-05-26 09:55:00"), 100),
         })
-        monkeypatch.setattr(mod, "_fetch_q_px", lambda u, c: _price_set("2026-03-05 09:05:00"))
+        monkeypatch.setattr(mod, "_has_prices", lambda u, c: True)
         monkeypatch.setattr(
             mod,
-            "_fetch_q_src_prod_bt_single",
-            lambda st, u, stn, c: ([("2026-03-05 09:00:00", 1.0)], "5m"),
+            "_load_source_prod_bt",
+            lambda st, u, stn, c, tfv: (
+                SourceFirstBar(_dt("2026-03-05 09:05:00"), 5),
+                [PositionChange(_dt("2026-03-05 09:05:00"), 1.0)],
+            ),
         )
+        monkeypatch.setattr(mod, "_count_prices", lambda u, s, e, c: 1)
         monkeypatch.setattr(mod, "_fetch_q_gap", lambda t, u, s, c: [])
-        # NEW: stub the per-minute target series. Use a position that matches source (1.0).
-        monkeypatch.setattr(mod, "_fetch_q_target_full", lambda t, u, s, c: [
+        # Streamed per-minute target series; position matches source (1.0).
+        monkeypatch.setattr(mod, "_iter_q_target_full", lambda t, u, s, c: iter([
             (_dt("2026-05-02 20:45:00"), 1.0),
             (_dt("2026-05-26 09:55:00"), 1.0),
-        ])
+        ]))
 
         report = mod._audit_underlying(
             target_table="strategy_pnl_1min_prod_v2",
