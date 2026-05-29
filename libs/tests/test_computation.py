@@ -2,6 +2,7 @@
 
 All tests mock libs.computation.*.query_dicts so no real ClickHouse is needed.
 """
+
 import json
 from datetime import datetime, date
 from unittest.mock import patch
@@ -174,8 +175,9 @@ def test_fetch_strategies_sql_uses_argmin_revision_ts():
 
 
 @pytest.mark.unit
-def test_fetch_strategies_sql_has_limit_1_by_strategy_instance_id():
-    """SQL uses LIMIT 1 BY strategy_instance_id to dedup per logical strategy."""
+def test_fetch_strategies_sql_selects_latest_bar_per_strategy_instance():
+    """SQL picks the latest bar per strategy_instance_id via a max(ts) subquery,
+    then takes that bar's first revision — not argMin over the whole window."""
     captured = []
 
     def capture(sql):
@@ -184,7 +186,10 @@ def test_fetch_strategies_sql_has_limit_1_by_strategy_instance_id():
 
     with patch("libs.computation.candle_lookup.query_dicts", side_effect=capture):
         fetch_strategies_for_candle(instrument="BTCUSDT", candle_ts=_CANDLE_TS)
-    assert "LIMIT 1 BY strategy_instance_id" in captured[0]
+    sql = captured[0]
+    assert "(strategy_instance_id, ts) IN (" in sql
+    assert "max(ts)" in sql
+    assert "GROUP BY strategy_instance_id" in sql
 
 
 @pytest.mark.unit
@@ -260,8 +265,9 @@ def test_fetch_bt_strategies_queries_bt_table():
 
 
 @pytest.mark.unit
-def test_fetch_bt_strategies_limit_1_by_strategy_instance_id():
-    """bt lookup uses LIMIT 1 BY strategy_instance_id."""
+def test_fetch_bt_strategies_selects_latest_bar_per_strategy_instance():
+    """bt lookup picks the latest bar per strategy_instance_id via a max(ts)
+    subquery, then takes that bar's first revision."""
     captured = []
 
     def capture(sql):
@@ -270,7 +276,10 @@ def test_fetch_bt_strategies_limit_1_by_strategy_instance_id():
 
     with patch("libs.computation.candle_lookup.query_dicts", side_effect=capture):
         fetch_bt_strategies_for_candle(instrument="BTCUSDT", candle_ts=_CANDLE_TS)
-    assert "LIMIT 1 BY strategy_instance_id" in captured[0]
+    sql = captured[0]
+    assert "(strategy_instance_id, ts) IN (" in sql
+    assert "max(ts)" in sql
+    assert "GROUP BY strategy_instance_id" in sql
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -317,7 +326,9 @@ def test_fetch_real_trade_sql_uses_revision_ts_filter():
         )
     sql = captured[0]
     assert "revision_ts <=" in sql
-    assert "ts + toIntervalMinute" not in sql, "must NOT use closing_ts gate for real_trade"
+    assert (
+        "ts + toIntervalMinute" not in sql
+    ), "must NOT use closing_ts gate for real_trade"
 
 
 @pytest.mark.unit
@@ -380,7 +391,9 @@ def _mk_pos_row(
         "strategy_name": strategy_name,
         "config_timeframe": config_timeframe,
         "weighting": weighting,
-        "row_json": json.dumps({"position": position, "final_signal": final_signal, "benchmark": benchmark}),
+        "row_json": json.dumps(
+            {"position": position, "final_signal": final_signal, "benchmark": benchmark}
+        ),
     }
     if bar_ts is not None:
         row["bar_ts"] = bar_ts
@@ -431,7 +444,9 @@ def test_fetch_bootstrap_seeds_returns_bootstrap_seed_with_correct_fields():
 def test_fetch_bootstrap_seeds_bar_ts_revision_ts_are_datetime_min_for_prod():
     """For prod/bt mode, bar_ts and revision_ts default to datetime.min."""
     stn_rows = [{"strategy_table_name": "strat_prod_1"}]
-    pnl_rows = [{"strategy_instance_id": "inst_001", "cumulative_pnl": 1.0, "price": 50000.0}]
+    pnl_rows = [
+        {"strategy_instance_id": "inst_001", "cumulative_pnl": 1.0, "price": 50000.0}
+    ]
     pos_rows = [_mk_pos_row("inst_001", position=0.5)]
     with patch(
         "libs.computation.bootstrap.query_dicts",
@@ -500,7 +515,9 @@ def test_fetch_bootstrap_seeds_strategy_in_history_but_not_pnl_gets_zero_pnl_pri
 def test_fetch_bootstrap_seeds_strategy_in_pnl_but_not_history_gets_zero_position():
     """Strategy in pnl table but not in history gets position=0.0."""
     stn_rows = [{"strategy_table_name": "strat_old"}]
-    pnl_rows = [{"strategy_instance_id": "inst_old", "cumulative_pnl": 10.0, "price": 80000.0}]
+    pnl_rows = [
+        {"strategy_instance_id": "inst_old", "cumulative_pnl": 10.0, "price": 80000.0}
+    ]
     pos_rows: list = []
     with patch(
         "libs.computation.bootstrap.query_dicts",
@@ -525,7 +542,9 @@ def test_fetch_bootstrap_seeds_all_keys_union_of_both_sources():
     # Two strategies: strat_A appears only in pnl, strat_B only in history.
     # Each gets its own DISTINCT + per-stn query cycle.
     stn_rows_a = [{"strategy_table_name": "strat_A"}]
-    pnl_rows_a = [{"strategy_instance_id": "inst_A", "cumulative_pnl": 1.0, "price": 90000.0}]
+    pnl_rows_a = [
+        {"strategy_instance_id": "inst_A", "cumulative_pnl": 1.0, "price": 90000.0}
+    ]
     pos_rows_a: list = []
     stn_rows_b = [{"strategy_table_name": "strat_B"}]
     pnl_rows_b: list = []
@@ -592,7 +611,14 @@ def test_fetch_bootstrap_seeds_real_trade_bar_ts_revision_ts_populated():
     expected_rev_ts = datetime(2026, 5, 9, 23, 57, 30)
     stn_rows = [{"strategy_table_name": "strat_rt"}]
     pnl_rows: list = []
-    pos_rows = [_mk_pos_row("inst_rt", position=0.8, bar_ts=expected_bar_ts, max_revision_ts=expected_rev_ts)]
+    pos_rows = [
+        _mk_pos_row(
+            "inst_rt",
+            position=0.8,
+            bar_ts=expected_bar_ts,
+            max_revision_ts=expected_rev_ts,
+        )
+    ]
     with patch(
         "libs.computation.bootstrap.query_dicts",
         side_effect=[stn_rows, pnl_rows, pos_rows, [{"cnt": 1}]],
@@ -614,12 +640,17 @@ def test_fetch_bootstrap_seeds_real_trade_bar_ts_revision_ts_populated():
 def test_fetch_bootstrap_seeds_real_trade_correct_position():
     """Real-trade mode returns correct position from argMax revision."""
     stn_rows = [{"strategy_table_name": "strat_rt"}]
-    pnl_rows = [{"strategy_instance_id": "inst_rt", "cumulative_pnl": 3.0, "price": 70000.0}]
-    pos_rows = [_mk_pos_row(
-        "inst_rt", position=-1.0,
-        bar_ts=datetime(2026, 5, 9, 22, 0, 0),
-        max_revision_ts=datetime(2026, 5, 9, 22, 5, 0),
-    )]
+    pnl_rows = [
+        {"strategy_instance_id": "inst_rt", "cumulative_pnl": 3.0, "price": 70000.0}
+    ]
+    pos_rows = [
+        _mk_pos_row(
+            "inst_rt",
+            position=-1.0,
+            bar_ts=datetime(2026, 5, 9, 22, 0, 0),
+            max_revision_ts=datetime(2026, 5, 9, 22, 5, 0),
+        )
+    ]
     with patch(
         "libs.computation.bootstrap.query_dicts",
         side_effect=[stn_rows, pnl_rows, pos_rows, [{"cnt": 1}]],
@@ -639,8 +670,12 @@ def test_fetch_bootstrap_seeds_underlying_populated_on_seed():
     """BootstrapSeed.underlying is populated from the position query so build_state_from_bootstrap
     can bucket by underlying without skipping strategies."""
     stn_rows = [{"strategy_table_name": "strat_eth_1h"}]
-    pnl_rows = [{"strategy_instance_id": "inst_001", "cumulative_pnl": -0.537, "price": 2126.15}]
-    pos_rows = [_mk_pos_row("inst_001", position=-1.0, underlying="ETH", config_timeframe="1h")]
+    pnl_rows = [
+        {"strategy_instance_id": "inst_001", "cumulative_pnl": -0.537, "price": 2126.15}
+    ]
+    pos_rows = [
+        _mk_pos_row("inst_001", position=-1.0, underlying="ETH", config_timeframe="1h")
+    ]
     with patch(
         "libs.computation.bootstrap.query_dicts",
         side_effect=[stn_rows, pnl_rows, pos_rows, [{"cnt": 1}]],
@@ -731,9 +766,27 @@ def test_fetch_walk_rows_position_comes_from_stored_pnl_rows():
     ts3 = datetime(2026, 5, 7, 3, 0, 0)
     stn_rows = [{"strategy_table_name": "strat_prod_1"}]
     pnl_rows = [
-        {"strategy_instance_id": "inst_001", "ts": ts1, "cumulative_pnl": 1.0, "price": 90000.0, "position": 0.5},
-        {"strategy_instance_id": "inst_001", "ts": ts2, "cumulative_pnl": 1.1, "price": 91000.0, "position": 1.0},
-        {"strategy_instance_id": "inst_001", "ts": ts3, "cumulative_pnl": 1.2, "price": 92000.0, "position": -0.5},
+        {
+            "strategy_instance_id": "inst_001",
+            "ts": ts1,
+            "cumulative_pnl": 1.0,
+            "price": 90000.0,
+            "position": 0.5,
+        },
+        {
+            "strategy_instance_id": "inst_001",
+            "ts": ts2,
+            "cumulative_pnl": 1.1,
+            "price": 91000.0,
+            "position": 1.0,
+        },
+        {
+            "strategy_instance_id": "inst_001",
+            "ts": ts3,
+            "cumulative_pnl": 1.2,
+            "price": 92000.0,
+            "position": -0.5,
+        },
     ]
     with patch(
         "libs.computation.bootstrap.query_dicts", side_effect=[stn_rows, pnl_rows]
@@ -771,7 +824,13 @@ def test_fetch_walk_rows_bar_ts_revision_ts_are_datetime_min_for_prod():
     row_ts = datetime(2026, 5, 7, 1, 0, 0)
     stn_rows = [{"strategy_table_name": "strat_prod_1"}]
     pnl_rows = [
-        {"strategy_instance_id": "inst_001", "ts": row_ts, "cumulative_pnl": 1.0, "price": 90000.0, "position": 0.0}
+        {
+            "strategy_instance_id": "inst_001",
+            "ts": row_ts,
+            "cumulative_pnl": 1.0,
+            "price": 90000.0,
+            "position": 0.0,
+        }
     ]
     with patch(
         "libs.computation.bootstrap.query_dicts", side_effect=[stn_rows, pnl_rows]
@@ -800,20 +859,47 @@ def test_fetch_walk_rows_real_trade_position_comes_from_stored_pnl_rows():
     ts3 = datetime(2026, 5, 7, 1, 10, 0)
     stn_rows = [{"strategy_table_name": "strat_rt"}]
     pnl_rows = [
-        {"strategy_instance_id": "inst_rt", "ts": ts1, "cumulative_pnl": 2.0, "price": 90000.0, "position": 0.0},
-        {"strategy_instance_id": "inst_rt", "ts": ts2, "cumulative_pnl": 2.1, "price": 90100.0, "position": 1.0},
-        {"strategy_instance_id": "inst_rt", "ts": ts3, "cumulative_pnl": 2.2, "price": 90200.0, "position": 1.0},
+        {
+            "strategy_instance_id": "inst_rt",
+            "ts": ts1,
+            "cumulative_pnl": 2.0,
+            "price": 90000.0,
+            "position": 0.0,
+        },
+        {
+            "strategy_instance_id": "inst_rt",
+            "ts": ts2,
+            "cumulative_pnl": 2.1,
+            "price": 90100.0,
+            "position": 1.0,
+        },
+        {
+            "strategy_instance_id": "inst_rt",
+            "ts": ts3,
+            "cumulative_pnl": 2.2,
+            "price": 90200.0,
+            "position": 1.0,
+        },
     ]
     rev_ts_a = datetime(2026, 5, 7, 0, 58, 0)
     rev_ts_b = datetime(2026, 5, 7, 1, 2, 0)
     bar_ts_common = datetime(2026, 5, 7, 0, 55, 0)
     hist_rows = [
-        {"strategy_instance_id": "inst_rt", "bar_ts": bar_ts_common, "revision_ts": rev_ts_a},
-        {"strategy_instance_id": "inst_rt", "bar_ts": bar_ts_common, "revision_ts": rev_ts_b},
+        {
+            "strategy_instance_id": "inst_rt",
+            "bar_ts": bar_ts_common,
+            "revision_ts": rev_ts_a,
+        },
+        {
+            "strategy_instance_id": "inst_rt",
+            "bar_ts": bar_ts_common,
+            "revision_ts": rev_ts_b,
+        },
     ]
     # call order: DISTINCT stns, pnl per stn, hist per stn
     with patch(
-        "libs.computation.bootstrap.query_dicts", side_effect=[stn_rows, pnl_rows, hist_rows]
+        "libs.computation.bootstrap.query_dicts",
+        side_effect=[stn_rows, pnl_rows, hist_rows],
     ):
         walk_rows = fetch_walk_rows(
             pnl_table="analytics.strategy_pnl_1min_real_trade_v2",
@@ -836,13 +922,24 @@ def test_fetch_walk_rows_real_trade_bar_ts_revision_ts_populated():
     expected_rev_ts = datetime(2026, 5, 7, 1, 2, 0)
     stn_rows = [{"strategy_table_name": "strat_rt"}]
     pnl_rows = [
-        {"strategy_instance_id": "inst_rt", "ts": row_ts, "cumulative_pnl": 2.0, "price": 90000.0, "position": 0.5}
+        {
+            "strategy_instance_id": "inst_rt",
+            "ts": row_ts,
+            "cumulative_pnl": 2.0,
+            "price": 90000.0,
+            "position": 0.5,
+        }
     ]
     hist_rows = [
-        {"strategy_instance_id": "inst_rt", "bar_ts": expected_bar_ts, "revision_ts": expected_rev_ts}
+        {
+            "strategy_instance_id": "inst_rt",
+            "bar_ts": expected_bar_ts,
+            "revision_ts": expected_rev_ts,
+        }
     ]
     with patch(
-        "libs.computation.bootstrap.query_dicts", side_effect=[stn_rows, pnl_rows, hist_rows]
+        "libs.computation.bootstrap.query_dicts",
+        side_effect=[stn_rows, pnl_rows, hist_rows],
     ):
         walk_rows = fetch_walk_rows(
             pnl_table="analytics.strategy_pnl_1min_real_trade_v2",
@@ -866,6 +963,7 @@ def test_fetch_walk_rows_real_trade_bar_ts_revision_ts_populated():
 # We test this logic directly in Python without importing a class,
 # since it mirrors the guard used by the streaming consumer's AnchorState.
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _should_apply_revision(
     anchor_bar_ts: datetime,
@@ -912,7 +1010,9 @@ def test_revision_guard_older_bar_ignored():
     anchor_rev_ts = datetime(2026, 5, 10, 11, 2, 0)
     old_bar_ts = datetime(2026, 5, 10, 10, 0, 0)
     old_rev_ts = datetime(2026, 5, 10, 10, 9, 0)  # even with newer rev_ts, older bar
-    assert not _should_apply_revision(anchor_bar_ts, anchor_rev_ts, old_bar_ts, old_rev_ts)
+    assert not _should_apply_revision(
+        anchor_bar_ts, anchor_rev_ts, old_bar_ts, old_rev_ts
+    )
 
 
 @pytest.mark.unit
@@ -1018,8 +1118,13 @@ def test_anchor_state_compute_pnl_stores_bar_ts_revision_ts():
     """compute_pnl stores bar_ts and revision_ts on the updated record."""
     state = AnchorState()
     state.set("strat_1", AnchorRecord(pnl=0.0, price=100.0))
-    state.compute_pnl("strat_1", current_price=100.0, position=0.0,
-                      bar_ts=_BAR_TS, revision_ts=_REV_TS)
+    state.compute_pnl(
+        "strat_1",
+        current_price=100.0,
+        position=0.0,
+        bar_ts=_BAR_TS,
+        revision_ts=_REV_TS,
+    )
     rec = state.get("strat_1")
     assert rec.bar_ts == _BAR_TS
     assert rec.revision_ts == _REV_TS

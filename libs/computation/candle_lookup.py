@@ -34,6 +34,7 @@ multiIf(
 @dataclass
 class StrategyBar:
     """Active bar for prod/bt: first revision, closing_ts gate applied."""
+
     strategy_table_name: str
     strategy_instance_id: str
     strategy_id: int
@@ -50,6 +51,7 @@ class StrategyBar:
 @dataclass
 class StrategyRevision:
     """Active revision for real_trade: latest revision_ts <= candle_ts."""
+
     strategy_table_name: str
     strategy_instance_id: str
     strategy_id: int
@@ -60,7 +62,7 @@ class StrategyRevision:
     position: float
     final_signal: float
     benchmark: float
-    bar_ts: datetime       # strategy_output_history_v2.ts (bar open time)
+    bar_ts: datetime  # strategy_output_history_v2.ts (bar open time)
     revision_ts: datetime
 
 
@@ -121,9 +123,17 @@ def fetch_strategies_for_candle(
 ) -> list[StrategyBar]:
     """Return active prod bar per strategy_instance_id for instrument at candle_ts.
 
-    Latest bar whose closing_ts (= ts + tf_minutes) <= candle_ts. First revision only
-    (argMin by revision_ts). Groups by strategy_instance_id so each logical strategy
-    instance is independently tracked.
+    Two steps:
+      1. Inner query: per strategy_instance_id, find the *latest* bar whose
+         closing_ts (= ts + tf_minutes) <= candle_ts, within the lookback window.
+      2. Outer query: for that latest bar only, take its *first* revision
+         (argMin by revision_ts).
+
+    The two steps must be kept separate. Grouping per strategy and taking
+    argMin(row_json, revision_ts) over the whole lookback window is WRONG: it
+    returns the row_json of the oldest revision in the window (a bar up to
+    `_LOOKBACK` old), not the first revision of the latest bar — so a stale
+    position leaks in while latest_ts points at the current bar.
     """
     underlying = instrument.removesuffix("USDT")
     ts_str = candle_ts.strftime("%Y-%m-%d %H:%M:%S")
@@ -136,17 +146,21 @@ SELECT
     underlying,
     config_timeframe,
     weighting,
-    max(ts) AS latest_ts,
+    ts AS latest_ts,
     argMin(row_json, revision_ts) AS row_json
 FROM analytics.strategy_output_history_v2
 WHERE underlying = '{underlying}'
-  AND ts + toIntervalMinute({_TF_MINUTES_EXPR_NO_ALIAS}) <= '{ts_str}'
-  AND ts >= '{ts_str}'::DateTime - INTERVAL {_LOOKBACK}
+  AND (strategy_instance_id, ts) IN (
+      SELECT strategy_instance_id, max(ts)
+      FROM analytics.strategy_output_history_v2
+      WHERE underlying = '{underlying}'
+        AND ts + toIntervalMinute({_TF_MINUTES_EXPR_NO_ALIAS}) <= '{ts_str}'
+        AND ts >= '{ts_str}'::DateTime - INTERVAL {_LOOKBACK}
+      GROUP BY strategy_instance_id
+  )
 GROUP BY
     strategy_table_name, strategy_instance_id, strategy_id, strategy_name,
-    underlying, config_timeframe, weighting
-ORDER BY strategy_instance_id, latest_ts DESC
-LIMIT 1 BY strategy_instance_id
+    underlying, config_timeframe, weighting, ts
 """
     return [_parse_strategy_bar(r) for r in query_dicts(sql)]
 
@@ -157,9 +171,10 @@ def fetch_bt_strategies_for_candle(
 ) -> list[StrategyBar]:
     """Return active bt bar per strategy_instance_id for instrument at candle_ts.
 
-    Same closing_ts gate as fetch_strategies_for_candle, but queries _bt_v2.
-    Extracts only the needed scalar fields from row_json instead of buffering
-    the full JSON blob through argMin, reducing ClickHouse memory usage.
+    Same two-step latest-bar / first-revision logic as fetch_strategies_for_candle
+    (see that docstring for why the two steps must stay separate), but queries
+    _bt_v2 and extracts only the needed scalar fields from row_json instead of
+    buffering the full JSON blob, reducing ClickHouse memory usage.
     """
     underlying = instrument.removesuffix("USDT")
     ts_str = candle_ts.strftime("%Y-%m-%d %H:%M:%S")
@@ -172,19 +187,23 @@ SELECT
     underlying,
     config_timeframe,
     weighting,
-    max(ts) AS latest_ts,
+    ts AS latest_ts,
     argMin(JSONExtractFloat(row_json, 'position'),     revision_ts) AS position,
     argMin(JSONExtractFloat(row_json, 'final_signal'), revision_ts) AS final_signal,
     argMin(JSONExtractFloat(row_json, 'benchmark'),    revision_ts) AS benchmark
 FROM analytics.strategy_output_history_bt_v2
 WHERE underlying = '{underlying}'
-  AND ts + toIntervalMinute({_TF_MINUTES_EXPR_NO_ALIAS}) <= '{ts_str}'
-  AND ts >= '{ts_str}'::DateTime - INTERVAL {_LOOKBACK}
+  AND (strategy_instance_id, ts) IN (
+      SELECT strategy_instance_id, max(ts)
+      FROM analytics.strategy_output_history_bt_v2
+      WHERE underlying = '{underlying}'
+        AND ts + toIntervalMinute({_TF_MINUTES_EXPR_NO_ALIAS}) <= '{ts_str}'
+        AND ts >= '{ts_str}'::DateTime - INTERVAL {_LOOKBACK}
+      GROUP BY strategy_instance_id
+  )
 GROUP BY
     strategy_table_name, strategy_instance_id, strategy_id, strategy_name,
-    underlying, config_timeframe, weighting
-ORDER BY strategy_instance_id, latest_ts DESC
-LIMIT 1 BY strategy_instance_id
+    underlying, config_timeframe, weighting, ts
 """
     return [_parse_strategy_bar_scalar(r) for r in query_dicts(sql)]
 
