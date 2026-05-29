@@ -23,7 +23,12 @@ from dagster import (
 
 from libs.computation import TIMEFRAME_MAP, build_rt_lookup
 
-from ..utils.clickhouse_client import get_client, query_rows
+from ..utils.clickhouse_client import (
+    get_client,
+    query_rows,
+    query_rows_stream,
+    query_scalar,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -43,12 +48,15 @@ POS_TS_TOLERANCE_MIN = 1
 # Top-N offenders included in the failure summary.
 TOP_N_OFFENDERS = 10
 
-# ClickHouse per-query memory cap (500 MB). Source scans are time-chunked
-# (_SRC_CHUNK_DAYS) to stay under it on the multi-year bt history.
+# ClickHouse per-query memory cap (500 MB). Every audit query is either an
+# aggregate (count/min/max), a single-strategy scan bounded by LIMIT 1 BY, or a
+# streamed in-order read — all of which stay well under this. The cap is a guard
+# rail, not the primary control: per-strategy scope + streaming keep both
+# ClickHouse and Python memory low (runtime is allowed to grow instead).
 QUERY_MEMORY_CAP = 524_288_000
 
-# Time-chunk width (days) for source scans. The bt source spans 2020->2026; a
-# full-history scan exceeds the cap, a 1-week window stays well under.
+# Time-chunk width (days) for the real_trade revision scan. The bt source spans
+# 2020->2026; chunking the row_json read keeps each query under the cap.
 _SRC_CHUNK_DAYS = 7
 
 # Parallel workers — matches existing pnl_strategy_v2 pattern.
@@ -143,12 +151,17 @@ def _check_phase1(
     stn: str,
     stat: StratStat,
     source: SourceFirstBar,
-    price_set: set[datetime],
+    expected_minutes: int,
     now_ts: datetime,
 ) -> Violation | None:
     """Detect start_gap / stale_end / internal_holes for one (U, S).
 
     Checks in priority order; returns the first detected violation, or None.
+
+    ``expected_minutes`` is the count of 1-min price timestamps in
+    ``[expected_min, expected_max]`` — computed server-side with a bounded
+    ``count()`` query (``_count_prices``) so we never materialize the
+    underlying's full price-timestamp set in Python.
     """
     expected_min = source.expected_min_ts
     expected_max = now_ts - timedelta(minutes=STALE_END_TOLERANCE_MIN // 2)  # now - 5m
@@ -179,9 +192,6 @@ def _check_phase1(
         )
 
     # 3. internal_holes
-    expected_minutes = sum(
-        1 for p in price_set if expected_min <= p <= expected_max
-    )
     if stat.actual_rows < expected_minutes:
         missing = expected_minutes - stat.actual_rows
         return Violation(
@@ -200,40 +210,40 @@ def _check_phase2(
     underlying: str,
     stn: str,
     q_gap_rows: list[tuple[datetime, int]],
-    price_set: set[datetime],
+    present_counts: list[int],
+    has_prices: bool,
     top_n: int = TOP_N_OFFENDERS,
 ) -> list[GapDescriptor]:
     """For one flagged strategy, derive gap descriptors trimmed by price-gap exemption.
 
     Each q_gap row is (gap_end_ts, gap_secs) where gap_secs > 60. The actual
-    gap interval is [gap_end - gap_secs, gap_end) on minute boundaries. We
-    count missing minutes inside the interval and subtract minutes that have
-    no price (since the recompute legitimately skips those). If the resulting
-    gap_minutes drops to 0, the gap is fully exempt and dropped.
+    gap interval is [gap_end - gap_secs, gap_end) on minute boundaries. We count
+    missing minutes inside the interval and subtract minutes that have no price
+    (since the recompute legitimately skips those).
+
+    ``present_counts[i]`` is the number of price timestamps strictly inside the
+    i-th gap's open interval ``(gap_start, gap_end)`` — computed server-side per
+    gap with a bounded ``count()`` (``_count_prices_strict``) rather than by
+    scanning a materialized price set. ``has_prices`` is False only when the
+    underlying has no price rows at all, in which case nothing can be exempted.
     """
     descriptors: list[GapDescriptor] = []
-    for gap_end, gap_secs in q_gap_rows:
-        gap_start_exclusive = gap_end - timedelta(seconds=gap_secs)
+    for (gap_end, gap_secs), present_strictly in zip(q_gap_rows, present_counts):
         raw_missing = gap_secs // 60
         if raw_missing <= 0:
             continue
-        if not price_set:
+        if not has_prices:
             # No price data available — cannot exempt any minutes; all raw
             # gap minutes are real holes.
             effective_holes = raw_missing
         else:
-            # Count price-present minutes strictly inside (gap_start, gap_end)
+            # Price-present minutes strictly inside (gap_start, gap_end),
             # exclusive of both endpoints. If none are present the gap is fully
-            # explained by a price outage and we drop it.
-            # Otherwise effective = raw_missing - no_price_strictly_inside
-            #                     = 1 + present_strictly_inside
-            # (+1 accounts for the gap-start boundary being a price-covered minute
-            # in a gap where at least one interior minute also has a price).
-            present_strictly = sum(
-                1
-                for p in price_set
-                if gap_start_exclusive < p < gap_end
-            )
+            # explained by a price outage and we drop it. Otherwise
+            #   effective = raw_missing - no_price_strictly_inside
+            #             = 1 + present_strictly_inside
+            # (+1 accounts for the gap-start boundary being a price-covered
+            # minute in a gap where at least one interior minute also has a price).
             effective_holes = (1 + present_strictly) if present_strictly > 0 else 0
         if effective_holes <= 0:
             continue
@@ -467,6 +477,7 @@ def _fetch_q_stat(target_table: str, underlying: str, client) -> dict[str, Strat
 SELECT strategy_table_name, min(ts), max(ts), count()
 FROM analytics.{target_table}
 WHERE underlying = '{underlying}'
+  AND ts >= toDateTime('{GLOBAL_START_TS}')
 GROUP BY strategy_table_name
 SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
 """,
@@ -483,18 +494,65 @@ SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
     return out
 
 
-def _fetch_q_px(underlying: str, client) -> set[datetime]:
-    """Q_px: 1-min price timestamps for one U since GLOBAL_START_TS."""
+def _has_prices(underlying: str, client) -> bool:
+    """Whether the underlying has any 1-min price rows since GLOBAL_START_TS.
+
+    Replaces the old ``not price_set`` test. One cheap index-only existence
+    probe per underlying — no timestamps are pulled into Python.
+    """
     instrument = _underlying_to_instrument(underlying)
-    rows = query_rows(
+    n = query_scalar(
         f"""
-SELECT ts FROM analytics.futures_price_1min
-WHERE instrument = '{instrument}' AND ts >= toDateTime('{GLOBAL_START_TS}')
+SELECT count() FROM (
+  SELECT 1 FROM analytics.futures_price_1min
+  WHERE instrument = '{instrument}' AND ts >= toDateTime('{GLOBAL_START_TS}')
+  LIMIT 1
+)
 SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
 """,
         client=client,
     )
-    return {r[0] for r in rows}
+    return bool(n)
+
+
+def _count_prices(underlying: str, start: datetime, end: datetime, client) -> int:
+    """Count 1-min price timestamps in the inclusive window [start, end] for one U.
+
+    Server-side ``count()`` over a ts range on the (instrument, ts) sort key —
+    bounded ClickHouse memory, a single scalar back to Python. Feeds Phase 1's
+    internal_holes expected-minute count without materializing the price set.
+    """
+    instrument = _underlying_to_instrument(underlying)
+    n = query_scalar(
+        f"""
+SELECT count() FROM analytics.futures_price_1min
+WHERE instrument = '{instrument}'
+  AND ts >= toDateTime('{start:%Y-%m-%d %H:%M:%S}')
+  AND ts <= toDateTime('{end:%Y-%m-%d %H:%M:%S}')
+SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
+""",
+        client=client,
+    )
+    return int(n or 0)
+
+
+def _count_prices_strict(underlying: str, start: datetime, end: datetime, client) -> int:
+    """Count 1-min price timestamps strictly inside the open interval (start, end).
+
+    Used by Phase 2's per-gap exemption; both endpoints excluded.
+    """
+    instrument = _underlying_to_instrument(underlying)
+    n = query_scalar(
+        f"""
+SELECT count() FROM analytics.futures_price_1min
+WHERE instrument = '{instrument}'
+  AND ts > toDateTime('{start:%Y-%m-%d %H:%M:%S}')
+  AND ts < toDateTime('{end:%Y-%m-%d %H:%M:%S}')
+SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
+""",
+        client=client,
+    )
+    return int(n or 0)
 
 
 def _src_time_windows(end_dt: datetime | None = None) -> list[tuple[str, str]]:
@@ -511,24 +569,24 @@ def _src_time_windows(end_dt: datetime | None = None) -> list[tuple[str, str]]:
     return windows
 
 
-def _fetch_q_src_prod_bt_single(
-    source_table: str, underlying: str, stn: str, client
-) -> tuple[list[tuple[str, float]], str | None]:
-    """Q_src (prod/bt) for ONE strategy: first-revision (ts, position) bars + tf.
+def _load_source_prod_bt(
+    source_table: str, underlying: str, stn: str, client, tf_values: list[int]
+) -> tuple[SourceFirstBar | None, list[PositionChange]]:
+    """Stream ONE prod/bt strategy's first-revision bars; reduce to changes inline.
 
-    Fetching a single strategy at a time keeps only one strategy's history
-    resident — the audit's peak-memory driver — instead of every strategy's
-    full history for the underlying at once. A single-strategy scan stays far
-    under QUERY_MEMORY_CAP, so it needs no time-chunking (unlike the
-    all-strategies scan it replaces).
+    The bar stream is consumed block-by-block via ``query_rows_stream`` and
+    collapsed on the fly into (a) the first two bars (for timeframe inference)
+    and (b) position-transition bars only. Nothing else is retained, so peak
+    Python memory is O(transitions) regardless of how many bars the strategy
+    has — a 1-min strategy with hundreds of thousands of bars still costs only
+    its handful of flips. ClickHouse side stays bounded too: ``LIMIT 1 BY ts``
+    over the (strategy_table_name, config_timeframe, ts, revision_ts) sort key
+    picks the first revision per bar without buffering row_json.
 
-    Bars come back in ascending-ts order; tf_raw is the strategy's
-    config_timeframe (None when the strategy has no source rows). manual_probe%
-    strategies are excluded, so they return ([], None) and are flagged as
-    orphans upstream.
+    Returns ``(None, [])`` when the strategy has no source rows (orphan upstream).
+    manual_probe% strategies are excluded.
     """
-    rows = query_rows(
-        f"""
+    sql = f"""
 SELECT ts_str, position, tf
 FROM (
   SELECT
@@ -546,12 +604,27 @@ FROM (
 )
 ORDER BY ts_raw
 SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
-""",
-        client=client,
-    )
-    bars = [(str(r[0]), float(r[1])) for r in rows]
-    tf_raw = str(rows[0][2]) if rows else None
-    return bars, tf_raw
+"""
+    first_two: list[tuple[str, float]] = []
+    transition_bars: list[tuple[str, float]] = []
+    tf_raw: str | None = None
+    prev_position: float | None = None
+    for r in query_rows_stream(sql, client=client):
+        ts_str = str(r[0])
+        position = float(r[1])
+        if tf_raw is None:
+            tf_raw = str(r[2])
+        if len(first_two) < 2:
+            first_two.append((ts_str, position))
+        if prev_position is None or position != prev_position:
+            transition_bars.append((ts_str, position))
+            prev_position = position
+    source = _derive_source_first_bar(first_two, tf_raw, tf_values)
+    if source is None:
+        return None, []
+    # transition_bars is already de-duplicated; _compute_source_changes_prod_bt
+    # re-applies the dedup (idempotent here) and attaches closing_ts = ts + tf.
+    return source, _compute_source_changes_prod_bt(transition_bars, source.tf_minutes)
 
 
 def _derive_source_first_bar(
@@ -578,17 +651,25 @@ def _derive_source_first_bar(
     )
 
 
-def _fetch_q_src_rt(underlying: str, client) -> list[dict]:
-    """Q_src_rt: all revisions for one U, enriched for build_rt_lookup.
+def _load_source_rt(
+    underlying: str, stn: str, client
+) -> tuple[SourceFirstBar | None, list[PositionChange]]:
+    """Stream ONE real_trade strategy's revisions; return (first-bar, changes).
 
-    build_rt_lookup re-sorts per strategy, so cross-chunk ordering is irrelevant.
+    real_trade needs every revision of the strategy (build_rt_lookup applies the
+    ``(bar_ts, revision_ts) > prev_accepted`` acceptance rule across them), so we
+    hold one strategy's revisions at a time — bounded, and far smaller than the
+    whole underlying's revision history the previous per-U fetch buffered. The
+    scan is time-chunked (``_src_time_windows``) to keep each row_json read under
+    the cap; build_rt_lookup re-sorts per strategy so chunk order is irrelevant.
+
+    Returns ``(None, [])`` when the strategy has no accepted revisions (orphan).
     """
-    out: list[dict] = []
+    revs: list[dict] = []
     for ws, we in _src_time_windows():
-        rows = query_rows(
+        for r in query_rows_stream(
             f"""
 SELECT
-  strategy_table_name,
   toString(ts),
   toString(revision_ts),
   toString(toStartOfMinute(revision_ts + INTERVAL 59 SECOND)) AS execution_ts,
@@ -596,19 +677,19 @@ SELECT
   config_timeframe AS tf
 FROM analytics.strategy_output_history_v2
 WHERE underlying = '{underlying}'
+  AND strategy_table_name = '{stn}'
   AND strategy_table_name NOT LIKE 'manual_probe%'
   AND ts >= toDateTime('{ws}') AND ts < toDateTime('{we}')
-ORDER BY strategy_table_name, ts, revision_ts
+ORDER BY ts, revision_ts
 SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
 """,
             client=client,
-        )
-        for r in rows:
-            stn, ts_s, rev_s, exec_s, position, tf = r
-            tf_minutes = TIMEFRAME_MAP.get(tf, 5)
+        ):
+            ts_s, rev_s, exec_s, position, tf = r
+            tf_minutes = TIMEFRAME_MAP.get(str(tf), 5)
             ts_dt = datetime.strptime(str(ts_s)[:19], "%Y-%m-%d %H:%M:%S")
             closing_dt = ts_dt + timedelta(minutes=tf_minutes)
-            out.append(
+            revs.append(
                 {
                     "strategy_table_name": str(stn),
                     "ts": str(ts_s),
@@ -619,7 +700,15 @@ SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
                     "config_timeframe": str(tf),
                 }
             )
-    return out
+    if not revs:
+        return None, []
+    lookup = build_rt_lookup(revs)
+    entries = lookup.get(stn, [])
+    if not entries:
+        return None, []
+    tf = TIMEFRAME_MAP.get(entries[0].rev["config_timeframe"], 5)
+    source = SourceFirstBar(expected_min_ts=entries[0].execution_ts, tf_minutes=tf)
+    return source, _compute_source_changes_rt(revs, stn)
 
 
 def _fetch_q_trans(target_table: str, underlying: str, stn: str, client) -> list[PositionChange]:
@@ -637,6 +726,7 @@ FROM (
   FROM analytics.{target_table}
   WHERE underlying = '{underlying}'
     AND strategy_table_name = '{stn}'
+    AND ts >= toDateTime('{GLOBAL_START_TS}')
 )
 WHERE position != prev_pos OR rn = 1
 ORDER BY ts
@@ -659,6 +749,7 @@ SELECT gap_end, gap_secs FROM (
   FROM analytics.{target_table}
   WHERE underlying = '{underlying}'
     AND strategy_table_name = '{stn}'
+    AND ts >= toDateTime('{GLOBAL_START_TS}')
 )
 WHERE prev_ts_secs > 0 AND gap_secs > 60
 ORDER BY gap_secs DESC
@@ -670,23 +761,30 @@ SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
     return [(r[0], int(r[1])) for r in rows]
 
 
-def _fetch_q_target_full(target_table: str, underlying: str, stn: str, client) -> list[tuple[datetime, float]]:
-    """Per-strategy full (ts, position) series from target table.
+def _iter_q_target_full(target_table: str, underlying: str, stn: str, client):
+    """Stream a strategy's full (ts, position) series in ascending-ts order.
 
-    Bounded per-strategy: ~100k rows × ~16 bytes = ~1.6 MB. Memory-safe.
+    Yields rows one at a time via ``query_rows_stream`` so the whole series is
+    never resident — critical for bt, whose backtest target can span years (far
+    more than the ~100k-row assumption the old materializing fetch was sized
+    for). ``ORDER BY ts`` rides the (strategy_table_name, ts) sort key, so
+    ClickHouse reads in-order and streams without a full server-side sort.
+    Consumed by ``_check_position_per_minute``, which only keeps a pointer plus
+    a few sample mismatches — O(1) Python memory.
     """
-    rows = query_rows(
+    for r in query_rows_stream(
         f"""
 SELECT ts, position
 FROM analytics.{target_table}
 WHERE underlying = '{underlying}'
   AND strategy_table_name = '{stn}'
+  AND ts >= toDateTime('{GLOBAL_START_TS}')
 ORDER BY ts
 SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
 """,
         client=client,
-    )
-    return [(r[0], float(r[1])) for r in rows]
+    ):
+        yield (r[0], float(r[1]))
 
 
 def _fetch_q_stat_hour(hour_table: str, underlying: str, client) -> dict[str, list[tuple[datetime, float]]]:
@@ -696,6 +794,7 @@ def _fetch_q_stat_hour(hour_table: str, underlying: str, client) -> dict[str, li
 SELECT strategy_table_name, ts, position
 FROM analytics.{hour_table}
 WHERE underlying = '{underlying}'
+  AND ts >= toDateTime('{GLOBAL_START_TS}')
 ORDER BY strategy_table_name, ts
 SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
 """,
@@ -721,46 +820,25 @@ def _audit_underlying(
     """Run phases 1-3 for all strategies of one (target_table, underlying)."""
     report = AuditReport()
 
-    # ── Fetch shared per-U projections ───────────────────────────────────────
+    # ── Enumerate strategies (small per-U aggregate) ─────────────────────────
+    # _fetch_q_stat is a GROUP BY whose result is one tiny row per strategy, so
+    # it stays cheap even on bt's large target. Everything else below is fetched
+    # per strategy with bounded/streaming queries.
     stat_by_stn = _fetch_q_stat(target_table, underlying, client)
     if not stat_by_stn:
         return report  # target has nothing for this U — nothing to verify
-    price_set = _fetch_q_px(underlying, client)
-
-    if mode == "real_trade":
-        rt_revs = _fetch_q_src_rt(underlying, client)
-        # Build first-bar info per stn from accepted revisions.
-        src_first_by_stn: dict[str, SourceFirstBar] = {}
-        # Group revs by stn first.
-        revs_by_stn: dict[str, list[dict]] = {}
-        for rev in rt_revs:
-            revs_by_stn.setdefault(rev["strategy_table_name"], []).append(rev)
-        for stn, revs in revs_by_stn.items():
-            lookup = build_rt_lookup(revs)
-            entries = lookup.get(stn, [])
-            if not entries:
-                continue
-            tf = TIMEFRAME_MAP.get(entries[0].rev["config_timeframe"], 5)
-            src_first_by_stn[stn] = SourceFirstBar(
-                expected_min_ts=entries[0].execution_ts, tf_minutes=tf
-            )
-    else:
-        # prod/bt source bars are fetched per-strategy inside the loop below so
-        # only one strategy's history is resident at a time (peak-memory driver).
-        # Sorted known timeframe values (minutes) for snap-to-nearest inference.
-        _TF_VALUES = sorted(TIMEFRAME_MAP.values())
+    has_prices = _has_prices(underlying, client)
+    _TF_VALUES = sorted(TIMEFRAME_MAP.values())  # for prod/bt timeframe inference
 
     # ── Per-strategy loop ────────────────────────────────────────────────────
     for stn, stat in stat_by_stn.items():
         report.strategies_checked += 1
         if mode == "real_trade":
-            source = src_first_by_stn.get(stn)
-            bars: list[tuple[str, float]] = []
+            source, source_changes = _load_source_rt(underlying, stn, client)
         else:
-            bars, tf_raw = _fetch_q_src_prod_bt_single(
-                source_table, underlying, stn, client
+            source, source_changes = _load_source_prod_bt(
+                source_table, underlying, stn, client, _TF_VALUES
             )
-            source = _derive_source_first_bar(bars, tf_raw, _TF_VALUES)
         if source is None:
             # Target has rows for a strategy not in source — orphaned.
             report.violations.append(
@@ -775,13 +853,28 @@ def _audit_underlying(
             )
             continue
 
-        # Phase 1
-        v1 = _check_phase1(target_table, underlying, stn, stat, source, price_set, now_ts)
+        # Phase 1 — internal_holes needs the expected-minute count, fetched as a
+        # bounded server-side count() over the price window for this strategy.
+        expected_max = now_ts - timedelta(minutes=STALE_END_TOLERANCE_MIN // 2)
+        expected_minutes = _count_prices(
+            underlying, source.expected_min_ts, expected_max, client
+        )
+        v1 = _check_phase1(
+            target_table, underlying, stn, stat, source, expected_minutes, now_ts
+        )
         if v1 is not None:
             report.violations.append(v1)
-            # Phase 2 drilldown for any flagged strategy.
+            # Phase 2 drilldown for any flagged strategy (rare path). Count
+            # price-present minutes per gap server-side instead of scanning a
+            # materialized price set.
             q_gap = _fetch_q_gap(target_table, underlying, stn, client)
-            gaps = _check_phase2(underlying, stn, q_gap, price_set)
+            present_counts = [
+                _count_prices_strict(
+                    underlying, gap_end - timedelta(seconds=gap_secs), gap_end, client
+                )
+                for gap_end, gap_secs in q_gap
+            ]
+            gaps = _check_phase2(underlying, stn, q_gap, present_counts, has_prices)
             for g in gaps:
                 report.violations.append(
                     Violation(
@@ -796,14 +889,11 @@ def _audit_underlying(
             # Continue to Phase 3 — position correctness is checked regardless
             # of coverage state.
 
-        # Phase 3: per-minute position correctness (always runs).
-        target_full = _fetch_q_target_full(target_table, underlying, stn, client)
-        if mode == "real_trade":
-            source_changes = _compute_source_changes_rt(revs_by_stn.get(stn, []), stn)
-        else:
-            source_changes = _compute_source_changes_prod_bt(bars, source.tf_minutes)
+        # Phase 3: per-minute position correctness (always runs). The target
+        # series is streamed row-by-row; _check_position_per_minute keeps only a
+        # pointer and a few samples, so memory is independent of series length.
         mismatch_count, orphan_count, samples = _check_position_per_minute(
-            source_changes, target_full
+            source_changes, _iter_q_target_full(target_table, underlying, stn, client)
         )
         if mismatch_count > 0:
             sample_str = ", ".join(
@@ -816,7 +906,7 @@ def _audit_underlying(
                     underlying=underlying,
                     stn=stn,
                     category="position_mismatch",
-                    detail=f"{mismatch_count} rows wrong (of {len(target_full)}); samples: {sample_str}",
+                    detail=f"{mismatch_count} rows wrong (of {stat.actual_rows}); samples: {sample_str}",
                     severity_minutes=mismatch_count,
                 )
             )

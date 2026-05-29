@@ -6,7 +6,7 @@ Replaces the per-asset urllib HTTP code from falcon-lakehouse.
 """
 
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 import clickhouse_connect
 from clickhouse_connect.driver.client import Client
@@ -30,6 +30,23 @@ def query_rows(sql: str, client: Optional[Client] = None) -> List[List]:
     c = client or get_client()
     result = c.query(sql)
     return [list(row) for row in result.result_rows]
+
+
+def query_rows_stream(sql: str, client: Optional[Client] = None) -> Iterator[list]:
+    """Stream a query's rows one at a time without materializing the full result.
+
+    Reads the result block-by-block over the wire (clickhouse-connect's
+    ``query_row_block_stream``) and yields each row as a list. Peak Python
+    memory is one block, not the whole result set — use this for unbounded
+    per-strategy scans (e.g. a full 1-min PnL series) where the row count can
+    reach the millions. Pair it with an ``ORDER BY`` on the table's sort-key
+    prefix so ClickHouse streams in-order and keeps server memory low too.
+    """
+    c = client or get_client()
+    with c.query_row_block_stream(sql) as stream:
+        for block in stream:
+            for row in block:
+                yield list(row)
 
 
 def query_dicts(sql: str, client: Optional[Client] = None) -> List[Dict]:
