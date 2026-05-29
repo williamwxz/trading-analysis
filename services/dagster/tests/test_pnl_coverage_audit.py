@@ -566,3 +566,54 @@ class TestPositionPerMinute:
         mismatches, _, samples = _check_position_per_minute(source, target)
         assert mismatches == 20
         assert len(samples) == TOP_N_OFFENDERS
+
+
+# ── Target-side reads must be bounded to GLOBAL_START_TS ──
+
+
+class TestTargetReadsBounded:
+    """Every target-side query must filter ts >= GLOBAL_START_TS.
+
+    Regression: the bt target table spans 2020->now (1.24B rows, up to ~3.1M
+    rows for a single strategy). Unbounded `_fetch_q_target_full` loaded a whole
+    strategy's 6-year series into Python (~440 MB) and, with 4 parallel workers,
+    OOM-killed the audit step. The audit only compares against source/price data
+    that already starts at GLOBAL_START_TS, so target reads must be bounded too.
+    """
+
+    def _capture_sql(self, monkeypatch):
+        from services.dagster.trading_dagster.assets import pnl_coverage_audit as mod
+
+        captured: list[str] = []
+
+        def fake_query_rows(sql, client=None, **kwargs):
+            captured.append(sql)
+            return []
+
+        monkeypatch.setattr(mod, "query_rows", fake_query_rows)
+        return mod, captured
+
+    def test_fetch_q_stat_is_bounded(self, monkeypatch):
+        mod, captured = self._capture_sql(monkeypatch)
+        mod._fetch_q_stat("strategy_pnl_1min_bt_v2", "BTC", None)
+        assert mod.GLOBAL_START_TS in captured[0]
+
+    def test_fetch_q_target_full_is_bounded(self, monkeypatch):
+        mod, captured = self._capture_sql(monkeypatch)
+        mod._fetch_q_target_full("strategy_pnl_1min_bt_v2", "BTC", "S1", None)
+        assert mod.GLOBAL_START_TS in captured[0]
+
+    def test_fetch_q_gap_is_bounded(self, monkeypatch):
+        mod, captured = self._capture_sql(monkeypatch)
+        mod._fetch_q_gap("strategy_pnl_1min_bt_v2", "BTC", "S1", None)
+        assert mod.GLOBAL_START_TS in captured[0]
+
+    def test_fetch_q_trans_is_bounded(self, monkeypatch):
+        mod, captured = self._capture_sql(monkeypatch)
+        mod._fetch_q_trans("strategy_pnl_1min_bt_v2", "BTC", "S1", None)
+        assert mod.GLOBAL_START_TS in captured[0]
+
+    def test_fetch_q_stat_hour_is_bounded(self, monkeypatch):
+        mod, captured = self._capture_sql(monkeypatch)
+        mod._fetch_q_stat_hour("strategy_pnl_1hour_bt_v2", "BTC", None)
+        assert mod.GLOBAL_START_TS in captured[0]
