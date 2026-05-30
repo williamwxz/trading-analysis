@@ -17,7 +17,6 @@ jobs:
       dagster:      ${{ steps.filter.outputs.dagster      == 'true' || steps.filter.outputs.terraform == 'true' || steps.force.outputs.dagster      == 'true' }}
       streaming:    ${{ steps.filter.outputs.streaming    == 'true' || steps.filter.outputs.terraform == 'true' || steps.force.outputs.streaming    == 'true' }}
       pnl-consumer: ${{ steps.filter.outputs.pnl-consumer == 'true' || steps.filter.outputs.terraform == 'true' || steps.force.outputs.pnl-consumer == 'true' }}
-      flink-pnl:    ${{ steps.filter.outputs.flink-pnl    == 'true' || steps.filter.outputs.terraform == 'true' || steps.force.outputs.flink-pnl    == 'true' }}
       terraform:    ${{ steps.filter.outputs.terraform    == 'true' || steps.force.outputs.terraform    == 'true' }}
       grafana:      ${{ steps.filter.outputs.grafana      == 'true' || steps.filter.outputs.terraform == 'true' || steps.force.outputs.grafana      == 'true' }}
     steps:
@@ -37,10 +36,6 @@ jobs:
             pnl-consumer:
               - 'services/pnl_consumer/**'
               - 'libs/**'
-            flink-pnl:
-              - 'services/flink_pnl/**'
-              - 'libs/**'
-              - 'services/streaming/streaming/models.py'
             terraform:
               - 'infra/terraform/**'
             grafana:
@@ -53,7 +48,6 @@ jobs:
           echo "dagster=true"      >> $GITHUB_OUTPUT
           echo "streaming=true"    >> $GITHUB_OUTPUT
           echo "pnl-consumer=true" >> $GITHUB_OUTPUT
-          echo "flink-pnl=true"    >> $GITHUB_OUTPUT
           echo "terraform=true"    >> $GITHUB_OUTPUT
           echo "grafana=true"      >> $GITHUB_OUTPUT
 
@@ -507,115 +501,6 @@ jobs:
               echo "ERROR: timed out waiting for pnl-consumer stability"; exit 1
             fi
             sleep 15
-          done
-
-  build-flink-pnl:
-    runs-on: ubuntu-latest
-    needs: [test, terraform, detect-changes]
-    if: |
-      always() &&
-      github.event_name != 'pull_request' &&
-      needs.test.result == 'success' &&
-      (needs.terraform.result == 'success' || needs.terraform.result == 'skipped') &&
-      needs.detect-changes.outputs.flink-pnl == 'true'
-    permissions:
-      id-token: write
-      contents: read
-    outputs:
-      image_tag: ${{ steps.build.outputs.image_tag }}
-    steps:
-      - uses: actions/checkout@v6.0.2
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.GHA_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Login to ECR
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Build and push flink-pnl image
-        id: build
-        env:
-          REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
-        run: |
-          [ -n "$REGISTRY" ] || { echo "ERROR: REGISTRY is empty"; exit 1; }
-          IMAGE_URI=$REGISTRY/trading-analysis-flink-pnl:${{ github.sha }}
-          IMAGE_CACHE=$REGISTRY/trading-analysis-flink-pnl:cache
-          docker buildx build \
-            -f services/flink_pnl/Dockerfile \
-            --cache-from type=registry,ref=$IMAGE_CACHE \
-            --cache-to   type=registry,ref=$IMAGE_CACHE,mode=max \
-            --provenance=false \
-            -t $IMAGE_URI \
-            --push .
-          echo "image_tag=${{ github.sha }}" >> $GITHUB_OUTPUT
-
-  deploy-flink-pnl:
-    runs-on: ubuntu-latest
-    needs: [build-flink-pnl, detect-changes]
-    if: |
-      always() &&
-      needs.build-flink-pnl.result == 'success' &&
-      needs.detect-changes.outputs.flink-pnl == 'true'
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.GHA_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Deploy flink-pnl to ECS
-        env:
-          IMAGE_TAG: ${{ needs.build-flink-pnl.outputs.image_tag }}
-          DEPLOY_REGION: ${{ secrets.AWS_REGION }}
-          ECS_CLUSTER: trading-analysis
-          REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
-        run: |
-          set -eu
-          [ -n "$IMAGE_TAG" ] || { echo "ERROR: IMAGE_TAG is empty — build job output missing"; exit 1; }
-          IMAGE_URI=$REGISTRY/trading-analysis-flink-pnl:$IMAGE_TAG
-          for CURVE in price prod real-trade bt; do
-            TASK_FAMILY="trading-analysis-flink-pnl-${CURVE}"
-            echo "==> Deploying $TASK_FAMILY"
-            TASK_DEF=$(aws ecs describe-task-definition \
-              --task-definition "$TASK_FAMILY" \
-              --region $DEPLOY_REGION \
-              --query taskDefinition \
-              --output json)
-            NEW_TASK=$(echo "$TASK_DEF" | python3 -c "
-          import sys, json
-          img = sys.argv[1]
-          td = json.load(sys.stdin)
-          for c in td['containerDefinitions']:
-              if c['name'] == 'flink-pnl':
-                  c['image'] = img
-          for k in ('taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy'):
-              td.pop(k, None)
-          print(json.dumps(td))
-            " "$IMAGE_URI")
-            NEW_ARN=$(aws ecs register-task-definition \
-              --cli-input-json "$NEW_TASK" \
-              --region $DEPLOY_REGION \
-              --query taskDefinition.taskDefinitionArn \
-              --output text)
-            [ -n "$NEW_ARN" ] || { echo "ERROR: register-task-definition returned empty ARN for $TASK_FAMILY"; exit 1; }
-            echo "Registered: $NEW_ARN"
-            aws ecs update-service \
-              --cluster $ECS_CLUSTER \
-              --service "trading-analysis-flink-pnl-${CURVE}" \
-              --task-definition "$NEW_ARN" \
-              --force-new-deployment \
-              --region $DEPLOY_REGION \
-              --output json > /dev/null
-            echo "flink-pnl-${CURVE} deploy triggered"
           done
 
   terraform:
