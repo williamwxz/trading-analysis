@@ -55,49 +55,6 @@ locals {
     Environment = var.environment
     ManagedBy   = "terraform"
   }
-
-  flink_pnl_sinks = {
-    price = {
-      enable_price      = "false"
-      enable_prod       = "false"
-      enable_real_trade = "false"
-      enable_bt         = "false"
-      group_id          = "flink-pnl-consumer-price"
-      desired_count     = 0
-      dry_run           = "true"
-      clickhouse_user   = "streaming"
-    }
-    prod = {
-      enable_price      = "false"
-      enable_prod       = "true"
-      enable_real_trade = "false"
-      enable_bt         = "false"
-      group_id          = "flink-pnl-consumer-prod"
-      desired_count     = 0
-      dry_run           = "true"
-      clickhouse_user   = "streaming"
-    }
-    real-trade = {
-      enable_price      = "false"
-      enable_prod       = "false"
-      enable_real_trade = "true"
-      enable_bt         = "false"
-      group_id          = "flink-pnl-consumer-v2"
-      desired_count     = 0
-      dry_run           = "false"
-      clickhouse_user   = "streaming"
-    }
-    bt = {
-      enable_price      = "false"
-      enable_prod       = "false"
-      enable_real_trade = "false"
-      enable_bt         = "true"
-      group_id          = "flink-pnl-consumer-bt"
-      desired_count     = 0
-      dry_run           = "true"
-      clickhouse_user   = "streaming"
-    }
-  }
 }
 
 
@@ -184,6 +141,14 @@ resource "aws_security_group" "nat" {
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = [aws_subnet.private.cidr_block]
+  }
+
+  # Dagster UI — public access to port 3000 (DNAT forwards to Dagster Fargate task)
+  ingress {
+    from_port   = 3000
+    to_port     = 3000
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
   }
 
   egress {
@@ -337,8 +302,8 @@ resource "aws_ecs_task_definition" "dagster" {
   family                   = "${local.name_prefix}-dagster"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = 1024
-  memory                   = 2048
+  cpu                      = 512
+  memory                   = 1024
   execution_role_arn       = aws_iam_role.ecs_execution.arn
   task_role_arn            = aws_iam_role.ecs_task.arn
 
@@ -477,14 +442,6 @@ resource "aws_ecs_service" "dagster" {
     assign_public_ip = false
   }
 
-  load_balancer {
-    target_group_arn = aws_lb_target_group.dagster.arn
-    container_name   = "dagster-webserver"
-    container_port   = 3000
-  }
-
-  health_check_grace_period_seconds = 60
-
   tags = local.common_tags
 }
 
@@ -498,12 +455,13 @@ resource "aws_security_group" "ecs_tasks" {
   name_prefix = "${local.name_prefix}-ecs-"
   vpc_id      = aws_vpc.main.id
 
-  # Allow port 3000 only from the ALB
+  # Dagster UI — port 3000 accepted only from the NAT instance (which DNATs
+  # public traffic on its EIP to this task's private IP).
   ingress {
     from_port       = 3000
     to_port         = 3000
     protocol        = "tcp"
-    security_groups = [aws_security_group.alb.id]
+    security_groups = [aws_security_group.nat.id]
   }
 
   # All outbound
@@ -519,94 +477,6 @@ resource "aws_security_group" "ecs_tasks" {
   lifecycle {
     create_before_destroy = true
   }
-}
-
-resource "aws_security_group" "alb" {
-  name_prefix = "${local.name_prefix}-alb-"
-  vpc_id      = aws_vpc.main.id
-
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = local.common_tags
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ALB — Dagster UI
-# ─────────────────────────────────────────────────────────────────────────────
-
-resource "aws_lb" "dagster" {
-  name               = "${local.name_prefix}-dagster"
-  internal           = false
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb.id]
-  subnets            = aws_subnet.public[*].id
-
-  tags = local.common_tags
-}
-
-resource "aws_lb_target_group" "dagster" {
-  name        = "${local.name_prefix}-dagster"
-  port        = 3000
-  protocol    = "HTTP"
-  vpc_id      = aws_vpc.main.id
-  target_type = "ip"
-
-  health_check {
-    path                = "/"
-    protocol            = "HTTP"
-    healthy_threshold   = 2
-    unhealthy_threshold = 3
-    interval            = 30
-    timeout             = 5
-    matcher             = "200-399"
-  }
-
-  tags = local.common_tags
-}
-
-resource "aws_lb_listener" "dagster_http" {
-  load_balancer_arn = aws_lb.dagster.arn
-  port              = 80
-  protocol          = "HTTP"
-
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.dagster.arn
-  }
-
-  tags = local.common_tags
-}
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# VPC Endpoints — ECR + S3 (bypass NAT for image pulls from private subnet)
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Security group for interface endpoints (allow HTTPS from ECS tasks)
-# S3 gateway endpoint (free — ECR layers are stored in S3)
-# ECR image pulls route through the NAT instance instead of Interface endpoints
-resource "aws_vpc_endpoint" "s3" {
-  vpc_id            = aws_vpc.main.id
-  service_name      = "com.amazonaws.${var.aws_region}.s3"
-  vpc_endpoint_type = "Gateway"
-  route_table_ids   = [aws_route_table.private.id]
-  tags              = merge(local.common_tags, { Name = "${local.name_prefix}-s3" })
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1451,176 +1321,8 @@ resource "aws_cloudwatch_metric_alarm" "pnl_consumer_crash" {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Flink PnL — ECR, IAM task role, CloudWatch log group, ECS task + service
-# Runs alongside pnl_consumer during evaluation. desired_count=0 until validated.
-# ─────────────────────────────────────────────────────────────────────────────
-
-resource "aws_s3_bucket" "flink_pnl_checkpoints" {
-  bucket = "trading-analysis-flink-checkpoints-068704208855"
-  tags   = local.common_tags
-}
-
-resource "aws_s3_bucket_versioning" "flink_pnl_checkpoints" {
-  bucket = aws_s3_bucket.flink_pnl_checkpoints.id
-  versioning_configuration {
-    status = "Enabled"
-  }
-}
-
-resource "aws_s3_bucket_lifecycle_configuration" "flink_pnl_checkpoints" {
-  bucket = aws_s3_bucket.flink_pnl_checkpoints.id
-
-  rule {
-    id     = "expire-old-checkpoints"
-    status = "Enabled"
-
-    filter {
-      prefix = "flink-pnl-checkpoints/"
-    }
-
-    expiration {
-      days = 7
-    }
-  }
-}
-
-resource "aws_ecr_repository" "flink_pnl" {
-  name                 = "trading-analysis-flink-pnl"
-  image_tag_mutability = "MUTABLE"
-  tags                 = local.common_tags
-}
-
-resource "aws_iam_role" "flink_pnl_task" {
-  name = "${local.name_prefix}-flink-pnl-task"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect    = "Allow"
-      Principal = { Service = "ecs-tasks.amazonaws.com" }
-      Action    = "sts:AssumeRole"
-    }]
-  })
-  tags = local.common_tags
-}
-
-resource "aws_iam_role_policy" "flink_pnl_s3" {
-  name = "flink-pnl-s3-checkpoints"
-  role = aws_iam_role.flink_pnl_task.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
-      Resource = [
-        aws_s3_bucket.flink_pnl_checkpoints.arn,
-        "${aws_s3_bucket.flink_pnl_checkpoints.arn}/checkpoints/*",
-      ]
-    }]
-  })
-}
-
-resource "aws_cloudwatch_log_group" "flink_pnl" {
-  for_each          = local.flink_pnl_sinks
-  name              = "/ecs/${local.name_prefix}-flink-pnl-${each.key}"
-  retention_in_days = 7
-  tags              = local.common_tags
-}
-
-resource "aws_ecs_task_definition" "flink_pnl" {
-  for_each                 = local.flink_pnl_sinks
-  family                   = "${local.name_prefix}-flink-pnl-${each.key}"
-  requires_compatibilities = ["FARGATE"]
-  network_mode             = "awsvpc"
-  cpu                      = 1024
-  memory                   = 3072
-  execution_role_arn       = aws_iam_role.ecs_execution.arn
-  task_role_arn            = aws_iam_role.flink_pnl_task.arn
-
-  container_definitions = jsonencode([{
-    name      = "flink-pnl"
-    image     = "${aws_ecr_repository.flink_pnl.repository_url}:latest"
-    essential = true
-    secrets = [
-      { name = "CLICKHOUSE_HOST",     valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
-      { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
-    ]
-    environment = [
-      { name = "CLICKHOUSE_PORT",        value = "8443" },
-      { name = "CLICKHOUSE_USER",        value = each.value.clickhouse_user },
-      { name = "CLICKHOUSE_SECURE",      value = "true" },
-      { name = "REDPANDA_BROKERS",       value = "redpanda.${local.name_prefix}.local:9092" },
-      { name = "KAFKA_GROUP_ID",         value = each.value.group_id },
-      { name = "AWS_REGION",             value = var.aws_region },
-      { name = "ENABLE_PRICE_SINK",      value = each.value.enable_price },
-      { name = "ENABLE_PROD_SINK",       value = each.value.enable_prod },
-      { name = "ENABLE_BT_SINK",         value = each.value.enable_bt },
-      { name = "ENABLE_REAL_TRADE_SINK", value = each.value.enable_real_trade },
-      { name = "DRY_RUN",                value = each.value.dry_run },
-    ]
-    logConfiguration = {
-      logDriver = "awslogs"
-      options = {
-        "awslogs-group"         = aws_cloudwatch_log_group.flink_pnl[each.key].name
-        "awslogs-region"        = var.aws_region
-        "awslogs-stream-prefix" = "flink-pnl-${each.key}"
-      }
-    }
-  }])
-
-  tags = local.common_tags
-}
-
-resource "aws_ecs_service" "flink_pnl" {
-  for_each        = local.flink_pnl_sinks
-  name            = "${local.name_prefix}-flink-pnl-${each.key}"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.flink_pnl[each.key].arn
-  desired_count   = each.value.desired_count
-
-  capacity_provider_strategy {
-    capacity_provider = "FARGATE_SPOT"
-    weight            = 1
-  }
-
-  network_configuration {
-    subnets          = [aws_subnet.private.id]
-    security_groups  = [aws_security_group.ecs_tasks.id]
-    assign_public_ip = false
-  }
-
-  tags = local.common_tags
-}
-
-resource "aws_cloudwatch_metric_alarm" "flink_pnl_crash" {
-  for_each = local.flink_pnl_sinks
-
-  alarm_name          = "${local.name_prefix}-flink-pnl-${each.key}-crash-loop"
-  alarm_description   = "flink-pnl-${each.key} stopped >= 3 times in 10 min (crash loop)"
-  namespace           = "ECS/ContainerInsights"
-  metric_name         = "StoppedTaskCount"
-  dimensions = {
-    ClusterName = aws_ecs_cluster.main.name
-    ServiceName = aws_ecs_service.flink_pnl[each.key].name
-  }
-  statistic           = "Sum"
-  period              = 600
-  evaluation_periods  = 1
-  threshold           = 3
-  comparison_operator = "GreaterThanOrEqualToThreshold"
-  treat_missing_data  = "notBreaching"
-
-  tags = local.common_tags
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Outputs
 # ─────────────────────────────────────────────────────────────────────────────
-
-output "flink_pnl_checkpoint_bucket" {
-  value       = aws_s3_bucket.flink_pnl_checkpoints.bucket
-  description = "S3 bucket used for Flink PnL job checkpoints"
-}
 
 output "ecs_cluster_name" {
   value = aws_ecs_cluster.main.name
@@ -1631,8 +1333,8 @@ output "ecr_repository_url" {
 }
 
 output "dagster_url" {
-  value       = "http://${aws_lb.dagster.dns_name}"
-  description = "Dagster UI - ALB DNS name"
+  value       = "http://${aws_eip.nat.public_ip}:3000"
+  description = "Dagster UI - NAT instance EIP (DNAT forwards :3000 to Dagster task)"
 }
 
 output "nat_static_ip" {
