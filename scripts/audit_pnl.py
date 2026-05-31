@@ -23,6 +23,7 @@ import re
 import sys
 import uuid
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -824,69 +825,152 @@ def fix_bt_strategies(
     for f in fixes:
         by_underlying.setdefault(f.underlying, []).append(f)
 
-    for underlying, group in sorted(by_underlying.items()):
-        for f in group:
-            window_start = f.failure_ts
-            window_end = f.window_end if f.window_end is not None else now_ts
-            ts_start = window_start.strftime("%Y-%m-%d %H:%M:%S")
-            ts_end = (window_end + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
-            log.info(
-                "[bt/%s] %s: window [%s, %s)",
+    # Each underlying is processed independently — one bar fetch + one price
+    # fetch shared across all strategies of that underlying, then a single batch
+    # INSERT, then a per-underlying hour-table refresh as a checkpoint. If the
+    # script is killed mid-run, completed underlyings have both minute and hour
+    # tables consistent; only the in-flight underlying is partial (and its
+    # remaining violations will surface on the next audit run).
+    with ThreadPoolExecutor(max_workers=_BT_FIX_WORKERS) as pool:
+        futures = {
+            pool.submit(
+                _fix_bt_underlying, underlying, group, dry_run=dry_run, now_ts=now_ts
+            ): underlying
+            for underlying, group in sorted(by_underlying.items())
+        }
+        for future in as_completed(futures):
+            underlying = futures[future]
+            try:
+                future.result()
+            except Exception:
+                log.exception("[bt/%s] worker failed", underlying)
+                raise
+
+
+_BT_FIX_WORKERS = 4
+
+
+def _fix_bt_underlying(
+    underlying: str,
+    fixes: list[StrategyFix],
+    *,
+    dry_run: bool,
+    now_ts: datetime,
+) -> None:
+    """Repair all bt strategies of one underlying in a single batched pass.
+
+    Runs in its own thread with its own ClickHouse client (clickhouse-connect
+    clients aren't thread-safe). One bar fetch + one price fetch over the union
+    window, per-strategy DELETE + compute_bt_pnl, a single batch INSERT, then
+    a scoped hour-table refresh for THIS underlying as a checkpoint.
+    """
+    src = SOURCE_TABLE["bt"]
+    tgt = TARGET_TABLE["bt"]
+    client = get_client()
+
+    # Union window across all strategies in this underlying.
+    earliest = min(f.failure_ts for f in fixes)
+    latest_end = max(
+        (f.window_end if f.window_end is not None else now_ts) for f in fixes
+    )
+    ts_start = earliest.strftime("%Y-%m-%d %H:%M:%S")
+    ts_end = (latest_end + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+    log.info(
+        "[bt/%s] union window [%s, %s) for %d strategies",
+        underlying,
+        ts_start,
+        ts_end,
+        len(fixes),
+    )
+
+    all_bars = fetch_new_bars_bt(src, underlying, ts_start, ts_end, client)
+    bars_by_stn: dict[str, list[dict]] = {}
+    for b in all_bars:
+        bars_by_stn.setdefault(b["strategy_table_name"], []).append(b)
+
+    prices_map = fetch_prices_multi(
+        [underlying], ts_start, ts_end, client, extend_minutes=1440
+    )
+    prices = prices_map.pop(underlying, {})
+
+    all_rows: list[list] = []
+    for f in fixes:
+        window_start = f.failure_ts
+        window_end = f.window_end if f.window_end is not None else now_ts
+        ws_str = window_start.strftime("%Y-%m-%d %H:%M:%S")
+        we_str = (window_end + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+        strat_bars = bars_by_stn.get(f.strategy_table_name, [])
+        if not strat_bars:
+            log.warning(
+                "[bt/%s] %s: no source bars in window — skipping",
                 underlying,
                 f.strategy_table_name,
-                ts_start,
-                ts_end,
+            )
+            continue
+
+        if not dry_run:
+            client.command(
+                f"DELETE FROM analytics.{tgt} "
+                f"WHERE strategy_table_name = '{_q(f.strategy_table_name)}' "
+                f"  AND ts >= toDateTime('{ws_str}') "
+                f"  AND ts <  toDateTime('{we_str}')"
             )
 
-            bars = fetch_new_bars_bt(src, underlying, ts_start, ts_end, client)
-            bars = [
-                b for b in bars if b["strategy_table_name"] == f.strategy_table_name
-            ]
-            if not bars:
-                log.warning("[bt/%s] no source bars in window — skipping", underlying)
-                continue
+        rows = compute_bt_pnl(strat_bars, prices)
+        f.rows_written = len(rows)
+        f.fix_applied = not dry_run
+        all_rows.extend(rows)
+        log.info(
+            "[bt/%s] %s: %d rows",
+            underlying,
+            f.strategy_table_name,
+            f.rows_written,
+        )
 
-            prices_map = fetch_prices_multi(
-                [underlying], ts_start, ts_end, client, extend_minutes=1440
+    if not dry_run and all_rows:
+        _prepare_rows_for_insert(all_rows)
+        for i in range(0, len(all_rows), BATCH_SIZE):
+            client.insert(
+                f"analytics.{tgt}",
+                all_rows[i : i + BATCH_SIZE],
+                column_names=INSERT_COLUMNS,
             )
-            prices = prices_map.pop(underlying, {})
 
-            if not dry_run:
-                client.command(
-                    f"DELETE FROM analytics.{tgt} "
-                    f"WHERE strategy_table_name = '{_q(f.strategy_table_name)}' "
-                    f"  AND ts >= toDateTime('{ts_start}') "
-                    f"  AND ts <  toDateTime('{ts_end}')"
-                )
-
-            rows = compute_bt_pnl(bars, prices)
-            f.rows_written = len(rows)
-            f.fix_applied = not dry_run
-            if not dry_run and rows:
-                _prepare_rows_for_insert(rows)
-                client.insert(f"analytics.{tgt}", rows, column_names=INSERT_COLUMNS)
-            log.info(
-                "[bt/%s] %s: %d rows", underlying, f.strategy_table_name, f.rows_written
-            )
+    # Per-underlying hour-table refresh — the checkpoint that makes partial
+    # runs leave consistent state.
+    refresh_hour_table(
+        "bt", earliest, client, dry_run=dry_run, underlying=underlying
+    )
 
 
 def refresh_hour_table(
-    type_: Mode, earliest_ts: datetime, client, *, dry_run: bool
+    type_: Mode,
+    earliest_ts: datetime,
+    client,
+    *,
+    dry_run: bool,
+    underlying: str | None = None,
 ) -> None:
     """Rebuild the 1-hour table from the 1-min table for ts >= earliest_ts.
 
     SQL pattern lifted verbatim from the existing backfill scripts (proven).
+    Optional ``underlying`` filter scopes both DELETE and INSERT so per-underlying
+    checkpoint refreshes can run in parallel without racing on each other's rows.
     """
     hour = HOUR_TABLE[type_]
     minute = TARGET_TABLE[type_]
     ts_str = earliest_ts.strftime("%Y-%m-%d %H:%M:%S")
+    u_clause = f" AND underlying = '{_q(underlying)}'" if underlying else ""
+    scope_str = f"{type_}/{underlying}" if underlying else type_
     if dry_run:
-        log.info("[hour-refresh:%s] DRY-RUN would rebuild from %s", type_, ts_str)
+        log.info(
+            "[hour-refresh:%s] DRY-RUN would rebuild from %s", scope_str, ts_str
+        )
         return
-    log.info("[hour-refresh:%s] rebuilding from %s", type_, ts_str)
+    log.info("[hour-refresh:%s] rebuilding from %s", scope_str, ts_str)
     client.command(
         f"DELETE FROM analytics.{hour} "
-        f"WHERE ts >= toStartOfHour(toDateTime('{ts_str}'))"
+        f"WHERE ts >= toStartOfHour(toDateTime('{ts_str}')){u_clause}"
     )
     client.command(f"""
 INSERT INTO analytics.{hour}
@@ -905,7 +989,7 @@ SELECT
 FROM (
     SELECT *, ts AS minute_ts
     FROM analytics.{minute}
-    WHERE ts >= toStartOfHour(toDateTime('{ts_str}'))
+    WHERE ts >= toStartOfHour(toDateTime('{ts_str}')){u_clause}
     ORDER BY strategy_table_name, strategy_id, strategy_name, underlying,
              config_timeframe, source, version, ts, updated_at DESC
     LIMIT 1 BY strategy_table_name, strategy_id, strategy_name, underlying,
@@ -914,7 +998,7 @@ FROM (
 GROUP BY strategy_table_name, strategy_id, strategy_name, underlying,
          config_timeframe, source, version, toStartOfHour(minute_ts)
 """)
-    log.info("[hour-refresh:%s] done", type_)
+    log.info("[hour-refresh:%s] done", scope_str)
 
 
 # ── section E: state file + history (Task 6) ────────────────────────────────
@@ -1234,12 +1318,12 @@ def _run_fixes(
             if ecs and not no_pause and not dry_run:
                 resume_consumer(ecs, t)
 
-    # bt: window-local, no consumer pause.
+    # bt: window-local, no consumer pause. fix_bt_strategies handles its own
+    # per-underlying hour-table refresh as a checkpoint, so no end-of-run
+    # refresh is needed here.
     bt_fixes = fixes_by_type["bt"]
     if bt_fixes:
         fix_bt_strategies(bt_fixes, client, dry_run=dry_run, now_ts=now_ts)
-        earliest = min(f.failure_ts for f in bt_fixes)
-        refresh_hour_table("bt", earliest, client, dry_run=dry_run)
 
     # Hour-sync-only failures: refresh hour table even when no minute writes happened.
     for t in TYPES:
@@ -1344,11 +1428,12 @@ def main() -> int:
                 fix_prod_rt_strategies(
                     t, synthetic, client, dry_run=args.dry_run, now_ts=now_ts
                 )
+                refresh_hour_table(t, ws, client, dry_run=args.dry_run)
             else:
+                # fix_bt_strategies refreshes its own hour table per underlying.
                 fix_bt_strategies(
                     synthetic, client, dry_run=args.dry_run, now_ts=now_ts
                 )
-            refresh_hour_table(t, ws, client, dry_run=args.dry_run)
         finally:
             if ecs:
                 resume_consumer(ecs, t)
