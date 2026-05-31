@@ -50,3 +50,4 @@ flink_job/connectors/*.jar
 .telemetry/
 
 .claude/
+audit_reports/
