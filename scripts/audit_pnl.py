@@ -309,13 +309,16 @@ def find_midgap(
     where_u = f" AND underlying = '{underlying_filter}'" if underlying_filter else ""
 
     # Phase 1: which strategies have any mid-history gap.
+    # Alias `any(underlying)` as `und` (not `underlying`) to avoid
+    # ClickHouse resolving the WHERE-clause `underlying = '...'` against
+    # the aliased aggregate, which raises ILLEGAL_AGGREGATION.
     flag_sql = f"""
-    SELECT strategy_table_name, any(underlying) AS underlying
+    SELECT strategy_table_name, any(underlying) AS und
     FROM analytics.{tgt}
     WHERE ts >= toDateTime('{GLOBAL_START_TS}'){where_u}
     GROUP BY strategy_table_name
     HAVING count(DISTINCT toStartOfDay(ts)) < dateDiff('day', min(ts), max(ts)) + 1
-    ORDER BY underlying, strategy_table_name
+    ORDER BY und, strategy_table_name
     """
     flagged = [(str(s), str(u)) for s, u in client.query(flag_sql).result_rows]
 
