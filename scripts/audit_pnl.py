@@ -898,15 +898,27 @@ def _fix_bt_underlying(
     )
     ts_start = earliest.strftime("%Y-%m-%d %H:%M:%S")
     ts_end = (latest_end + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+
+    # Extend the bar-fetch start back by the largest timeframe (1d = 1440min)
+    # so any bar whose coverage extends INTO the window — but whose `ts` falls
+    # just before window_start — is included. Without this lookback,
+    # `compute_bt_pnl` would produce no output for the boundary minutes between
+    # window_start and the first fetched bar's execution_ts, leaving gaps
+    # (strategy_count drops) and discontinuities at the boundary
+    # (shark-turn in cumulative_pnl) in the recomputed range.
+    bar_fetch_start = (earliest - timedelta(minutes=1440)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
     log.info(
-        "[bt/%s] union window [%s, %s) for %d strategies",
+        "[bt/%s] union window [%s, %s) (bar fetch from %s) for %d strategies",
         underlying,
         ts_start,
         ts_end,
+        bar_fetch_start,
         len(fixes),
     )
 
-    all_bars = fetch_new_bars_bt(src, underlying, ts_start, ts_end, client)
+    all_bars = fetch_new_bars_bt(src, underlying, bar_fetch_start, ts_end, client)
     bars_by_stn: dict[str, list[dict]] = {}
     for b in all_bars:
         bars_by_stn.setdefault(b["strategy_table_name"], []).append(b)
@@ -940,6 +952,12 @@ def _fix_bt_underlying(
             )
 
         rows = compute_bt_pnl(strat_bars, prices)
+        # The lookback fetched bars before window_start so compute_bt_pnl could
+        # produce the boundary minutes. But the DELETE only cleared
+        # ts >= window_start, so pre-window output rows would duplicate
+        # existing rows (eventually deduped by ReplacingMergeTree but wasteful).
+        # Drop them now. ts is at INSERT_COLUMNS index 7.
+        rows = [r for r in rows if _parse_ts(r[7]) >= window_start]
         f.rows_written = len(rows)
         f.fix_applied = not dry_run
         all_rows.extend(rows)
