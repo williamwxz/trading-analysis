@@ -323,6 +323,10 @@ def find_midgap(
     # the earliest hole.
     out: list[Violation] = []
     for stn, und in flagged:
+        # prev_ts > toDateTime(GLOBAL_START_TS) guards against the first row's
+        # lagInFrame() returning the DateTime default 1970-01-01 00:00:00 —
+        # without this filter, every flagged strategy would report a spurious
+        # "gap" from 1970 to its first real row.
         gap_sql = f"""
         SELECT gap_start, gap_end FROM (
             SELECT
@@ -337,6 +341,7 @@ def find_midgap(
               AND ts >= toDateTime('{GLOBAL_START_TS}')
         )
         WHERE gap_minutes > 1
+          AND prev_ts >= toDateTime('{GLOBAL_START_TS}')
         ORDER BY gap_start
         LIMIT 1
         """
@@ -867,6 +872,21 @@ def _fix_bt_underlying(
     src = SOURCE_TABLE["bt"]
     tgt = TARGET_TABLE["bt"]
     client = get_client()
+
+    # Defensive clamp: any failure_ts earlier than GLOBAL_START_TS is treated as
+    # a detection artifact (see the lagInFrame-vs-epoch bug fixed in
+    # find_midgap). Clamping prevents an outlier from blowing the union window
+    # back to 1970 and causing a multi-million-row over-recompute.
+    _global_start = _parse_ts(GLOBAL_START_TS)
+    for f in fixes:
+        if f.failure_ts < _global_start:
+            log.warning(
+                "[bt/%s] %s: failure_ts %s < GLOBAL_START_TS, clamping",
+                underlying,
+                f.strategy_table_name,
+                f.failure_ts,
+            )
+            f.failure_ts = _global_start
 
     # Union window across all strategies in this underlying.
     earliest = min(f.failure_ts for f in fixes)
