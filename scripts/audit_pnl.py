@@ -695,10 +695,21 @@ def fix_prod_rt_strategies(
             len(group),
         )
 
+        # Extend bar-fetch start back by the largest timeframe (1d = 1440min)
+        # so any bar whose coverage extends INTO the window — but whose `ts`
+        # falls just before window_start — is included. Without this lookback,
+        # the active_*_at lookup has no bar covering the boundary minute,
+        # leaving an empty minute (e.g., a 1h bar at ts=18:00 with closing_ts=19:00
+        # would be excluded if window_start=19:00, so minute 19:00 gets no row).
+        # fetch_new_bars_real_trade already extends back by _RT_BAR_LOOKBACK_MINUTES
+        # (1440) internally; we replicate the same lookback for prod here.
+        bar_fetch_start = (earliest - timedelta(minutes=1440)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
         if type_ == "real_trade":
-            bars = fetch_new_bars_real_trade(src, underlying, ts_start, ts_end, client)
+            bars = fetch_new_bars_real_trade(src, underlying, bar_fetch_start, ts_end, client)
         else:
-            bars = fetch_new_bars_prod(src, underlying, ts_start, ts_end, client)
+            bars = fetch_new_bars_prod(src, underlying, bar_fetch_start, ts_end, client)
         stn_set = {f.strategy_table_name for f in group}
         bars = [b for b in bars if b["strategy_table_name"] in stn_set]
         if not bars:
