@@ -1,7 +1,7 @@
 """PnL Coverage & Position Audit — Dagster Asset.
 
-Daily read-only check that walks every (underlying, strategy) in the six PnL
-tables (1-min + 1-hour, for prod / bt / real_trade) and fails the Dagster run
+Daily read-only check that walks every (underlying, strategy) in the nine PnL
+tables (1-min + 1-hour + 1-day, for prod / bt / real_trade) and fails the Dagster run
 on any missing minute or position drift.
 
 See docs/superpowers/specs/2026-05-26-pnl-coverage-audit-design.md.
@@ -1100,7 +1100,7 @@ def _audit_bucketed_table(
     op_tags={"dagster/timeout": 3600},
 )
 def pnl_coverage_audit_asset(context: AssetExecutionContext) -> MaterializeResult:
-    """Audit all six PnL tables; raise RuntimeError on any violation."""
+    """Audit all nine PnL tables; raise RuntimeError on any violation."""
     import time as _time
 
     started = _time.time()
