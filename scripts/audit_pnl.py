@@ -271,7 +271,11 @@ def find_missing_or_start_gap(
         OR tgt.first_tgt_ts > src.first_exec_ts + INTERVAL {START_TOLERANCE_HOURS} HOUR
     ){where_u}
     ORDER BY src.underlying, src.strategy_table_name
-    """
+    SETTINGS join_use_nulls = 1
+    """  # join_use_nulls=1 is critical: without it ClickHouse LEFT JOIN returns
+    #     DateTime '1970-01-01' / empty-string defaults for unmatched right-side
+    #     columns, not NULL — so `tgt.strategy_table_name IS NULL` never fires
+    #     and strategies completely missing from target slip through undetected.
     out: list[Violation] = []
     for stn, und, first_exec, first_tgt in client.query(sql).result_rows:
         if first_tgt is None:
