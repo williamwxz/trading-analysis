@@ -33,6 +33,7 @@ def _dt(s: str) -> datetime:
 # _check_phase1 now takes ``expected_minutes`` (the price-window count the driver
 # computes server-side) instead of a materialized price set.
 
+
 class TestPhase1:
     def test_clean_match_returns_no_violation(self):
         """Actual range matches expected, no missing minutes — no violation."""
@@ -41,7 +42,9 @@ class TestPhase1:
             actual_max_ts=_dt("2026-05-26 09:55:00"),
             actual_rows=3,
         )
-        source = SourceFirstBar(expected_min_ts=_dt("2026-03-05 09:05:00"), tf_minutes=5)
+        source = SourceFirstBar(
+            expected_min_ts=_dt("2026-03-05 09:05:00"), tf_minutes=5
+        )
         # 3 price minutes in [expected_min, now-5m]; actual_rows == 3 → no holes.
         expected_minutes = 3
         now = _dt("2026-05-26 10:00:00")
@@ -55,7 +58,9 @@ class TestPhase1:
             actual_max_ts=_dt("2026-05-26 09:58:00"),
             actual_rows=1000,
         )
-        source = SourceFirstBar(expected_min_ts=_dt("2026-03-05 09:05:00"), tf_minutes=5)
+        source = SourceFirstBar(
+            expected_min_ts=_dt("2026-03-05 09:05:00"), tf_minutes=5
+        )
         now = _dt("2026-05-26 10:00:00")
         # start_gap is checked before internal_holes, so the count is irrelevant.
         v = _check_phase1("t", "FET", "S", stat, source, 1, now)
@@ -71,7 +76,9 @@ class TestPhase1:
             actual_max_ts=_dt("2026-05-26 09:30:00"),
             actual_rows=1000,
         )
-        source = SourceFirstBar(expected_min_ts=_dt("2026-03-05 09:05:00"), tf_minutes=5)
+        source = SourceFirstBar(
+            expected_min_ts=_dt("2026-03-05 09:05:00"), tf_minutes=5
+        )
         now = _dt("2026-05-26 10:00:00")  # 30 min ahead of actual_max
         v = _check_phase1("t", "FET", "S", stat, source, 1, now)
         assert v is not None
@@ -84,7 +91,9 @@ class TestPhase1:
             actual_max_ts=_dt("2026-03-05 09:55:00"),
             actual_rows=2,
         )
-        source = SourceFirstBar(expected_min_ts=_dt("2026-03-05 09:05:00"), tf_minutes=5)
+        source = SourceFirstBar(
+            expected_min_ts=_dt("2026-03-05 09:05:00"), tf_minutes=5
+        )
         # 4 price minutes in the window vs 2 actual rows → 2 missing.
         expected_minutes = 4
         now = _dt("2026-03-05 10:00:00")
@@ -101,7 +110,9 @@ class TestPhase1:
             actual_max_ts=_dt("2026-03-05 09:15:00"),
             actual_rows=2,
         )
-        source = SourceFirstBar(expected_min_ts=_dt("2026-03-05 09:05:00"), tf_minutes=5)
+        source = SourceFirstBar(
+            expected_min_ts=_dt("2026-03-05 09:05:00"), tf_minutes=5
+        )
         now = _dt("2026-03-05 09:30:00")  # 15m past max; well past actual_max
         v = _check_phase1("t", "FET", "S", stat, source, 2, now)
         # Actual_rows == expected (2), but stale_end fires because actual_max < now-10m.
@@ -118,9 +129,9 @@ class TestPhase2:
         # Q_gap returns list of (gap_end, gap_secs). Phase 2 trims by price-gap
         # exemption and sorts. has_prices=False → no exemption.
         q_gap_rows = [
-            (_dt("2026-03-05 10:00:00"), 600),   # 10 min gap
+            (_dt("2026-03-05 10:00:00"), 600),  # 10 min gap
             (_dt("2026-03-06 11:00:00"), 7200),  # 2-hour gap
-            (_dt("2026-03-07 12:01:00"), 120),   # 2 min gap
+            (_dt("2026-03-07 12:01:00"), 120),  # 2 min gap
         ]
         present_counts = [0, 0, 0]  # ignored when has_prices=False
         descriptors = _check_phase2(
@@ -341,7 +352,11 @@ class TestPhase3Hour:
             (_dt("2026-03-05 09:00:00"), -1.0),  # correct
         ]
         v = _check_phase3_bucketed(
-            "t1h", "FET", "S", hour_rows, target_min_changes,
+            "t1h",
+            "FET",
+            "S",
+            hour_rows,
+            target_min_changes,
             bucket=timedelta(hours=1),
         )
         assert v is None
@@ -350,7 +365,11 @@ class TestPhase3Hour:
         target_min_changes = [PositionChange(_dt("2026-03-05 09:30:00"), -1.0)]
         hour_rows = [(_dt("2026-03-05 09:00:00"), 1.0)]  # wrong
         v = _check_phase3_bucketed(
-            "t1h", "FET", "S", hour_rows, target_min_changes,
+            "t1h",
+            "FET",
+            "S",
+            hour_rows,
+            target_min_changes,
             bucket=timedelta(hours=1),
         )
         assert v is not None
@@ -361,7 +380,11 @@ class TestPhase3Hour:
         target_min_changes = [PositionChange(_dt("2026-03-05 10:00:00"), 1.0)]
         hour_rows = [(_dt("2026-03-05 09:00:00"), 0.0)]  # no prior min change
         v = _check_phase3_bucketed(
-            "t1h", "FET", "S", hour_rows, target_min_changes,
+            "t1h",
+            "FET",
+            "S",
+            hour_rows,
+            target_min_changes,
             bucket=timedelta(hours=1),
         )
         assert v is None  # can't verify, skip silently
@@ -384,7 +407,11 @@ class TestPhase3Day:
             (_dt("2026-03-05 00:00:00"), -1.0),  # correct
         ]
         v = _check_phase3_bucketed(
-            "t1d", "FET", "S", day_rows, target_min_changes,
+            "t1d",
+            "FET",
+            "S",
+            day_rows,
+            target_min_changes,
             bucket=timedelta(days=1),
         )
         assert v is None
@@ -393,7 +420,11 @@ class TestPhase3Day:
         target_min_changes = [PositionChange(_dt("2026-03-05 23:30:00"), -1.0)]
         day_rows = [(_dt("2026-03-05 00:00:00"), 1.0)]  # wrong
         v = _check_phase3_bucketed(
-            "t1d", "FET", "S", day_rows, target_min_changes,
+            "t1d",
+            "FET",
+            "S",
+            day_rows,
+            target_min_changes,
             bucket=timedelta(days=1),
         )
         assert v is not None
@@ -408,7 +439,11 @@ class TestPhase3Day:
         ]
         day_rows = [(_dt("2026-03-05 00:00:00"), 1.0)]  # correct: 12:00 change wins
         v = _check_phase3_bucketed(
-            "t1d", "FET", "S", day_rows, target_min_changes,
+            "t1d",
+            "FET",
+            "S",
+            day_rows,
+            target_min_changes,
             bucket=timedelta(days=1),
         )
         assert v is None
@@ -417,7 +452,11 @@ class TestPhase3Day:
         target_min_changes = [PositionChange(_dt("2026-03-06 10:00:00"), 1.0)]
         day_rows = [(_dt("2026-03-05 00:00:00"), 0.0)]  # no prior min change
         v = _check_phase3_bucketed(
-            "t1d", "FET", "S", day_rows, target_min_changes,
+            "t1d",
+            "FET",
+            "S",
+            day_rows,
+            target_min_changes,
             bucket=timedelta(days=1),
         )
         assert v is None  # can't verify, skip silently
@@ -428,13 +467,19 @@ class TestPhase3Day:
 
 class TestFormatReport:
     def test_empty_report_returns_clean_message(self):
-        from services.dagster.trading_dagster.assets.pnl_coverage_audit import AuditReport
+        from services.dagster.trading_dagster.assets.pnl_coverage_audit import (
+            AuditReport,
+        )
+
         report = AuditReport()
         msg = _format_report(report)
         assert "CLEAN" in msg
 
     def test_groups_by_table_and_sorts_top_n(self):
-        from services.dagster.trading_dagster.assets.pnl_coverage_audit import AuditReport
+        from services.dagster.trading_dagster.assets.pnl_coverage_audit import (
+            AuditReport,
+        )
+
         report = AuditReport()
         # Three violations, two in the same table.
         report.violations = [
@@ -459,9 +504,15 @@ class TestAuditUnderlying:
         """All phases pass → empty violations list."""
         from services.dagster.trading_dagster.assets import pnl_coverage_audit as mod
 
-        monkeypatch.setattr(mod, "_fetch_q_stat", lambda t, u, c: {
-            "S1": StratStat(_dt("2026-03-05 09:05:00"), _dt("2026-05-26 09:55:00"), 2),
-        })
+        monkeypatch.setattr(
+            mod,
+            "_fetch_q_stat",
+            lambda t, u, c: {
+                "S1": StratStat(
+                    _dt("2026-03-05 09:05:00"), _dt("2026-05-26 09:55:00"), 2
+                ),
+            },
+        )
         monkeypatch.setattr(mod, "_has_prices", lambda u, c: True)
         # Source bar at 09:00, tf=5 → first-bar 09:05, one change at 09:05 (pos 1.0).
         monkeypatch.setattr(
@@ -476,10 +527,16 @@ class TestAuditUnderlying:
         monkeypatch.setattr(mod, "_count_prices", lambda u, s, e, c: 2)
         monkeypatch.setattr(mod, "_fetch_q_gap", lambda t, u, s, c: [])
         # Phase 3: streamed target series, position matches source (1.0).
-        monkeypatch.setattr(mod, "_iter_q_target_full", lambda t, u, s, c: iter([
-            (_dt("2026-03-05 09:05:00"), 1.0),
-            (_dt("2026-05-26 09:55:00"), 1.0),
-        ]))
+        monkeypatch.setattr(
+            mod,
+            "_iter_q_target_full",
+            lambda t, u, s, c: iter(
+                [
+                    (_dt("2026-03-05 09:05:00"), 1.0),
+                    (_dt("2026-05-26 09:55:00"), 1.0),
+                ]
+            ),
+        )
 
         report = mod._audit_underlying(
             target_table="strategy_pnl_1min_prod_v2",
@@ -495,9 +552,15 @@ class TestAuditUnderlying:
         from services.dagster.trading_dagster.assets import pnl_coverage_audit as mod
 
         # Target starts 2 months late.
-        monkeypatch.setattr(mod, "_fetch_q_stat", lambda t, u, c: {
-            "S1": StratStat(_dt("2026-05-02 20:44:00"), _dt("2026-05-26 09:55:00"), 100),
-        })
+        monkeypatch.setattr(
+            mod,
+            "_fetch_q_stat",
+            lambda t, u, c: {
+                "S1": StratStat(
+                    _dt("2026-05-02 20:44:00"), _dt("2026-05-26 09:55:00"), 100
+                ),
+            },
+        )
         monkeypatch.setattr(mod, "_has_prices", lambda u, c: True)
         monkeypatch.setattr(
             mod,
@@ -510,10 +573,16 @@ class TestAuditUnderlying:
         monkeypatch.setattr(mod, "_count_prices", lambda u, s, e, c: 1)
         monkeypatch.setattr(mod, "_fetch_q_gap", lambda t, u, s, c: [])
         # Streamed per-minute target series; position matches source (1.0).
-        monkeypatch.setattr(mod, "_iter_q_target_full", lambda t, u, s, c: iter([
-            (_dt("2026-05-02 20:45:00"), 1.0),
-            (_dt("2026-05-26 09:55:00"), 1.0),
-        ]))
+        monkeypatch.setattr(
+            mod,
+            "_iter_q_target_full",
+            lambda t, u, s, c: iter(
+                [
+                    (_dt("2026-05-02 20:45:00"), 1.0),
+                    (_dt("2026-05-26 09:55:00"), 1.0),
+                ]
+            ),
+        )
 
         report = mod._audit_underlying(
             target_table="strategy_pnl_1min_prod_v2",
@@ -536,10 +605,14 @@ class TestAuditTable:
         from services.dagster.trading_dagster.assets import pnl_coverage_audit as mod
 
         # Two underlyings each with one violation.
-        def fake_audit_underlying(target_table, source_table, mode, underlying, client, now_ts):
+        def fake_audit_underlying(
+            target_table, source_table, mode, underlying, client, now_ts
+        ):
             r = AuditReport()
             r.strategies_checked = 1
-            r.violations = [Violation(target_table, underlying, "S1", "start_gap", "...", 100)]
+            r.violations = [
+                Violation(target_table, underlying, "S1", "start_gap", "...", 100)
+            ]
             return r
 
         monkeypatch.setattr(mod, "_audit_underlying", fake_audit_underlying)
@@ -620,8 +693,14 @@ class TestPositionPerMinute:
 
     def test_empty_inputs_return_zero(self):
         assert _check_position_per_minute([], []) == (0, 0, [])
-        assert _check_position_per_minute([PositionChange(_dt("2026-03-05 09:00:00"), 1.0)], []) == (0, 0, [])
-        assert _check_position_per_minute([], [(_dt("2026-03-05 09:00:00"), 1.0)]) == (0, 0, [])
+        assert _check_position_per_minute(
+            [PositionChange(_dt("2026-03-05 09:00:00"), 1.0)], []
+        ) == (0, 0, [])
+        assert _check_position_per_minute([], [(_dt("2026-03-05 09:00:00"), 1.0)]) == (
+            0,
+            0,
+            [],
+        )
 
     def test_samples_capped_at_top_n(self):
         source = [PositionChange(_dt("2026-03-05 09:00:00"), 1.0)]
