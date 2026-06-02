@@ -196,7 +196,10 @@ def _check_phase1(
             underlying=underlying,
             stn=stn,
             category="start_gap",
-            detail=f"expected={expected_min:%Y-%m-%d %H:%M:%S} actual={stat.actual_min_ts:%Y-%m-%d %H:%M:%S} ({gap_minutes}m)",
+            detail=(
+                f"expected={expected_min:%Y-%m-%d %H:%M:%S} "
+                f"actual={stat.actual_min_ts:%Y-%m-%d %H:%M:%S} ({gap_minutes}m)"
+            ),
             severity_minutes=gap_minutes,
         )
 
@@ -209,7 +212,11 @@ def _check_phase1(
             underlying=underlying,
             stn=stn,
             category="stale_end",
-            detail=f"expected≈{expected_max:%Y-%m-%d %H:%M:%S} actual={stat.actual_max_ts:%Y-%m-%d %H:%M:%S} ({stale_minutes}m stale)",
+            detail=(
+                f"expected≈{expected_max:%Y-%m-%d %H:%M:%S} "
+                f"actual={stat.actual_max_ts:%Y-%m-%d %H:%M:%S} "
+                f"({stale_minutes}m stale)"
+            ),
             severity_minutes=stale_minutes,
         )
 
@@ -221,7 +228,10 @@ def _check_phase1(
             underlying=underlying,
             stn=stn,
             category="internal_holes",
-            detail=f"expected_minutes={expected_minutes} actual_rows={stat.actual_rows} missing={missing}",
+            detail=(
+                f"expected_minutes={expected_minutes} actual_rows={stat.actual_rows} "
+                f"missing={missing}"
+            ),
             severity_minutes=missing,
         )
 
@@ -295,7 +305,10 @@ def _check_phase3(
             underlying=underlying,
             stn=stn,
             category="position_mismatch",
-            detail=f"length mismatch: source={len(source_changes)} target={len(target_changes)}",
+            detail=(
+                f"length mismatch: source={len(source_changes)} "
+                f"target={len(target_changes)}"
+            ),
             severity_minutes=abs(len(source_changes) - len(target_changes)),
         )
     tol = timedelta(minutes=POS_TS_TOLERANCE_MIN)
@@ -306,7 +319,10 @@ def _check_phase3(
                 underlying=underlying,
                 stn=stn,
                 category="position_mismatch",
-                detail=f"ts mismatch at #{i}: source={src.effective_ts:%Y-%m-%d %H:%M:%S} target={tgt.effective_ts:%Y-%m-%d %H:%M:%S}",
+                detail=(
+                    f"ts mismatch at #{i}: source={src.effective_ts:%Y-%m-%d %H:%M:%S} "
+                    f"target={tgt.effective_ts:%Y-%m-%d %H:%M:%S}"
+                ),
                 severity_minutes=1,
             )
         if src.position != tgt.position:
@@ -315,7 +331,10 @@ def _check_phase3(
                 underlying=underlying,
                 stn=stn,
                 category="position_mismatch",
-                detail=f"position mismatch at #{i}: source={src.position} target={tgt.position} (ts={src.effective_ts:%Y-%m-%d %H:%M:%S})",
+                detail=(
+                    f"position mismatch at #{i}: source={src.position} "
+                    f"target={tgt.position} (ts={src.effective_ts:%Y-%m-%d %H:%M:%S})"
+                ),
                 severity_minutes=1,
             )
     return None
@@ -370,7 +389,8 @@ def _check_phase3_bucketed(
                 category="position_mismatch",
                 detail=(
                     f"{bucket_label} slot {bucket_ts:%Y-%m-%d %H:%M:%S}: "
-                    f"bucket_position={bucket_position} != latest_min_position={latest.position} "
+                    f"bucket_position={bucket_position} != "
+                    f"latest_min_position={latest.position} "
                     f"(latest min change at {latest.effective_ts:%Y-%m-%d %H:%M:%S})"
                 ),
                 severity_minutes=1,
@@ -481,7 +501,10 @@ def _format_report(report: AuditReport) -> str:
     Within each table, top N offenders by severity_minutes appear first.
     """
     if not report.violations:
-        return f"PnL COVERAGE & POSITION AUDIT CLEAN — {report.tables_checked} tables, {report.strategies_checked} strategies, {report.duration_secs:.1f}s"
+        return (
+            f"PnL COVERAGE & POSITION AUDIT CLEAN — {report.tables_checked} tables, "
+            f"{report.strategies_checked} strategies, {report.duration_secs:.1f}s"
+        )
 
     by_table: dict[str, list[Violation]] = {}
     for v in report.violations:
@@ -770,7 +793,7 @@ def _fetch_q_trans(
 ) -> list[PositionChange]:
     """Q_trans: per-strategy position transitions in target_table.
 
-    Uses lagInFrame over a single-partition window — bounded memory.
+    Uses lagInFrame over a single-partition window to keep memory bounded.
     """
     rows = query_rows(
         f"""
@@ -796,14 +819,20 @@ SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
 def _fetch_q_gap(
     target_table: str, underlying: str, stn: str, client
 ) -> list[tuple[datetime, int]]:
-    """Q_gap: per-strategy ts gaps > 60s in target_table. Returns (gap_end, gap_secs)."""
+    """Q_gap: per-strategy ts gaps > 60s in target_table.
+
+    Returns (gap_end, gap_secs).
+    """
     rows = query_rows(
         f"""
 SELECT gap_end, gap_secs FROM (
   SELECT ts AS gap_end,
          toUnixTimestamp(ts) AS ts_secs,
          lagInFrame(toUnixTimestamp(ts)) OVER (ORDER BY ts) AS prev_ts_secs,
-         (toUnixTimestamp(ts) - lagInFrame(toUnixTimestamp(ts)) OVER (ORDER BY ts)) AS gap_secs
+         (
+           toUnixTimestamp(ts)
+           - lagInFrame(toUnixTimestamp(ts)) OVER (ORDER BY ts)
+         ) AS gap_secs
   FROM analytics.{target_table}
   WHERE underlying = '{underlying}'
     AND strategy_table_name = '{stn}'
@@ -945,7 +974,10 @@ def _audit_underlying(
                         underlying=underlying,
                         stn=stn,
                         category="internal_holes",
-                        detail=f"gap ending {g.gap_end:%Y-%m-%d %H:%M:%S} ({g.gap_minutes}m)",
+                        detail=(
+                            f"gap ending {g.gap_end:%Y-%m-%d %H:%M:%S} "
+                            f"({g.gap_minutes}m)"
+                        ),
                         severity_minutes=g.gap_minutes,
                     )
                 )
@@ -969,7 +1001,10 @@ def _audit_underlying(
                     underlying=underlying,
                     stn=stn,
                     category="position_mismatch",
-                    detail=f"{mismatch_count} rows wrong (of {stat.actual_rows}); samples: {sample_str}",
+                    detail=(
+                        f"{mismatch_count} rows wrong (of {stat.actual_rows}); "
+                        f"samples: {sample_str}"
+                    ),
                     severity_minutes=mismatch_count,
                 )
             )
@@ -1058,7 +1093,10 @@ def _audit_bucketed_table(
     name="pnl_coverage_audit",
     group_name="strategy_pnl",
     compute_kind="clickhouse",
-    description="Daily read-only audit of PnL tables: per-(U, S) coverage + position-boundary checks.",
+    description=(
+        "Daily read-only audit of PnL tables: per-(U, S) coverage + "
+        "position-boundary checks."
+    ),
     op_tags={"dagster/timeout": 3600},
 )
 def pnl_coverage_audit_asset(context: AssetExecutionContext) -> MaterializeResult:
@@ -1079,7 +1117,8 @@ def pnl_coverage_audit_asset(context: AssetExecutionContext) -> MaterializeResul
             now_ts=now_ts,
         )
         context.log.info(
-            f"[audit] {target}: {sub.strategies_checked} strategies, {len(sub.violations)} violations"
+            f"[audit] {target}: {sub.strategies_checked} strategies, "
+            f"{len(sub.violations)} violations"
         )
         full_report.violations.extend(sub.violations)
         full_report.strategies_checked += sub.strategies_checked
@@ -1094,7 +1133,8 @@ def pnl_coverage_audit_asset(context: AssetExecutionContext) -> MaterializeResul
             client=get_client(),
         )
         context.log.info(
-            f"[audit] {hour}: {sub.strategies_checked} strategies, {len(sub.violations)} violations"
+            f"[audit] {hour}: {sub.strategies_checked} strategies, "
+            f"{len(sub.violations)} violations"
         )
         full_report.violations.extend(sub.violations)
         full_report.strategies_checked += sub.strategies_checked
@@ -1109,7 +1149,8 @@ def pnl_coverage_audit_asset(context: AssetExecutionContext) -> MaterializeResul
             client=get_client(),
         )
         context.log.info(
-            f"[audit] {day}: {sub.strategies_checked} strategies, {len(sub.violations)} violations"
+            f"[audit] {day}: {sub.strategies_checked} strategies, "
+            f"{len(sub.violations)} violations"
         )
         full_report.violations.extend(sub.violations)
         full_report.strategies_checked += sub.strategies_checked

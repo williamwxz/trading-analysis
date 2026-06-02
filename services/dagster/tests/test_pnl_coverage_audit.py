@@ -2,16 +2,12 @@
 
 from datetime import datetime, timedelta
 
-import pytest
-
 from services.dagster.trading_dagster.assets.pnl_coverage_audit import (
+    TOP_N_OFFENDERS,
     AuditReport,
-    GapDescriptor,
     PositionChange,
-    PositionMismatch,
     SourceFirstBar,
     StratStat,
-    TOP_N_OFFENDERS,
     Violation,
     _check_phase1,
     _check_phase2,
@@ -156,7 +152,7 @@ class TestPhase2:
         assert descriptors[0].gap_minutes == 2
 
     def test_gap_fully_explained_by_prices_returns_empty(self):
-        """If no price minute lies strictly inside, the gap is fully exempt → drop it."""
+        """If no price minute lies strictly inside, gap is fully exempt."""
         q_gap_rows = [(_dt("2026-03-05 10:00:00"), 600)]
         # Anchors present only at the boundaries 09:50 and 10:00 → 0 strictly inside.
         present_counts = [0]
@@ -340,7 +336,7 @@ class TestPhase3Min:
 
 class TestPhase3Hour:
     def test_hour_slots_match_minute_argmax(self):
-        """For each hour slot, position should equal the latest 1-min position <= hour+1h."""
+        """Hour slot position should match latest 1-min position <= hour+1h."""
         # 1-min target had changes at 09:05 → 1.0, 09:30 → -1.0
         # Hour slot 09:00 should reflect argMax(position, minute_ts) = -1.0
         # (because 09:30 is the latest minute_ts in [09:00, 10:00))
@@ -395,7 +391,7 @@ class TestPhase3Hour:
 
 class TestPhase3Day:
     def test_day_slot_matches_latest_minute_change(self):
-        """For each day slot, position should equal the latest 1-min position <= day+1d."""
+        """Day slot position should match latest 1-min position <= day+1d."""
         # 1-min target had changes at 09:05 → 1.0, 23:30 → -1.0
         # Day slot 2026-03-05 00:00 should reflect -1.0
         # (because 23:30 is the latest minute_ts in [2026-03-05, 2026-03-06))
@@ -678,7 +674,7 @@ class TestPositionPerMinute:
         assert orphans == 1
 
     def test_handles_position_transition_at_exact_ts(self):
-        """Target row AT source.effective_ts should use that source change (>= boundary)."""
+        """Target row AT source.effective_ts uses source change (>= boundary)."""
         source = [
             PositionChange(_dt("2026-03-05 09:05:00"), 1.0),
             PositionChange(_dt("2026-03-05 09:10:00"), -1.0),
