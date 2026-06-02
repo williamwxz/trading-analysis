@@ -367,6 +367,62 @@ class TestPhase3Hour:
         assert v is None  # can't verify, skip silently
 
 
+# ── Phase 3 (day table): slot position match ─────────────────────────────────
+
+
+class TestPhase3Day:
+    def test_day_slot_matches_latest_minute_change(self):
+        """For each day slot, position should equal the latest 1-min position <= day+1d."""
+        # 1-min target had changes at 09:05 → 1.0, 23:30 → -1.0
+        # Day slot 2026-03-05 00:00 should reflect -1.0
+        # (because 23:30 is the latest minute_ts in [2026-03-05, 2026-03-06))
+        target_min_changes = [
+            PositionChange(_dt("2026-03-05 09:05:00"), 1.0),
+            PositionChange(_dt("2026-03-05 23:30:00"), -1.0),
+        ]
+        day_rows = [
+            (_dt("2026-03-05 00:00:00"), -1.0),  # correct
+        ]
+        v = _check_phase3_bucketed(
+            "t1d", "FET", "S", day_rows, target_min_changes,
+            bucket=timedelta(days=1),
+        )
+        assert v is None
+
+    def test_day_slot_position_drift_fails(self):
+        target_min_changes = [PositionChange(_dt("2026-03-05 23:30:00"), -1.0)]
+        day_rows = [(_dt("2026-03-05 00:00:00"), 1.0)]  # wrong
+        v = _check_phase3_bucketed(
+            "t1d", "FET", "S", day_rows, target_min_changes,
+            bucket=timedelta(days=1),
+        )
+        assert v is not None
+        assert v.category == "position_mismatch"
+        assert "day slot" in v.detail
+
+    def test_day_slot_change_in_next_day_does_not_affect_prior_day(self):
+        """A change at 2026-03-06 00:30 must NOT affect the 2026-03-05 day slot."""
+        target_min_changes = [
+            PositionChange(_dt("2026-03-05 12:00:00"), 1.0),
+            PositionChange(_dt("2026-03-06 00:30:00"), -1.0),
+        ]
+        day_rows = [(_dt("2026-03-05 00:00:00"), 1.0)]  # correct: 12:00 change wins
+        v = _check_phase3_bucketed(
+            "t1d", "FET", "S", day_rows, target_min_changes,
+            bucket=timedelta(days=1),
+        )
+        assert v is None
+
+    def test_day_slot_with_no_prior_minute_change_skips(self):
+        target_min_changes = [PositionChange(_dt("2026-03-06 10:00:00"), 1.0)]
+        day_rows = [(_dt("2026-03-05 00:00:00"), 0.0)]  # no prior min change
+        v = _check_phase3_bucketed(
+            "t1d", "FET", "S", day_rows, target_min_changes,
+            bucket=timedelta(days=1),
+        )
+        assert v is None  # can't verify, skip silently
+
+
 # ── Report formatter ─────────────────────────────────────────────────────────
 
 

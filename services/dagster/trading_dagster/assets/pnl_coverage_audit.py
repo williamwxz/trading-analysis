@@ -81,6 +81,16 @@ _HOUR_TABLES: list[tuple[str, str, Mode]] = [
     ),
 ]
 
+_DAY_TABLES: list[tuple[str, str, Mode]] = [
+    ("strategy_pnl_1day_prod_v2", "strategy_pnl_1min_prod_v2", "prod"),
+    ("strategy_pnl_1day_bt_v2", "strategy_pnl_1min_bt_v2", "bt"),
+    (
+        "strategy_pnl_1day_real_trade_v2",
+        "strategy_pnl_1min_real_trade_v2",
+        "real_trade",
+    ),
+]
+
 
 # ── Data classes ────────────────────────────────────────────────────────────
 
@@ -1085,6 +1095,21 @@ def pnl_coverage_audit_asset(context: AssetExecutionContext) -> MaterializeResul
         )
         context.log.info(
             f"[audit] {hour}: {sub.strategies_checked} strategies, {len(sub.violations)} violations"
+        )
+        full_report.violations.extend(sub.violations)
+        full_report.strategies_checked += sub.strategies_checked
+        full_report.tables_checked += 1
+
+    for day, min_t, _mode in _DAY_TABLES:
+        context.log.info(f"[audit] starting day table {day}")
+        sub = _audit_bucketed_table(
+            bucket_table=day,
+            min_table=min_t,
+            bucket=timedelta(days=1),
+            client=get_client(),
+        )
+        context.log.info(
+            f"[audit] {day}: {sub.strategies_checked} strategies, {len(sub.violations)} violations"
         )
         full_report.violations.extend(sub.violations)
         full_report.strategies_checked += sub.strategies_checked
