@@ -1015,25 +1015,28 @@ def _audit_table(
     return aggregate
 
 
-def _audit_hour_table(
-    hour_table: str,
+def _audit_bucketed_table(
+    bucket_table: str,
     min_table: str,
+    bucket: timedelta,
     client,
 ) -> AuditReport:
-    """Run hour-slot position check (Phase 3 variant) for one 1-hour table.
+    """Run bucket-slot position check (Phase 3 variant) for one rolled-up table.
 
-    Coverage checks (Phase 1) for the 1-hour table are derived from the 1-min
+    Coverage checks (Phase 1) for rolled-up tables are derived from the 1-min
     presence — we don't repeat Phase 1 here. We only verify the argMax
-    position at each hour slot matches the latest preceding minute change.
+    position at each bucket slot matches the latest preceding minute change.
+
+    Used for both 1hour (bucket=1h) and 1day (bucket=1d) audits.
     """
     aggregate = AuditReport()
-    underlyings = _list_underlyings(hour_table, client)
+    underlyings = _list_underlyings(bucket_table, client)
     for u in underlyings:
-        hr_by_stn = _fetch_q_stat_bucketed(hour_table, u, client)
-        for stn, rows in hr_by_stn.items():
+        rows_by_stn = _fetch_q_stat_bucketed(bucket_table, u, client)
+        for stn, rows in rows_by_stn.items():
             target_min_changes = _fetch_q_trans(min_table, u, stn, client)
             v = _check_phase3_bucketed(
-                hour_table, u, stn, rows, target_min_changes, bucket=timedelta(hours=1)
+                bucket_table, u, stn, rows, target_min_changes, bucket=bucket
             )
             aggregate.strategies_checked += 1
             if v is not None:
@@ -1074,7 +1077,12 @@ def pnl_coverage_audit_asset(context: AssetExecutionContext) -> MaterializeResul
 
     for hour, min_t, _mode in _HOUR_TABLES:
         context.log.info(f"[audit] starting hour table {hour}")
-        sub = _audit_hour_table(hour_table=hour, min_table=min_t, client=get_client())
+        sub = _audit_bucketed_table(
+            bucket_table=hour,
+            min_table=min_t,
+            bucket=timedelta(hours=1),
+            client=get_client(),
+        )
         context.log.info(
             f"[audit] {hour}: {sub.strategies_checked} strategies, {len(sub.violations)} violations"
         )
