@@ -16,7 +16,7 @@ from services.dagster.trading_dagster.assets.pnl_coverage_audit import (
     _check_phase1,
     _check_phase2,
     _check_phase3,
-    _check_phase3_hour,
+    _check_phase3_bucketed,
     _check_position_per_minute,
     _compute_source_changes_prod_bt,
     _compute_source_changes_rt,
@@ -340,13 +340,19 @@ class TestPhase3Hour:
         hour_rows = [
             (_dt("2026-03-05 09:00:00"), -1.0),  # correct
         ]
-        v = _check_phase3_hour("t1h", "FET", "S", hour_rows, target_min_changes)
+        v = _check_phase3_bucketed(
+            "t1h", "FET", "S", hour_rows, target_min_changes,
+            bucket=timedelta(hours=1),
+        )
         assert v is None
 
     def test_hour_slot_position_drift_fails(self):
         target_min_changes = [PositionChange(_dt("2026-03-05 09:30:00"), -1.0)]
         hour_rows = [(_dt("2026-03-05 09:00:00"), 1.0)]  # wrong
-        v = _check_phase3_hour("t1h", "FET", "S", hour_rows, target_min_changes)
+        v = _check_phase3_bucketed(
+            "t1h", "FET", "S", hour_rows, target_min_changes,
+            bucket=timedelta(hours=1),
+        )
         assert v is not None
         assert v.category == "position_mismatch"
 
@@ -354,7 +360,10 @@ class TestPhase3Hour:
         """If a 1-hour row exists before any 1-min change, we cannot compare — skip."""
         target_min_changes = [PositionChange(_dt("2026-03-05 10:00:00"), 1.0)]
         hour_rows = [(_dt("2026-03-05 09:00:00"), 0.0)]  # no prior min change
-        v = _check_phase3_hour("t1h", "FET", "S", hour_rows, target_min_changes)
+        v = _check_phase3_bucketed(
+            "t1h", "FET", "S", hour_rows, target_min_changes,
+            bucket=timedelta(hours=1),
+        )
         assert v is None  # can't verify, skip silently
 
 

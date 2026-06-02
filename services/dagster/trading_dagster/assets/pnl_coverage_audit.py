@@ -297,24 +297,31 @@ def _check_phase3(
             )
     return None
 
-def _check_phase3_hour(
+def _check_phase3_bucketed(
     table: str,
     underlying: str,
     stn: str,
-    hour_rows: list[tuple[datetime, float]],
+    bucket_rows: list[tuple[datetime, float]],
     target_min_changes: list[PositionChange],
+    bucket: timedelta,
 ) -> Violation | None:
-    """For each (U, S, hour) row in the 1-hour table, verify position equals the
-    latest 1-min change at minute <= hour + 1h.
+    """For each (U, S, bucket) row in a rolled-up PnL table, verify position
+    equals the latest 1-min change at minute < bucket_ts + bucket.
 
-    hour_rows: list of (hour_ts, position) from the 1-hour target table.
+    Used for both 1hour (bucket=1h) and 1day (bucket=1d) audits.
+
+    bucket_rows: list of (bucket_ts, position) from the rolled-up target table.
     target_min_changes: position-change sequence from the corresponding 1-min table.
+    bucket: width of one slot in the target table.
     """
     if not target_min_changes:
         return None
+    bucket_label = "hour" if bucket == timedelta(hours=1) else (
+        "day" if bucket == timedelta(days=1) else f"{int(bucket.total_seconds() // 60)}m"
+    )
     # Sorted ascending by effective_ts in both inputs.
-    for hour_ts, hour_position in hour_rows:
-        cutoff = hour_ts + timedelta(hours=1)
+    for bucket_ts, bucket_position in bucket_rows:
+        cutoff = bucket_ts + bucket
         # Find the latest min-change with effective_ts < cutoff.
         latest: PositionChange | None = None
         for change in target_min_changes:
@@ -325,15 +332,15 @@ def _check_phase3_hour(
         if latest is None:
             # No prior 1-min change — cannot verify this slot, skip silently.
             continue
-        if latest.position != hour_position:
+        if latest.position != bucket_position:
             return Violation(
                 table=table,
                 underlying=underlying,
                 stn=stn,
                 category="position_mismatch",
                 detail=(
-                    f"hour slot {hour_ts:%Y-%m-%d %H:%M:%S}: "
-                    f"hour_position={hour_position} != latest_min_position={latest.position} "
+                    f"{bucket_label} slot {bucket_ts:%Y-%m-%d %H:%M:%S}: "
+                    f"bucket_position={bucket_position} != latest_min_position={latest.position} "
                     f"(latest min change at {latest.effective_ts:%Y-%m-%d %H:%M:%S})"
                 ),
                 severity_minutes=1,
@@ -979,7 +986,7 @@ def _audit_hour_table(
         hr_by_stn = _fetch_q_stat_hour(hour_table, u, client)
         for stn, rows in hr_by_stn.items():
             target_min_changes = _fetch_q_trans(min_table, u, stn, client)
-            v = _check_phase3_hour(hour_table, u, stn, rows, target_min_changes)
+            v = _check_phase3_bucketed(hour_table, u, stn, rows, target_min_changes, bucket=timedelta(hours=1))
             aggregate.strategies_checked += 1
             if v is not None:
                 aggregate.violations.append(v)
