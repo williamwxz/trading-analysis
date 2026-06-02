@@ -627,7 +627,7 @@ class TestTargetReadsBounded:
         mod._fetch_q_trans("strategy_pnl_1min_bt_v2", "BTC", "S1", None)
         assert mod.GLOBAL_START_TS in cap[0]
 
-    def test_fetch_q_stat_hour_is_bounded(self, monkeypatch):
+    def test_fetch_q_stat_bucketed_is_bounded(self, monkeypatch):
         mod, cap = self._cap(monkeypatch)
-        mod._fetch_q_stat_hour("strategy_pnl_1hour_bt_v2", "BTC", None)
+        mod._fetch_q_stat_bucketed("strategy_pnl_1hour_bt_v2", "BTC", None)
         assert mod.GLOBAL_START_TS in cap[0]

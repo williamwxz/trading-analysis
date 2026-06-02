@@ -835,14 +835,17 @@ SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
         yield (r[0], float(r[1]))
 
 
-def _fetch_q_stat_hour(
-    hour_table: str, underlying: str, client
+def _fetch_q_stat_bucketed(
+    bucket_table: str, underlying: str, client
 ) -> dict[str, list[tuple[datetime, float]]]:
-    """Q_stat variant for hour tables — returns per-strategy (ts, position) rows."""
+    """Q_stat variant for rolled-up tables (1hour or 1day) — returns per-strategy
+    (ts, position) rows. The bucket ts is already pre-aggregated in the source
+    table, so no toStartOfHour / toStartOfDay expression is needed here.
+    """
     rows = query_rows(
         f"""
 SELECT strategy_table_name, ts, position
-FROM analytics.{hour_table}
+FROM analytics.{bucket_table}
 WHERE underlying = '{underlying}'
   AND ts >= toDateTime('{GLOBAL_START_TS}')
 ORDER BY strategy_table_name, ts
@@ -1026,7 +1029,7 @@ def _audit_hour_table(
     aggregate = AuditReport()
     underlyings = _list_underlyings(hour_table, client)
     for u in underlyings:
-        hr_by_stn = _fetch_q_stat_hour(hour_table, u, client)
+        hr_by_stn = _fetch_q_stat_bucketed(hour_table, u, client)
         for stn, rows in hr_by_stn.items():
             target_min_changes = _fetch_q_trans(min_table, u, stn, client)
             v = _check_phase3_bucketed(
