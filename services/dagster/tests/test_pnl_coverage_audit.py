@@ -762,3 +762,15 @@ class TestTargetReadsBounded:
         mod, cap = self._cap(monkeypatch)
         mod._fetch_q_stat_bucketed("strategy_pnl_1hour_bt_v2", "BTC", None)
         assert mod.GLOBAL_START_TS in cap[0]
+
+    def test_fetch_q_stat_bucketed_deduplicates_by_updated_at(self, monkeypatch):
+        """ReplacingMergeTree rollup slots can have multiple rows before merges
+        run. The fetch must keep only the latest row per (strategy_table_name,
+        ts) using LIMIT 1 BY with updated_at DESC as the tiebreaker — otherwise
+        the audit may compare against a stale row and report spurious mismatches.
+        """
+        mod, cap = self._cap(monkeypatch)
+        mod._fetch_q_stat_bucketed("strategy_pnl_1day_prod_v2", "FET", None)
+        sql = cap[0]
+        assert "updated_at DESC" in sql
+        assert "LIMIT 1 BY strategy_table_name, ts" in sql

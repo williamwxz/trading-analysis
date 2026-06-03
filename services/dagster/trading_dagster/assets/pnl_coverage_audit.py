@@ -880,6 +880,14 @@ def _fetch_q_stat_bucketed(
     """Q_stat variant for rolled-up tables (1hour or 1day) — returns per-strategy
     (ts, position) rows. The bucket ts is already pre-aggregated in the source
     table, so no toStartOfHour / toStartOfDay expression is needed here.
+
+    Rollup tables are ReplacingMergeTree(updated_at), so a single
+    (strategy_table_name, ts) slot can hold multiple rows between Materialized
+    View flushes and background merges. LIMIT 1 BY with updated_at DESC keeps
+    only the latest row per slot — matching FINAL semantics without the
+    in-memory merge cost. Result rows come out ordered by
+    (strategy_table_name, ts) ascending, which the downstream Phase 3 walker
+    requires.
     """
     rows = query_rows(
         f"""
@@ -887,7 +895,8 @@ SELECT strategy_table_name, ts, position
 FROM analytics.{bucket_table}
 WHERE underlying = '{underlying}'
   AND ts >= toDateTime('{GLOBAL_START_TS}')
-ORDER BY strategy_table_name, ts
+ORDER BY strategy_table_name, ts, updated_at DESC
+LIMIT 1 BY strategy_table_name, ts
 SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
 """,
         client=client,
