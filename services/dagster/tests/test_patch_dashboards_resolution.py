@@ -40,6 +40,17 @@ def _three_branch(family: str, final: str = "") -> str:
     )
 
 
+def _two_branch_deployed(family: str, final: str = "") -> str:
+    """The 2-branch UNION ALL shape currently committed in dashboards."""
+    return (
+        f"(SELECT * FROM analytics.strategy_pnl_1min_{family}{final}"
+        f" WHERE ts >= toStartOfHour(now() - INTERVAL 6 HOUR)"
+        f" UNION ALL"
+        f" SELECT * FROM analytics.strategy_pnl_1hour_{family}{final}"
+        f" WHERE ts < toStartOfHour(now() - INTERVAL 6 HOUR))"
+    )
+
+
 class TestBareReferences:
     def test_bare_1min_prod_rewrites_to_3_branch(self):
         sql = "SELECT * FROM analytics.strategy_pnl_1min_prod_v2 WHERE foo = 1"
@@ -96,4 +107,39 @@ class TestUnrelatedSQL:
     def test_empty_string_is_unchanged(self):
         out, n = patch_sql("")
         assert out == ""
+        assert n == 0
+
+
+class TestTwoBranchUpgrade:
+    def test_two_branch_prod_upgrades_to_3_branch(self):
+        sql = (
+            f"SELECT time FROM {_two_branch_deployed('prod_v2')} GROUP BY time"
+        )
+        out, n = patch_sql(sql)
+        expected = (
+            f"SELECT time FROM {_three_branch('prod_v2')} GROUP BY time"
+        )
+        assert out == expected
+        assert n == 1
+
+    def test_two_branch_with_final_preserves_final(self):
+        sql = f"SELECT * FROM {_two_branch_deployed('real_trade_v2', ' FINAL')}"
+        out, n = patch_sql(sql)
+        expected = f"SELECT * FROM {_three_branch('real_trade_v2', ' FINAL')}"
+        assert out == expected
+        assert n == 1
+        assert out.count(" FINAL") == 3
+
+
+class TestIdempotency:
+    def test_three_branch_input_is_unchanged(self):
+        sql = f"SELECT * FROM {_three_branch('bt_v2')}"
+        out, n = patch_sql(sql)
+        assert out == sql
+        assert n == 0
+
+    def test_three_branch_with_final_is_unchanged(self):
+        sql = f"SELECT * FROM {_three_branch('prod_v2', ' FINAL')}"
+        out, n = patch_sql(sql)
+        assert out == sql
         assert n == 0
