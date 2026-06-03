@@ -121,6 +121,22 @@ class TestTwoBranchUpgrade:
         assert n == 1
         assert out.count(" FINAL") == 3
 
+    def test_two_distinct_2branch_refs_in_one_sql_both_upgrade(self):
+        """A single SQL with two distinct 2-branch UNION ALL blocks (e.g., a
+        JOIN across two PnL families) upgrades both blocks to 3-branch.
+        """
+        sql = (
+            f"SELECT a.* FROM {_two_branch_deployed('prod_v2')} a"
+            f" JOIN {_two_branch_deployed('bt_v2')} b ON a.ts = b.ts"
+        )
+        out, n = patch_sql(sql)
+        expected = (
+            f"SELECT a.* FROM {_three_branch('prod_v2')} a"
+            f" JOIN {_three_branch('bt_v2')} b ON a.ts = b.ts"
+        )
+        assert out == expected
+        assert n == 2
+
 
 class TestIdempotency:
     def test_three_branch_input_is_unchanged(self):
