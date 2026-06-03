@@ -104,7 +104,19 @@ Category = Literal[
     "position_mismatch",
     "hour_sync",
     "stale_end",
+    "bt_source_drift",
 ]
+
+# Diagnostic-only categories that don't trigger any fix path. The audit just
+# surfaces them in the report so an operator can decide whether to escalate
+# upstream (e.g., source backtest engine writing inconsistent row_json values).
+_DIAGNOSTIC_CATEGORIES: frozenset[str] = frozenset({"bt_source_drift"})
+
+# bt_source_drift thresholds — a minute is flagged when many strategies have
+# unexplained cpnl movement (cpnl change not attributable to position × Δprice).
+_BT_DRIFT_WINDOW_HOURS = 48
+_BT_DRIFT_MIN_STRATEGIES = 50  # ≥ N strategies all drifting in the same minute
+_BT_DRIFT_MIN_SUM_ABS = 0.01   # AND aggregate |unexplained| ≥ this
 
 
 @dataclass
@@ -559,6 +571,68 @@ def audit_hour_sync(
                     f"minute-argMax={expected_pos}"
                 ),
                 failure_ts=hour_ts,
+            )
+        )
+    return out
+
+
+def find_bt_source_drift(client) -> list[Violation]:
+    """Flag minutes where many bt strategies have synchronized unexplained
+    cumulative_pnl drift — a signal that the upstream backtest engine's
+    row_json values moved beyond what position × Δprice would justify.
+
+    Diagnostic only: does NOT trigger any fix path (see _DIAGNOSTIC_CATEGORIES).
+    bt cumulative_pnl is authoritatively sourced from row_json per design, so
+    these jumps are upstream-data issues to escalate, not pipeline bugs to repair.
+
+    A minute is flagged when:
+      * ≥ _BT_DRIFT_MIN_STRATEGIES strategies show |unexplained| > 0.001
+        with position unchanged across the minute, AND
+      * the sum of |unexplained| in that minute ≥ _BT_DRIFT_MIN_SUM_ABS.
+    """
+    sql = f"""
+    WITH stream AS (
+        SELECT
+            strategy_table_name, underlying, ts, cumulative_pnl, position, price,
+            lagInFrame(cumulative_pnl) OVER (PARTITION BY strategy_table_name ORDER BY ts) AS prev_cpnl,
+            lagInFrame(position)       OVER (PARTITION BY strategy_table_name ORDER BY ts) AS prev_pos,
+            lagInFrame(price)          OVER (PARTITION BY strategy_table_name ORDER BY ts) AS prev_price
+        FROM (
+            SELECT strategy_table_name, any(underlying) AS underlying,
+                   ts, cumulative_pnl, position, price
+            FROM analytics.strategy_pnl_1min_bt_v2
+            WHERE ts >= now() - INTERVAL {_BT_DRIFT_WINDOW_HOURS} HOUR
+            GROUP BY strategy_table_name, ts, cumulative_pnl, position, price, updated_at
+            ORDER BY strategy_table_name, ts, updated_at DESC
+            LIMIT 1 BY strategy_table_name, ts
+        )
+    )
+    SELECT ts, count() AS n_strats, round(sum(abs(unexplained)), 4) AS sum_abs,
+           topK(3)(underlying) AS top_underlyings
+    FROM (
+        SELECT ts, underlying,
+               (cumulative_pnl - prev_cpnl) - prev_pos * (price - prev_price) / nullIf(prev_price, 0) AS unexplained
+        FROM stream
+        WHERE prev_price > 0 AND prev_pos = position
+    )
+    WHERE abs(unexplained) > 0.001
+    GROUP BY ts
+    HAVING n_strats >= {_BT_DRIFT_MIN_STRATEGIES} AND sum_abs >= {_BT_DRIFT_MIN_SUM_ABS}
+    ORDER BY ts
+    """
+    out: list[Violation] = []
+    for ts, n_strats, sum_abs, top_unds in client.query(sql).result_rows:
+        out.append(
+            Violation(
+                type="bt",
+                underlying=",".join(str(u) for u in top_unds),
+                strategy_table_name="(aggregate)",
+                category="bt_source_drift",
+                detail=(
+                    f"{n_strats} strategies with unexplained cpnl drift "
+                    f"at {ts}; sum|Δ|={sum_abs}; top: {','.join(str(u) for u in top_unds)}"
+                ),
+                failure_ts=ts,
             )
         )
     return out
@@ -1335,6 +1409,8 @@ def _run_audit(
         all_viols.extend(find_stale_end(t, client, now_ts, underlying))
         all_viols.extend(audit_positions(t, client, underlying))
         all_viols.extend(audit_hour_sync(t, client, underlying))
+        if t == "bt":
+            all_viols.extend(find_bt_source_drift(client))
         summary.violations = len(all_viols)
         report.by_type[t] = summary
         report.violations.extend(all_viols)
@@ -1352,7 +1428,12 @@ def _run_fixes(
 ) -> None:
     """Resolve violations into per-strategy fixes; pause consumer per-type;
     delegate to fix_prod_rt_strategies or fix_bt_strategies."""
-    grouped = group_violations_by_strategy(report.violations)
+    # Skip diagnostic-only categories — they surface upstream issues that
+    # the fix path can't (and shouldn't try to) repair.
+    fixable = [
+        v for v in report.violations if v.category not in _DIAGNOSTIC_CATEGORIES
+    ]
+    grouped = group_violations_by_strategy(fixable)
     fixes_by_type: dict[Mode, list[StrategyFix]] = {t: [] for t in TYPES}
     for _key, viols in grouped.items():
         fix = resolve_strategy_fix(viols)

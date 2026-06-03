@@ -93,6 +93,7 @@ class TestDetectionImports:
         from scripts.audit_pnl import (
             audit_hour_sync,
             audit_positions,
+            find_bt_source_drift,
             find_midgap,
             find_missing_or_start_gap,
             find_stale_end,
@@ -103,6 +104,35 @@ class TestDetectionImports:
         assert callable(find_stale_end)
         assert callable(audit_positions)
         assert callable(audit_hour_sync)
+        assert callable(find_bt_source_drift)
+
+
+class TestDiagnosticCategorySkippedByFix:
+    """bt_source_drift violations must not feed into the fix path."""
+
+    def test_resolve_strategy_fix_skipped_for_drift_only_group(self):
+        from scripts.audit_pnl import _DIAGNOSTIC_CATEGORIES
+
+        assert "bt_source_drift" in _DIAGNOSTIC_CATEGORIES
+
+    def test_fix_path_filter_drops_diagnostic_violations(self):
+        from scripts.audit_pnl import _DIAGNOSTIC_CATEGORIES, Violation
+
+        viols = [
+            Violation(
+                type="bt", underlying="BTC", strategy_table_name="(aggregate)",
+                category="bt_source_drift", detail="42 strats drift",
+                failure_ts=_dt("2026-06-02 22:04:00"),
+            ),
+            Violation(
+                type="bt", underlying="BTC", strategy_table_name="sid=1|sno=1",
+                category="position_mismatch", detail="x",
+                failure_ts=_dt("2026-06-02 22:04:00"),
+            ),
+        ]
+        fixable = [v for v in viols if v.category not in _DIAGNOSTIC_CATEGORIES]
+        assert len(fixable) == 1
+        assert fixable[0].category == "position_mismatch"
 
 
 class TestValidateUnderlying:
