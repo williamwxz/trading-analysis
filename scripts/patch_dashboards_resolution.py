@@ -39,13 +39,45 @@ _1DAY_WHERE = "ts < toStartOfDay(now() - INTERVAL 30 DAY)"
 
 # Matches bare "analytics.strategy_pnl_1min_<family>" and
 # "analytics.strategy_pnl_1hour_<family>" references that are NOT already
-# wrapped inside a UNION ALL subquery. The lookbehind rejects matches whose
-# preceding character is "(" (i.e., the leading paren of a UNION ALL block).
-# Lookahead avoids matching inside an already-patched UNION ALL subquery.
+# inside a canonical 3-branch UNION ALL. Four negative lookaheads reject
+# references already followed by one of the patcher-generated WHERE clauses
+# (with or without a leading ' FINAL'), making the bare pass idempotent on
+# 3-branch output. Both the FINAL and non-FINAL variants of each clause are
+# excluded because the regex's optional ( FINAL)? group may not consume FINAL
+# before the lookaheads run when the engine chooses zero-length for that group.
 _BARE_TABLE_RE = re.compile(
     r"(?<!\()analytics\.strategy_pnl_1(?:min|hour)_(\w+?)( FINAL)?"
+    r"(?! WHERE ts >= toStartOfHour)(?! WHERE ts >= toStartOfDay)"
+    r"(?! FINAL WHERE ts >= toStartOfHour)(?! FINAL WHERE ts >= toStartOfDay)"
     r"(?= WHERE| FINAL WHERE|\)| GROUP| ORDER|$)",
     re.MULTILINE,
+)
+
+# Matches the 2-branch UNION ALL currently committed in the dashboards:
+#   (SELECT * FROM analytics.strategy_pnl_1min_<family>[ FINAL]
+#       WHERE ts >= toStartOfHour(now() - INTERVAL 6 HOUR)
+#    UNION ALL
+#    SELECT * FROM analytics.strategy_pnl_1hour_<family>[ FINAL]
+#       WHERE ts < toStartOfHour(now() - INTERVAL 6 HOUR))
+#
+# Two separate patterns handle the optional ' FINAL' suffix: Python's re
+# module does not allow backreferencing an unmatched optional group (\2 when
+# group 2 didn't participate), so we split into a FINAL and a no-FINAL variant.
+# The 1hour branch's FINAL is required to match the 1min branch's — the
+# patcher never mixes them.
+_TWO_BRANCH_RE_NOFINAL = re.compile(
+    r"\(SELECT \* FROM analytics\.strategy_pnl_1min_(\w+?)"
+    r" WHERE ts >= toStartOfHour\(now\(\) - INTERVAL 6 HOUR\)"
+    r" UNION ALL"
+    r" SELECT \* FROM analytics\.strategy_pnl_1hour_\1"
+    r" WHERE ts < toStartOfHour\(now\(\) - INTERVAL 6 HOUR\)\)"
+)
+_TWO_BRANCH_RE_FINAL = re.compile(
+    r"\(SELECT \* FROM analytics\.strategy_pnl_1min_(\w+?) FINAL"
+    r" WHERE ts >= toStartOfHour\(now\(\) - INTERVAL 6 HOUR\)"
+    r" UNION ALL"
+    r" SELECT \* FROM analytics\.strategy_pnl_1hour_\1 FINAL"
+    r" WHERE ts < toStartOfHour\(now\(\) - INTERVAL 6 HOUR\)\)"
 )
 
 
@@ -64,14 +96,35 @@ def _union_sql(family: str, final: str) -> str:
 
 
 def patch_sql(sql: str) -> tuple[str, int]:
+    """Rewrite every PnL family reference in `sql` to the canonical 3-branch
+    UNION ALL form. Handles bare references, 2-branch UNION ALL upgrades,
+    and existing 3-branch (no-op). Returns (rewritten_sql, n_substitutions).
+    """
     count = 0
 
-    def _repl(m: re.Match) -> str:
+    def _repl_nofinal(m: re.Match) -> str:
+        nonlocal count
+        count += 1
+        return _union_sql(m.group(1), "")
+
+    def _repl_final(m: re.Match) -> str:
+        nonlocal count
+        count += 1
+        return _union_sql(m.group(1), " FINAL")
+
+    def _repl_bare(m: re.Match) -> str:
         nonlocal count
         count += 1
         return _union_sql(m.group(1), m.group(2) or "")
 
-    return _BARE_TABLE_RE.sub(_repl, sql), count
+    # Pass 1: upgrade deployed 2-branch UNION ALL to 3-branch.
+    # FINAL variant first so the no-FINAL pattern cannot partially match it.
+    sql = _TWO_BRANCH_RE_FINAL.sub(_repl_final, sql)
+    sql = _TWO_BRANCH_RE_NOFINAL.sub(_repl_nofinal, sql)
+    # Pass 2: wrap any remaining bare references.
+    sql = _BARE_TABLE_RE.sub(_repl_bare, sql)
+
+    return sql, count
 
 
 def patch_panel(panel: dict) -> int:
