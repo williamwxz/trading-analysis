@@ -1,7 +1,7 @@
 """PnL Coverage & Position Audit — Dagster Asset.
 
-Daily read-only check that walks every (underlying, strategy) in the six PnL
-tables (1-min + 1-hour, for prod / bt / real_trade) and fails the Dagster run
+Daily read-only check that walks every (underlying, strategy) in the nine PnL
+tables (1-min + 1-hour + 1-day, for prod / bt / real_trade) and fails the Dagster run
 on any missing minute or position drift.
 
 See docs/superpowers/specs/2026-05-26-pnl-coverage-audit-design.md.
@@ -74,15 +74,31 @@ _TARGET_TABLES: list[tuple[str, str, Mode]] = [
 _HOUR_TABLES: list[tuple[str, str, Mode]] = [
     ("strategy_pnl_1hour_prod_v2", "strategy_pnl_1min_prod_v2", "prod"),
     ("strategy_pnl_1hour_bt_v2", "strategy_pnl_1min_bt_v2", "bt"),
-    ("strategy_pnl_1hour_real_trade_v2", "strategy_pnl_1min_real_trade_v2", "real_trade"),
+    (
+        "strategy_pnl_1hour_real_trade_v2",
+        "strategy_pnl_1min_real_trade_v2",
+        "real_trade",
+    ),
+]
+
+_DAY_TABLES: list[tuple[str, str, Mode]] = [
+    ("strategy_pnl_1day_prod_v2", "strategy_pnl_1min_prod_v2", "prod"),
+    ("strategy_pnl_1day_bt_v2", "strategy_pnl_1min_bt_v2", "bt"),
+    (
+        "strategy_pnl_1day_real_trade_v2",
+        "strategy_pnl_1min_real_trade_v2",
+        "real_trade",
+    ),
 ]
 
 
 # ── Data classes ────────────────────────────────────────────────────────────
 
+
 @dataclass(frozen=True)
 class StratStat:
     """Target-table per-strategy stats from Q_stat."""
+
     actual_min_ts: datetime
     actual_max_ts: datetime
     actual_rows: int
@@ -91,6 +107,7 @@ class StratStat:
 @dataclass(frozen=True)
 class SourceFirstBar:
     """Source per-strategy first-bar info derived from Q_src / Q_src_rt."""
+
     expected_min_ts: datetime
     tf_minutes: int
 
@@ -98,6 +115,7 @@ class SourceFirstBar:
 @dataclass(frozen=True)
 class GapDescriptor:
     """One internal gap detected by Q_gap, after price-gap exemption."""
+
     stn: str
     gap_end: datetime
     gap_minutes: int
@@ -106,6 +124,7 @@ class GapDescriptor:
 @dataclass(frozen=True)
 class PositionChange:
     """One row in either source_changes or target_changes."""
+
     effective_ts: datetime
     position: float
 
@@ -113,6 +132,7 @@ class PositionChange:
 @dataclass(frozen=True)
 class PositionMismatch:
     """One target row whose position disagrees with the source's active bar."""
+
     ts: datetime
     expected: float
     actual: float
@@ -121,6 +141,7 @@ class PositionMismatch:
 @dataclass
 class Violation:
     """One detected problem for a (table, underlying, strategy)."""
+
     table: str
     underlying: str
     stn: str
@@ -133,6 +154,7 @@ class Violation:
 @dataclass
 class AuditReport:
     """All violations collected across one audit run."""
+
     violations: list[Violation] = field(default_factory=list)
     tables_checked: int = 0
     strategies_checked: int = 0
@@ -174,7 +196,10 @@ def _check_phase1(
             underlying=underlying,
             stn=stn,
             category="start_gap",
-            detail=f"expected={expected_min:%Y-%m-%d %H:%M:%S} actual={stat.actual_min_ts:%Y-%m-%d %H:%M:%S} ({gap_minutes}m)",
+            detail=(
+                f"expected={expected_min:%Y-%m-%d %H:%M:%S} "
+                f"actual={stat.actual_min_ts:%Y-%m-%d %H:%M:%S} ({gap_minutes}m)"
+            ),
             severity_minutes=gap_minutes,
         )
 
@@ -187,7 +212,11 @@ def _check_phase1(
             underlying=underlying,
             stn=stn,
             category="stale_end",
-            detail=f"expected≈{expected_max:%Y-%m-%d %H:%M:%S} actual={stat.actual_max_ts:%Y-%m-%d %H:%M:%S} ({stale_minutes}m stale)",
+            detail=(
+                f"expected≈{expected_max:%Y-%m-%d %H:%M:%S} "
+                f"actual={stat.actual_max_ts:%Y-%m-%d %H:%M:%S} "
+                f"({stale_minutes}m stale)"
+            ),
             severity_minutes=stale_minutes,
         )
 
@@ -199,7 +228,10 @@ def _check_phase1(
             underlying=underlying,
             stn=stn,
             category="internal_holes",
-            detail=f"expected_minutes={expected_minutes} actual_rows={stat.actual_rows} missing={missing}",
+            detail=(
+                f"expected_minutes={expected_minutes} actual_rows={stat.actual_rows} "
+                f"missing={missing}"
+            ),
             severity_minutes=missing,
         )
 
@@ -254,6 +286,7 @@ def _check_phase2(
     descriptors.sort(key=lambda d: d.gap_minutes, reverse=True)
     return descriptors[:top_n]
 
+
 def _check_phase3(
     table: str,
     underlying: str,
@@ -272,7 +305,10 @@ def _check_phase3(
             underlying=underlying,
             stn=stn,
             category="position_mismatch",
-            detail=f"length mismatch: source={len(source_changes)} target={len(target_changes)}",
+            detail=(
+                f"length mismatch: source={len(source_changes)} "
+                f"target={len(target_changes)}"
+            ),
             severity_minutes=abs(len(source_changes) - len(target_changes)),
         )
     tol = timedelta(minutes=POS_TS_TOLERANCE_MIN)
@@ -283,7 +319,10 @@ def _check_phase3(
                 underlying=underlying,
                 stn=stn,
                 category="position_mismatch",
-                detail=f"ts mismatch at #{i}: source={src.effective_ts:%Y-%m-%d %H:%M:%S} target={tgt.effective_ts:%Y-%m-%d %H:%M:%S}",
+                detail=(
+                    f"ts mismatch at #{i}: source={src.effective_ts:%Y-%m-%d %H:%M:%S} "
+                    f"target={tgt.effective_ts:%Y-%m-%d %H:%M:%S}"
+                ),
                 severity_minutes=1,
             )
         if src.position != tgt.position:
@@ -292,29 +331,46 @@ def _check_phase3(
                 underlying=underlying,
                 stn=stn,
                 category="position_mismatch",
-                detail=f"position mismatch at #{i}: source={src.position} target={tgt.position} (ts={src.effective_ts:%Y-%m-%d %H:%M:%S})",
+                detail=(
+                    f"position mismatch at #{i}: source={src.position} "
+                    f"target={tgt.position} (ts={src.effective_ts:%Y-%m-%d %H:%M:%S})"
+                ),
                 severity_minutes=1,
             )
     return None
 
-def _check_phase3_hour(
+
+def _check_phase3_bucketed(
     table: str,
     underlying: str,
     stn: str,
-    hour_rows: list[tuple[datetime, float]],
+    bucket_rows: list[tuple[datetime, float]],
     target_min_changes: list[PositionChange],
+    bucket: timedelta,
 ) -> Violation | None:
-    """For each (U, S, hour) row in the 1-hour table, verify position equals the
-    latest 1-min change at minute <= hour + 1h.
+    """For each (U, S, bucket) row in a rolled-up PnL table, verify position
+    equals the latest 1-min change at minute < bucket_ts + bucket.
 
-    hour_rows: list of (hour_ts, position) from the 1-hour target table.
+    Used for both 1hour (bucket=1h) and 1day (bucket=1d) audits.
+
+    bucket_rows: list of (bucket_ts, position) from the rolled-up target table.
     target_min_changes: position-change sequence from the corresponding 1-min table.
+    bucket: width of one slot in the target table.
     """
     if not target_min_changes:
         return None
+    bucket_label = (
+        "hour"
+        if bucket == timedelta(hours=1)
+        else (
+            "day"
+            if bucket == timedelta(days=1)
+            else f"{int(bucket.total_seconds() // 60)}m"
+        )
+    )
     # Sorted ascending by effective_ts in both inputs.
-    for hour_ts, hour_position in hour_rows:
-        cutoff = hour_ts + timedelta(hours=1)
+    for bucket_ts, bucket_position in bucket_rows:
+        cutoff = bucket_ts + bucket
         # Find the latest min-change with effective_ts < cutoff.
         latest: PositionChange | None = None
         for change in target_min_changes:
@@ -325,20 +381,22 @@ def _check_phase3_hour(
         if latest is None:
             # No prior 1-min change — cannot verify this slot, skip silently.
             continue
-        if latest.position != hour_position:
+        if latest.position != bucket_position:
             return Violation(
                 table=table,
                 underlying=underlying,
                 stn=stn,
                 category="position_mismatch",
                 detail=(
-                    f"hour slot {hour_ts:%Y-%m-%d %H:%M:%S}: "
-                    f"hour_position={hour_position} != latest_min_position={latest.position} "
+                    f"{bucket_label} slot {bucket_ts:%Y-%m-%d %H:%M:%S}: "
+                    f"bucket_position={bucket_position} != "
+                    f"latest_min_position={latest.position} "
                     f"(latest min change at {latest.effective_ts:%Y-%m-%d %H:%M:%S})"
                 ),
                 severity_minutes=1,
             )
     return None
+
 
 def _check_position_per_minute(
     source_changes: list[PositionChange],
@@ -364,7 +422,9 @@ def _check_position_per_minute(
 
     for ts, actual_pos in target_rows:
         # Advance ptr while the next source change is <= ts.
-        while ptr + 1 < len(source_changes) and source_changes[ptr + 1].effective_ts <= ts:
+        while (
+            ptr + 1 < len(source_changes) and source_changes[ptr + 1].effective_ts <= ts
+        ):
             ptr += 1
         if ptr < 0:
             orphan_count += 1
@@ -373,7 +433,9 @@ def _check_position_per_minute(
         if expected_pos != actual_pos:
             mismatch_count += 1
             if len(samples) < TOP_N_OFFENDERS:
-                samples.append(PositionMismatch(ts=ts, expected=expected_pos, actual=actual_pos))
+                samples.append(
+                    PositionMismatch(ts=ts, expected=expected_pos, actual=actual_pos)
+                )
 
     return mismatch_count, orphan_count, samples
 
@@ -392,10 +454,13 @@ def _compute_source_changes_prod_bt(
     prev_position: float | None = None
     for ts_str, position in bars:
         if prev_position is None or position != prev_position:
-            closing_ts = datetime.strptime(ts_str[:19], "%Y-%m-%d %H:%M:%S") + timedelta(minutes=tf_minutes)
+            closing_ts = datetime.strptime(
+                ts_str[:19], "%Y-%m-%d %H:%M:%S"
+            ) + timedelta(minutes=tf_minutes)
             changes.append(PositionChange(effective_ts=closing_ts, position=position))
             prev_position = position
     return changes
+
 
 def _compute_source_changes_rt(
     bars_with_revs: list[dict],
@@ -423,9 +488,12 @@ def _compute_source_changes_rt(
     for entry in entries:
         pos = float(entry.rev["position"])
         if prev_position is None or pos != prev_position:
-            changes.append(PositionChange(effective_ts=entry.execution_ts, position=pos))
+            changes.append(
+                PositionChange(effective_ts=entry.execution_ts, position=pos)
+            )
             prev_position = pos
     return changes
+
 
 def _format_report(report: AuditReport) -> str:
     """Render a human-readable summary of violations grouped by table.
@@ -433,7 +501,10 @@ def _format_report(report: AuditReport) -> str:
     Within each table, top N offenders by severity_minutes appear first.
     """
     if not report.violations:
-        return f"PnL COVERAGE & POSITION AUDIT CLEAN — {report.tables_checked} tables, {report.strategies_checked} strategies, {report.duration_secs:.1f}s"
+        return (
+            f"PnL COVERAGE & POSITION AUDIT CLEAN — {report.tables_checked} tables, "
+            f"{report.strategies_checked} strategies, {report.duration_secs:.1f}s"
+        )
 
     by_table: dict[str, list[Violation]] = {}
     for v in report.violations:
@@ -453,7 +524,9 @@ def _format_report(report: AuditReport) -> str:
                 lines.append(f"  {cat}: {by_cat[cat]} strategies")
 
         # Top-N offenders.
-        worst = sorted(violations, key=lambda v: v.severity_minutes, reverse=True)[:TOP_N_OFFENDERS]
+        worst = sorted(violations, key=lambda v: v.severity_minutes, reverse=True)[
+            :TOP_N_OFFENDERS
+        ]
         lines.append(f"  Top {len(worst)} worst:")
         for v in worst:
             lines.append(f"    {v.underlying} {v.stn[:80]}  {v.category}  {v.detail}")
@@ -536,7 +609,9 @@ SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
     return int(n or 0)
 
 
-def _count_prices_strict(underlying: str, start: datetime, end: datetime, client) -> int:
+def _count_prices_strict(
+    underlying: str, start: datetime, end: datetime, client
+) -> int:
     """Count 1-min price timestamps strictly inside the open interval (start, end).
 
     Used by Phase 2's per-gap exemption; both endpoints excluded.
@@ -564,7 +639,9 @@ def _src_time_windows(end_dt: datetime | None = None) -> list[tuple[str, str]]:
     step = timedelta(days=_SRC_CHUNK_DAYS)
     while cur < end:
         nxt = min(cur + step, end)
-        windows.append((cur.strftime("%Y-%m-%d %H:%M:%S"), nxt.strftime("%Y-%m-%d %H:%M:%S")))
+        windows.append(
+            (cur.strftime("%Y-%m-%d %H:%M:%S"), nxt.strftime("%Y-%m-%d %H:%M:%S"))
+        )
         cur = nxt
     return windows
 
@@ -711,10 +788,12 @@ SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
     return source, _compute_source_changes_rt(revs, stn)
 
 
-def _fetch_q_trans(target_table: str, underlying: str, stn: str, client) -> list[PositionChange]:
+def _fetch_q_trans(
+    target_table: str, underlying: str, stn: str, client
+) -> list[PositionChange]:
     """Q_trans: per-strategy position transitions in target_table.
 
-    Uses lagInFrame over a single-partition window — bounded memory.
+    Uses lagInFrame over a single-partition window to keep memory bounded.
     """
     rows = query_rows(
         f"""
@@ -737,15 +816,23 @@ SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
     return [PositionChange(effective_ts=r[0], position=float(r[1])) for r in rows]
 
 
-def _fetch_q_gap(target_table: str, underlying: str, stn: str, client) -> list[tuple[datetime, int]]:
-    """Q_gap: per-strategy ts gaps > 60s in target_table. Returns (gap_end, gap_secs)."""
+def _fetch_q_gap(
+    target_table: str, underlying: str, stn: str, client
+) -> list[tuple[datetime, int]]:
+    """Q_gap: per-strategy ts gaps > 60s in target_table.
+
+    Returns (gap_end, gap_secs).
+    """
     rows = query_rows(
         f"""
 SELECT gap_end, gap_secs FROM (
   SELECT ts AS gap_end,
          toUnixTimestamp(ts) AS ts_secs,
          lagInFrame(toUnixTimestamp(ts)) OVER (ORDER BY ts) AS prev_ts_secs,
-         (toUnixTimestamp(ts) - lagInFrame(toUnixTimestamp(ts)) OVER (ORDER BY ts)) AS gap_secs
+         (
+           toUnixTimestamp(ts)
+           - lagInFrame(toUnixTimestamp(ts)) OVER (ORDER BY ts)
+         ) AS gap_secs
   FROM analytics.{target_table}
   WHERE underlying = '{underlying}'
     AND strategy_table_name = '{stn}'
@@ -787,15 +874,29 @@ SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
         yield (r[0], float(r[1]))
 
 
-def _fetch_q_stat_hour(hour_table: str, underlying: str, client) -> dict[str, list[tuple[datetime, float]]]:
-    """Q_stat variant for hour tables — returns per-strategy (ts, position) rows."""
+def _fetch_q_stat_bucketed(
+    bucket_table: str, underlying: str, client
+) -> dict[str, list[tuple[datetime, float]]]:
+    """Q_stat variant for rolled-up tables (1hour or 1day) — returns per-strategy
+    (ts, position) rows. The bucket ts is already pre-aggregated in the source
+    table, so no toStartOfHour / toStartOfDay expression is needed here.
+
+    Rollup tables are ReplacingMergeTree(updated_at), so a single
+    (strategy_table_name, ts) slot can hold multiple rows between Materialized
+    View flushes and background merges. LIMIT 1 BY with updated_at DESC keeps
+    only the latest row per slot — matching FINAL semantics without the
+    in-memory merge cost. Result rows come out ordered by
+    (strategy_table_name, ts) ascending, which the downstream Phase 3 walker
+    requires.
+    """
     rows = query_rows(
         f"""
 SELECT strategy_table_name, ts, position
-FROM analytics.{hour_table}
+FROM analytics.{bucket_table}
 WHERE underlying = '{underlying}'
   AND ts >= toDateTime('{GLOBAL_START_TS}')
-ORDER BY strategy_table_name, ts
+ORDER BY strategy_table_name, ts, updated_at DESC
+LIMIT 1 BY strategy_table_name, ts
 SETTINGS max_memory_usage = {QUERY_MEMORY_CAP}
 """,
         client=client,
@@ -882,7 +983,10 @@ def _audit_underlying(
                         underlying=underlying,
                         stn=stn,
                         category="internal_holes",
-                        detail=f"gap ending {g.gap_end:%Y-%m-%d %H:%M:%S} ({g.gap_minutes}m)",
+                        detail=(
+                            f"gap ending {g.gap_end:%Y-%m-%d %H:%M:%S} "
+                            f"({g.gap_minutes}m)"
+                        ),
                         severity_minutes=g.gap_minutes,
                     )
                 )
@@ -906,7 +1010,10 @@ def _audit_underlying(
                     underlying=underlying,
                     stn=stn,
                     category="position_mismatch",
-                    detail=f"{mismatch_count} rows wrong (of {stat.actual_rows}); samples: {sample_str}",
+                    detail=(
+                        f"{mismatch_count} rows wrong (of {stat.actual_rows}); "
+                        f"samples: {sample_str}"
+                    ),
                     severity_minutes=mismatch_count,
                 )
             )
@@ -962,24 +1069,29 @@ def _audit_table(
     return aggregate
 
 
-def _audit_hour_table(
-    hour_table: str,
+def _audit_bucketed_table(
+    bucket_table: str,
     min_table: str,
+    bucket: timedelta,
     client,
 ) -> AuditReport:
-    """Run hour-slot position check (Phase 3 variant) for one 1-hour table.
+    """Run bucket-slot position check (Phase 3 variant) for one rolled-up table.
 
-    Coverage checks (Phase 1) for the 1-hour table are derived from the 1-min
+    Coverage checks (Phase 1) for rolled-up tables are derived from the 1-min
     presence — we don't repeat Phase 1 here. We only verify the argMax
-    position at each hour slot matches the latest preceding minute change.
+    position at each bucket slot matches the latest preceding minute change.
+
+    Used for both 1hour (bucket=1h) and 1day (bucket=1d) audits.
     """
     aggregate = AuditReport()
-    underlyings = _list_underlyings(hour_table, client)
+    underlyings = _list_underlyings(bucket_table, client)
     for u in underlyings:
-        hr_by_stn = _fetch_q_stat_hour(hour_table, u, client)
-        for stn, rows in hr_by_stn.items():
+        rows_by_stn = _fetch_q_stat_bucketed(bucket_table, u, client)
+        for stn, rows in rows_by_stn.items():
             target_min_changes = _fetch_q_trans(min_table, u, stn, client)
-            v = _check_phase3_hour(hour_table, u, stn, rows, target_min_changes)
+            v = _check_phase3_bucketed(
+                bucket_table, u, stn, rows, target_min_changes, bucket=bucket
+            )
             aggregate.strategies_checked += 1
             if v is not None:
                 aggregate.violations.append(v)
@@ -990,11 +1102,14 @@ def _audit_hour_table(
     name="pnl_coverage_audit",
     group_name="strategy_pnl",
     compute_kind="clickhouse",
-    description="Daily read-only audit of PnL tables: per-(U, S) coverage + position-boundary checks.",
+    description=(
+        "Daily read-only audit of PnL tables: per-(U, S) coverage + "
+        "position-boundary checks."
+    ),
     op_tags={"dagster/timeout": 3600},
 )
 def pnl_coverage_audit_asset(context: AssetExecutionContext) -> MaterializeResult:
-    """Audit all six PnL tables; raise RuntimeError on any violation."""
+    """Audit all nine PnL tables; raise RuntimeError on any violation."""
     import time as _time
 
     started = _time.time()
@@ -1011,7 +1126,8 @@ def pnl_coverage_audit_asset(context: AssetExecutionContext) -> MaterializeResul
             now_ts=now_ts,
         )
         context.log.info(
-            f"[audit] {target}: {sub.strategies_checked} strategies, {len(sub.violations)} violations"
+            f"[audit] {target}: {sub.strategies_checked} strategies, "
+            f"{len(sub.violations)} violations"
         )
         full_report.violations.extend(sub.violations)
         full_report.strategies_checked += sub.strategies_checked
@@ -1019,9 +1135,31 @@ def pnl_coverage_audit_asset(context: AssetExecutionContext) -> MaterializeResul
 
     for hour, min_t, _mode in _HOUR_TABLES:
         context.log.info(f"[audit] starting hour table {hour}")
-        sub = _audit_hour_table(hour_table=hour, min_table=min_t, client=get_client())
+        sub = _audit_bucketed_table(
+            bucket_table=hour,
+            min_table=min_t,
+            bucket=timedelta(hours=1),
+            client=get_client(),
+        )
         context.log.info(
-            f"[audit] {hour}: {sub.strategies_checked} strategies, {len(sub.violations)} violations"
+            f"[audit] {hour}: {sub.strategies_checked} strategies, "
+            f"{len(sub.violations)} violations"
+        )
+        full_report.violations.extend(sub.violations)
+        full_report.strategies_checked += sub.strategies_checked
+        full_report.tables_checked += 1
+
+    for day, min_t, _mode in _DAY_TABLES:
+        context.log.info(f"[audit] starting day table {day}")
+        sub = _audit_bucketed_table(
+            bucket_table=day,
+            min_table=min_t,
+            bucket=timedelta(days=1),
+            client=get_client(),
+        )
+        context.log.info(
+            f"[audit] {day}: {sub.strategies_checked} strategies, "
+            f"{len(sub.violations)} violations"
         )
         full_report.violations.extend(sub.violations)
         full_report.strategies_checked += sub.strategies_checked

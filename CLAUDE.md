@@ -61,7 +61,8 @@ Binance WebSocket (1m closed candles)
     → pnl_consumer/pnl_consumer.py  (GROUP_ID: flink-pnl-consumer, flush every 10 candles)
     → analytics.futures_price_1min
     → analytics.strategy_pnl_1min_prod_v2
-    → analytics.strategy_pnl_1hour_prod_v2  (hourly snapshot upsert on each flush)
+    → analytics.strategy_pnl_1hour_prod_v2  (via MV cascade from 1min INSERTs)
+    → analytics.strategy_pnl_1day_prod_v2   (via MV cascade from 1hour INSERTs)
 ```
 
 **Batch path** (Dagster, every ~5 min):
@@ -77,6 +78,9 @@ PnL refresh assets (full recompute, every ~5 min, rolling 7-day window)
 
 Rollup asset (hourly, argMax aggregation)
     → analytics.strategy_pnl_1hour_{prod,bt,real_trade}_v2
+
+Daily rollup (MV cascade — no asset)
+    → analytics.strategy_pnl_1day_{prod,bt,real_trade}_v2
 ```
 
 ### Dagster Entry Point
@@ -208,7 +212,7 @@ Full detail in `docs/pnl_consumer_logic.md`. Shared query library in `libs/compu
 
 - **All queries through** `services/dagster/trading_dagster/utils/clickhouse_client.py`: `get_client()`, `query_rows()`, `query_dicts()`, `query_scalar()`, `execute()`, `insert_rows()`
 - **No connection pooling**: each call creates a new connection unless a `client=` is passed explicitly. Pass a shared client when doing multiple operations in one asset run to avoid redundant connections.
-- **ReplacingMergeTree(updated_at)**: re-inserting rows replaces older ones after background merge. Use `FINAL` in SELECT to get deduplicated results immediately, but avoid `FINAL` on large frequently-queried tables (it forces in-memory merge). Prefer `LIMIT 1 BY key ORDER BY key, updated_at DESC` to read the latest row per key using the sort index instead.
+- **ReplacingMergeTree(updated_at)**: re-inserting rows replaces older ones after background merge. Use `FINAL` in SELECT to get deduplicated results immediately, but avoid `FINAL` on large frequently-queried tables (it forces in-memory merge). Prefer `LIMIT 1 BY key ORDER BY key, updated_at DESC` to read the latest row per key using the sort index instead. Same applies to the 1hour and 1day rollup tables.
 - **Idempotent upserts**: partitioned assets DELETE the day+instrument partition before inserting; unpartitioned assets rely on ReplacingMergeTree.
 - **Batch insert**: `insert_rows()` defaults to 200k rows per batch.
 - **Datetime types**: ClickHouse-connect requires Python `datetime` objects for DateTime columns. `_prepare_rows_for_clickhouse()` in `pnl_strategy_v2.py` handles string→datetime conversion for PnL rows (ts at index 7, updated_at at index 14 of PROD_INSERT_COLUMNS).
