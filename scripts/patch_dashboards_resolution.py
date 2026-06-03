@@ -140,16 +140,19 @@ def patch_panel(panel: dict) -> int:
 
 
 def patch_dashboard(path: Path) -> int:
+    """Rewrite every PnL family reference in `path` to the canonical 3-branch
+    form. patch_sql is idempotent: a dashboard already in 3-branch shape
+    yields zero substitutions and the file is left untouched.
+    """
     d = json.loads(path.read_text())
-
-    text = json.dumps(d)
-    if "UNION ALL" in text:
-        print(f"  SKIP (already patched): {path.name}")
-        return 0
 
     count = 0
     for panel in d.get("panels", []):
         count += patch_panel(panel)
+
+    if count == 0:
+        print(f"  SKIP (already canonical): {path.name}")
+        return 0
 
     path.write_text(json.dumps(d, indent=2) + "\n")
     print(f"  PATCHED {path.name}: {count} queries rewritten")
