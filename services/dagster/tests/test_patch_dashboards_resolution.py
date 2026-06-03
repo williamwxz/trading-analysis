@@ -49,3 +49,51 @@ class TestBareReferences:
         )
         assert out == expected
         assert n == 1
+
+    def test_bare_1hour_bt_rewrites_to_3_branch(self):
+        sql = "SELECT * FROM analytics.strategy_pnl_1hour_bt_v2 WHERE foo = 1"
+        out, n = patch_sql(sql)
+        expected = (
+            f"SELECT * FROM {_three_branch('bt_v2')} WHERE foo = 1"
+        )
+        assert out == expected
+        assert n == 1
+
+    def test_bare_with_final_preserves_final_in_all_branches(self):
+        sql = (
+            "SELECT * FROM analytics.strategy_pnl_1min_real_trade_v2 FINAL"
+            " WHERE foo = 1"
+        )
+        out, n = patch_sql(sql)
+        expected = (
+            f"SELECT * FROM {_three_branch('real_trade_v2', ' FINAL')} WHERE foo = 1"
+        )
+        assert out == expected
+        assert n == 1
+        # Each branch keeps FINAL exactly once.
+        assert out.count(" FINAL") == 3
+
+    def test_two_bare_refs_in_one_sql_get_both_rewritten(self):
+        sql = (
+            "SELECT * FROM analytics.strategy_pnl_1min_prod_v2 WHERE ts > now()"
+            " UNION ALL"
+            " SELECT * FROM analytics.strategy_pnl_1hour_bt_v2 WHERE ts < now()"
+        )
+        out, n = patch_sql(sql)
+        assert n == 2
+        assert out.count("UNION ALL") == 5  # original + 2 refs × 2 UNION ALLs each
+        assert "strategy_pnl_1day_prod_v2" in out
+        assert "strategy_pnl_1day_bt_v2" in out
+
+
+class TestUnrelatedSQL:
+    def test_sql_without_pnl_refs_is_unchanged(self):
+        sql = "SELECT 1 AS x FROM analytics.futures_price_1min WHERE ts > now()"
+        out, n = patch_sql(sql)
+        assert out == sql
+        assert n == 0
+
+    def test_empty_string_is_unchanged(self):
+        out, n = patch_sql("")
+        assert out == ""
+        assert n == 0
