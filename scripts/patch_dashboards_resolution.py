@@ -19,6 +19,7 @@ drift between script and committed JSON is a bug, fixed by re-running.
 
 Run once: python3 scripts/patch_dashboards_resolution.py
 """
+
 import json
 import re
 from pathlib import Path
@@ -167,7 +168,9 @@ def main() -> None:
     total = 0
     for path in dashboards:
         total += patch_dashboard(path)
-    print(f"\nDone. {total} total queries rewritten across {len(dashboards)} dashboards.")
+    print(
+        f"\nDone. {total} total queries rewritten across {len(dashboards)} dashboards."
+    )
 
 
 if __name__ == "__main__":

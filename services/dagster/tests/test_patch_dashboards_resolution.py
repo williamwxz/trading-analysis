@@ -17,7 +17,6 @@ sys.path.insert(0, str(_REPO_ROOT / "scripts"))
 
 from patch_dashboards_resolution import patch_sql  # noqa: E402
 
-
 _1MIN_WHERE = "ts >= toStartOfHour(now() - INTERVAL 6 HOUR)"
 _1HOUR_WHERE = (
     "ts >= toStartOfDay(now() - INTERVAL 30 DAY) "
@@ -55,18 +54,14 @@ class TestBareReferences:
     def test_bare_1min_prod_rewrites_to_3_branch(self):
         sql = "SELECT * FROM analytics.strategy_pnl_1min_prod_v2 WHERE foo = 1"
         out, n = patch_sql(sql)
-        expected = (
-            f"SELECT * FROM {_three_branch('prod_v2')} WHERE foo = 1"
-        )
+        expected = f"SELECT * FROM {_three_branch('prod_v2')} WHERE foo = 1"
         assert out == expected
         assert n == 1
 
     def test_bare_1hour_bt_rewrites_to_3_branch(self):
         sql = "SELECT * FROM analytics.strategy_pnl_1hour_bt_v2 WHERE foo = 1"
         out, n = patch_sql(sql)
-        expected = (
-            f"SELECT * FROM {_three_branch('bt_v2')} WHERE foo = 1"
-        )
+        expected = f"SELECT * FROM {_three_branch('bt_v2')} WHERE foo = 1"
         assert out == expected
         assert n == 1
 
@@ -112,13 +107,9 @@ class TestUnrelatedSQL:
 
 class TestTwoBranchUpgrade:
     def test_two_branch_prod_upgrades_to_3_branch(self):
-        sql = (
-            f"SELECT time FROM {_two_branch_deployed('prod_v2')} GROUP BY time"
-        )
+        sql = f"SELECT time FROM {_two_branch_deployed('prod_v2')} GROUP BY time"
         out, n = patch_sql(sql)
-        expected = (
-            f"SELECT time FROM {_three_branch('prod_v2')} GROUP BY time"
-        )
+        expected = f"SELECT time FROM {_three_branch('prod_v2')} GROUP BY time"
         assert out == expected
         assert n == 1
 
