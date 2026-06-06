@@ -11,9 +11,21 @@ Runs in ap-northeast-1 (Tokyo) so Binance Futures isn't geo-blocked.
 
 Env vars (mostly injected by ECS task def):
     CLICKHOUSE_HOST/PORT/USER/PASSWORD/SECURE
-    LOOKBACK_HOURS         (default 48)
+    LOOKBACK_HOURS         (default 48; ignored if WINDOW_START is set)
+    WINDOW_START           (optional ISO ts, UTC; overrides LOOKBACK_HOURS)
+    WINDOW_END             (optional ISO ts, UTC; defaults to "now-1min")
     INSTRUMENTS            (comma-separated; default matches streaming consumer)
     INSERT_BATCH_SIZE      (default 200 rows per INSERT VALUES statement)
+
+Ad-hoc historical backfill (one-off ECS RunTask override):
+    aws ecs run-task --cluster trading-analysis \\
+        --task-definition trading-analysis-backfill-prices \\
+        --launch-type FARGATE \\
+        --network-configuration 'awsvpcConfiguration={subnets=[<priv>],securityGroups=[<sg>],assignPublicIp=DISABLED}' \\
+        --overrides '{"containerOverrides":[{"name":"backfill-prices","environment":[
+            {"name":"WINDOW_START","value":"2026-05-30 00:00:00"},
+            {"name":"WINDOW_END","value":"2026-06-01 00:00:00"}
+        ]}]}'
 """
 
 from __future__ import annotations
@@ -44,6 +56,8 @@ INSTRUMENTS: list[str] = [
 ]
 LOOKBACK_HOURS = int(os.environ.get("LOOKBACK_HOURS", "48"))
 INSERT_BATCH_SIZE = int(os.environ.get("INSERT_BATCH_SIZE", "200"))
+WINDOW_START_ENV = os.environ.get("WINDOW_START", "").strip()
+WINDOW_END_ENV = os.environ.get("WINDOW_END", "").strip()
 
 TABLE = "analytics.futures_price_1min"
 EXCHANGE_LABEL = "binance"  # written into the `exchange` column for parity with streaming
@@ -215,17 +229,40 @@ def backfill_instrument(client, exchange, instrument: str, window_start, window_
 # ── main ────────────────────────────────────────────────────────────────────
 
 
-def main() -> int:
-    log.info(
-        "starting daily backfill: instruments=%s lookback_hours=%d",
-        INSTRUMENTS, LOOKBACK_HOURS,
-    )
+def _parse_iso(s: str) -> datetime:
+    """Accept 'YYYY-MM-DD HH:MM:SS' or 'YYYY-MM-DDTHH:MM:SS' (optional 'Z')."""
+    s = s.replace("T", " ").rstrip("Z").strip()
+    if len(s) == 10:  # date only
+        s += " 00:00:00"
+    return datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S")
+
+
+def resolve_window() -> tuple[datetime, datetime]:
+    """Resolve the [start, end) scan window. WINDOW_START/END env vars take
+    precedence — both naive UTC. Without them, falls back to the rolling
+    LOOKBACK_HOURS ending one minute before now."""
     now = datetime.now(tz=timezone.utc).replace(tzinfo=None)
-    # Bound window_end to the previous full minute — partial-minute candles
-    # from Binance can be ambiguous (close may revise once the minute closes).
-    window_end = now.replace(second=0, microsecond=0) - timedelta(minutes=1)
-    window_start = window_end - timedelta(hours=LOOKBACK_HOURS)
-    log.info("scan window: [%s, %s)", window_start, window_end)
+    default_end = now.replace(second=0, microsecond=0) - timedelta(minutes=1)
+    if WINDOW_START_ENV:
+        window_start = _parse_iso(WINDOW_START_ENV)
+        window_end = _parse_iso(WINDOW_END_ENV) if WINDOW_END_ENV else default_end
+    else:
+        window_end = _parse_iso(WINDOW_END_ENV) if WINDOW_END_ENV else default_end
+        window_start = window_end - timedelta(hours=LOOKBACK_HOURS)
+    if window_start >= window_end:
+        raise ValueError(
+            f"WINDOW_START ({window_start}) must be < WINDOW_END ({window_end})"
+        )
+    return window_start, window_end
+
+
+def main() -> int:
+    window_start, window_end = resolve_window()
+    mode = "explicit-window" if WINDOW_START_ENV or WINDOW_END_ENV else "rolling-lookback"
+    log.info(
+        "starting backfill (%s): instruments=%s window=[%s, %s)",
+        mode, INSTRUMENTS, window_start, window_end,
+    )
 
     client = get_ch_client()
     exchange = get_ccxt_exchange()
