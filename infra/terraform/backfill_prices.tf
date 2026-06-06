@@ -1,167 +1,154 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# Daily futures-price backfill — ECS RunTask triggered by EventBridge Schedule
+# Daily futures-price backfill — AWS Lambda (image package) + EventBridge Rule
 #
-# Replaces the deprecated Dagster binance_futures_backfill asset. One-shot
-# Fargate task fetches the last 48h of 1-min OHLCV from Binance Futures and
-# fills any gaps in analytics.futures_price_1min. Must run in ap-northeast-1
-# (Tokyo) — Binance Futures geo-blocks US IPs.
+# Replaces the deprecated Dagster `binance_futures_backfill` asset. Fetches the
+# last 48h of 1-min OHLCV from Binance Futures and fills any gaps in
+# analytics.futures_price_1min.
 #
-# Cost: ≈ $0.10 / month (Fargate 0.25 vCPU × ~60s × 30 days).
+# VPC-attached so it egresses through the fck-nat EIP (same outbound IP as the
+# streaming consumer). Must run in ap-northeast-1 (Tokyo) — Binance Futures
+# geo-blocks US IPs.
+#
+# Cost: free tier (daily 60s × 512 MiB ≈ 900 GB-sec/month, well under 400k
+# GB-sec free tier).
+#
+# Replaces the prior ECS RunTask + EventBridge Scheduler setup. The reasons:
+#   - Cheaper (free tier vs ~$0.10/mo Fargate)
+#   - No `scheduler:*` IAM perm needed on the GitHub Actions role
+#   - EventBridge Rule is more widely supported than EventBridge Scheduler
+#
+# Ad-hoc historical run:
+#   aws lambda invoke --function-name trading-analysis-backfill-prices \
+#     --payload '{"window_start":"2026-06-04","window_end":"2026-06-06"}' \
+#     --cli-binary-format raw-in-base64-out /dev/stdout
 # ──────────────────────────────────────────────────────────────────────────────
 
-data "aws_caller_identity" "current" {}
-
-resource "aws_ecr_repository" "backfill_prices" {
-  name                 = "trading-analysis-backfill-prices"
-  image_tag_mutability = "MUTABLE"
-  tags                 = local.common_tags
+# The ECR repo is owned by the `build-backfill-prices` CI job (it idempotently
+# creates the repo before docker push) — not by Terraform. This breaks the
+# chicken-and-egg between Terraform (which needs the image to exist when it
+# creates the Lambda) and the CI build step (which needs the ECR repo). Build
+# always runs before Terraform on this branch, so the image is guaranteed to
+# exist by the time Terraform reaches aws_lambda_function below.
+data "aws_ecr_repository" "backfill_prices" {
+  name = "trading-analysis-backfill-prices"
 }
 
 resource "aws_cloudwatch_log_group" "backfill_prices" {
-  name              = "/ecs/${local.name_prefix}-backfill-prices"
+  # Lambda's auto-created log group naming convention.
+  name              = "/aws/lambda/${local.name_prefix}-backfill-prices"
   retention_in_days = 14
   tags              = local.common_tags
 }
 
-# ── task role: SELECT/INSERT on analytics.* via existing CH creds ───────────
-# Reuses the secretsmanager-stored ClickHouse creds via the same `dev_ro3`-
-# style account that the rest of the stack uses. We do NOT need ECS pause/
-# resume, so this role is read/write to CH only.
+# ── Lambda execution role ───────────────────────────────────────────────────
 
-resource "aws_iam_role" "backfill_prices_task" {
-  name = "${local.name_prefix}-backfill-prices-task"
+resource "aws_iam_role" "backfill_prices_lambda" {
+  name = "${local.name_prefix}-backfill-prices-lambda"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
       Effect    = "Allow"
-      Principal = { Service = "ecs-tasks.amazonaws.com" }
+      Principal = { Service = "lambda.amazonaws.com" }
       Action    = "sts:AssumeRole"
     }]
   })
   tags = local.common_tags
 }
 
-# Reuse the existing execution role — it already grants secretsmanager pull
-# and CloudWatch log push, which is all this container needs.
-
-resource "aws_ecs_task_definition" "backfill_prices" {
-  family                   = "${local.name_prefix}-backfill-prices"
-  requires_compatibilities = ["FARGATE"]
-  network_mode             = "awsvpc"
-  cpu                      = 256 # 0.25 vCPU
-  memory                   = 512 # MiB
-  execution_role_arn       = aws_iam_role.ecs_execution.arn
-  task_role_arn            = aws_iam_role.backfill_prices_task.arn
-
-  container_definitions = jsonencode([{
-    name      = "backfill-prices"
-    image     = "${aws_ecr_repository.backfill_prices.repository_url}:latest"
-    essential = true
-
-    environment = [
-      { name = "CLICKHOUSE_USER", value = "dagster" },
-      { name = "CLICKHOUSE_PORT", value = "8443" },
-      { name = "CLICKHOUSE_SECURE", value = "true" },
-      { name = "LOOKBACK_HOURS", value = "48" },
-      # INSTRUMENTS defaults to the streaming consumer's list inside the script.
-    ]
-
-    secrets = [
-      { name = "CLICKHOUSE_HOST", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
-      { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
-    ]
-
-    logConfiguration = {
-      logDriver = "awslogs"
-      options = {
-        "awslogs-group"         = aws_cloudwatch_log_group.backfill_prices.name
-        "awslogs-region"        = var.aws_region
-        "awslogs-stream-prefix" = "task"
-      }
-    }
-  }])
-
-  tags = local.common_tags
+# Logs + VPC ENI management (the VPC-access managed policy grants
+# ec2:CreateNetworkInterface, DescribeNetworkInterfaces, DeleteNetworkInterface).
+resource "aws_iam_role_policy_attachment" "backfill_prices_lambda_basic" {
+  role       = aws_iam_role.backfill_prices_lambda.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# ── EventBridge Scheduler — daily 00:30 UTC trigger ─────────────────────────
-# Scheduler invokes ECS RunTask with the task definition above. Picks 00:30
-# UTC so a Tokyo-region run covers the full prior calendar day in UTC plus a
-# safety margin (the 48h lookback gives further redundancy).
-
-resource "aws_iam_role" "backfill_prices_scheduler" {
-  name = "${local.name_prefix}-backfill-prices-scheduler"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect    = "Allow"
-      Principal = { Service = "scheduler.amazonaws.com" }
-      Action    = "sts:AssumeRole"
-    }]
-  })
-  tags = local.common_tags
+resource "aws_iam_role_policy_attachment" "backfill_prices_lambda_vpc" {
+  role       = aws_iam_role.backfill_prices_lambda.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
 }
 
-resource "aws_iam_role_policy" "backfill_prices_scheduler" {
-  name = "ecs-runtask"
-  role = aws_iam_role.backfill_prices_scheduler.id
+# Read the ClickHouse secret bundle (handler.py fetches via boto3 on cold start).
+resource "aws_iam_role_policy" "backfill_prices_lambda_secrets" {
+  name = "secretsmanager-read"
+  role = aws_iam_role.backfill_prices_lambda.id
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        # Allow any revision of this task definition family
-        Effect   = "Allow"
-        Action   = "ecs:RunTask"
-        Resource = "arn:aws:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:task-definition/${aws_ecs_task_definition.backfill_prices.family}:*"
-        Condition = {
-          ArnLike = {
-            "ecs:cluster" = aws_ecs_cluster.main.arn
-          }
-        }
-      },
-      {
-        Effect = "Allow"
-        Action = "iam:PassRole"
-        Resource = [
-          aws_iam_role.ecs_execution.arn,
-          aws_iam_role.backfill_prices_task.arn,
-        ]
-      },
-    ]
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["secretsmanager:GetSecretValue"]
+      Resource = aws_secretsmanager_secret.clickhouse.arn
+    }]
   })
 }
 
-resource "aws_scheduler_schedule" "backfill_prices_daily" {
-  name        = "${local.name_prefix}-backfill-prices-daily"
-  group_name  = "default"
-  description = "Daily futures_price_1min gap fill (replaces deprecated Dagster asset)"
+# ── Lambda function (image package) ─────────────────────────────────────────
 
-  schedule_expression          = "cron(30 0 * * ? *)" # 00:30 UTC daily
-  schedule_expression_timezone = "UTC"
+resource "aws_lambda_function" "backfill_prices" {
+  function_name = "${local.name_prefix}-backfill-prices"
+  description   = "Daily futures_price_1min gap fill (Binance Futures via ccxt)"
+  role          = aws_iam_role.backfill_prices_lambda.arn
 
-  flexible_time_window {
-    mode = "OFF"
+  package_type = "Image"
+  # `:latest` is rebuilt by CI on every push to main; the deploy step then
+  # calls update-function-code with the SHA-tagged image to force a refresh
+  # (Lambda doesn't auto-pull a moved :latest tag).
+  image_uri = "${data.aws_ecr_repository.backfill_prices.repository_url}:latest"
+
+  memory_size = 512 # MiB — comfortably above the ~100MB working set
+  timeout     = 900 # seconds (15 min Lambda max); typical daily run ~60s
+
+  vpc_config {
+    subnet_ids         = [aws_subnet.private.id]
+    security_group_ids = [aws_security_group.ecs_tasks.id]
   }
 
-  target {
-    arn      = aws_ecs_cluster.main.arn
-    role_arn = aws_iam_role.backfill_prices_scheduler.arn
-
-    ecs_parameters {
-      task_definition_arn = aws_ecs_task_definition.backfill_prices.arn
-      launch_type         = "FARGATE"
-      task_count          = 1
-
-      network_configuration {
-        subnets          = [aws_subnet.private.id]
-        security_groups  = [aws_security_group.ecs_tasks.id]
-        assign_public_ip = false
-      }
-    }
-
-    retry_policy {
-      maximum_event_age_in_seconds = 3600 # 1h — re-fire if scheduler delayed
-      maximum_retry_attempts       = 2
+  environment {
+    variables = {
+      CLICKHOUSE_USER       = "dagster"
+      CLICKHOUSE_PORT       = "8443"
+      CLICKHOUSE_SECURE     = "true"
+      CLICKHOUSE_SECRET_ARN = aws_secretsmanager_secret.clickhouse.arn
+      LOOKBACK_HOURS        = "48"
+      # INSTRUMENTS defaults to the streaming consumer's list inside the script.
     }
   }
+
+  # CI updates the image after every push; ignore drift in image_uri so
+  # `terraform apply` doesn't fight the deploy step.
+  lifecycle {
+    ignore_changes = [image_uri]
+  }
+
+  depends_on = [
+    aws_cloudwatch_log_group.backfill_prices,
+    aws_iam_role_policy_attachment.backfill_prices_lambda_basic,
+    aws_iam_role_policy_attachment.backfill_prices_lambda_vpc,
+  ]
+
+  tags = local.common_tags
+}
+
+# ── EventBridge Rule — daily 00:30 UTC trigger ──────────────────────────────
+
+resource "aws_cloudwatch_event_rule" "backfill_prices_daily" {
+  name                = "${local.name_prefix}-backfill-prices-daily"
+  description         = "Daily futures_price_1min gap fill (replaces deprecated Dagster asset)"
+  schedule_expression = "cron(30 0 * * ? *)" # 00:30 UTC daily
+  tags                = local.common_tags
+}
+
+resource "aws_cloudwatch_event_target" "backfill_prices_daily" {
+  rule      = aws_cloudwatch_event_rule.backfill_prices_daily.name
+  target_id = "backfill-prices-lambda"
+  arn       = aws_lambda_function.backfill_prices.arn
+  # Empty event = rolling LOOKBACK_HOURS window (handler.py treats {} as default).
+  input = "{}"
+}
+
+resource "aws_lambda_permission" "backfill_prices_allow_events" {
+  statement_id  = "AllowExecutionFromEventBridge"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.backfill_prices.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.backfill_prices_daily.arn
 }

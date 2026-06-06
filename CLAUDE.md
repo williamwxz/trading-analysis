@@ -368,7 +368,8 @@ cat > /tmp/gha-permissions.json <<'EOF'
       "Action": [
         "ec2:*", "rds:*", "elasticloadbalancing:*",
         "iam:*", "secretsmanager:*", "ecs:*",
-        "s3:*", "ecr:*", "logs:*", "elasticfilesystem:*"
+        "s3:*", "ecr:*", "logs:*", "elasticfilesystem:*",
+        "lambda:*", "events:*"
       ],
       "Resource": "*"
     }
