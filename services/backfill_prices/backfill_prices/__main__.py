@@ -1,19 +1,31 @@
-"""Daily backfill for analytics.futures_price_1min.
+"""Backfill missing minutes in analytics.futures_price_1min from Binance Futures.
 
-For each instrument, detects missing minutes in the last LOOKBACK_HOURS,
-fetches them from Binance Futures via ccxt, and inserts via raw `INSERT VALUES`
-(the clickhouse-connect bulk-insert API silently dropped rows on the Cloud's
+For each instrument, detects missing minutes in the scan window, fetches them
+from Binance Futures via ccxt, and inserts via raw `INSERT VALUES` (the
+clickhouse-connect bulk-insert API silently dropped rows on the Cloud's
 SharedReplacingMergeTree during operational testing — root cause TBD, raw SQL
 is the reliable workaround).
 
-Runs as a one-shot ECS Fargate task triggered daily by EventBridge Schedule.
-Runs in ap-northeast-1 (Tokyo) so Binance Futures isn't geo-blocked.
+Runs daily as an AWS Lambda (image-package) triggered by EventBridge Rule. The
+Lambda is VPC-attached and egresses through the same fck-nat EIP as the
+streaming consumer so Binance sees a stable IP. Tokyo region — Binance Futures
+geo-blocks US IPs.
 
-Env vars (mostly injected by ECS task def):
+Env vars (all read inside functions, not captured at module load, so warm
+Lambda containers pick up per-invocation overrides set by handler.py):
     CLICKHOUSE_HOST/PORT/USER/PASSWORD/SECURE
-    LOOKBACK_HOURS         (default 48)
+    LOOKBACK_HOURS         (default 48; ignored if WINDOW_START is set)
+    WINDOW_START           (optional ISO ts, UTC; overrides LOOKBACK_HOURS)
+    WINDOW_END             (optional ISO ts, UTC; defaults to "now-1min")
     INSTRUMENTS            (comma-separated; default matches streaming consumer)
     INSERT_BATCH_SIZE      (default 200 rows per INSERT VALUES statement)
+
+Ad-hoc historical backfill (Lambda invoke with event payload):
+    aws lambda invoke --function-name trading-analysis-backfill-prices \\
+        --payload '{"window_start":"2026-06-04","window_end":"2026-06-06"}' \\
+        --cli-binary-format raw-in-base64-out /dev/stdout
+
+Empty event → daily rolling lookback (what the EventBridge Rule sends).
 """
 
 from __future__ import annotations
@@ -25,7 +37,8 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import ccxt
-import clickhouse_connect
+
+from libs.clickhouse_client import get_client as get_ch_client
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,17 +47,11 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ── config ──────────────────────────────────────────────────────────────────
+# ── constants (non-env; safe to capture at module load) ─────────────────────
 
 DEFAULT_INSTRUMENTS = (
     "BTCUSDT,ETHUSDT,SOLUSDT,ADAUSDT,AVAXUSDT,DOGEUSDT,XRPUSDT,FETUSDT"
 )
-INSTRUMENTS: list[str] = [
-    s.strip() for s in os.environ.get("INSTRUMENTS", DEFAULT_INSTRUMENTS).split(",") if s.strip()
-]
-LOOKBACK_HOURS = int(os.environ.get("LOOKBACK_HOURS", "48"))
-INSERT_BATCH_SIZE = int(os.environ.get("INSERT_BATCH_SIZE", "200"))
-
 TABLE = "analytics.futures_price_1min"
 EXCHANGE_LABEL = "binance"  # written into the `exchange` column for parity with streaming
 
@@ -56,21 +63,17 @@ FETCH_SLEEP_SECS = 0.25  # between paginated calls; well under rate limit
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
-
-def get_ch_client():
-    return clickhouse_connect.get_client(
-        host=os.environ["CLICKHOUSE_HOST"],
-        port=int(os.environ.get("CLICKHOUSE_PORT", 8443)),
-        user=os.environ["CLICKHOUSE_USER"],
-        password=os.environ["CLICKHOUSE_PASSWORD"],
-        secure=os.environ.get("CLICKHOUSE_SECURE", "true").lower() == "true",
-    )
+# Module-level singletons reused across warm Lambda invocations — saves the
+# ~500 ms-1 s of ccxt.load_markets() and the TLS handshake on every warm call.
+_EXCHANGE: ccxt.binanceusdm | None = None
 
 
 def get_ccxt_exchange() -> ccxt.binanceusdm:
-    ex = ccxt.binanceusdm()
-    ex.load_markets()
-    return ex
+    global _EXCHANGE
+    if _EXCHANGE is None:
+        _EXCHANGE = ccxt.binanceusdm()
+        _EXCHANGE.load_markets()
+    return _EXCHANGE
 
 
 def _instrument_to_symbol(instrument: str) -> str:
@@ -78,6 +81,37 @@ def _instrument_to_symbol(instrument: str) -> str:
     assert instrument.endswith("USDT"), f"unexpected instrument: {instrument}"
     base = instrument[:-4]
     return f"{base}/USDT:USDT"
+
+
+def _parse_iso(s: str) -> datetime:
+    """Accept 'YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', or 'YYYY-MM-DDTHH:MM:SS[Z]'."""
+    s = s.replace("T", " ").rstrip("Z").strip()
+    if len(s) == 10:  # date only
+        s += " 00:00:00"
+    return datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S")
+
+
+def resolve_window() -> tuple[datetime, datetime]:
+    """Resolve the [start, end) scan window. WINDOW_START/END env vars take
+    precedence — both naive UTC. Without them, falls back to the rolling
+    LOOKBACK_HOURS ending one minute before now."""
+    now = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+    default_end = now.replace(second=0, microsecond=0) - timedelta(minutes=1)
+    ws_env = os.environ.get("WINDOW_START", "").strip()
+    we_env = os.environ.get("WINDOW_END", "").strip()
+    if ws_env:
+        window_start = _parse_iso(ws_env)
+        window_end = _parse_iso(we_env) if we_env else default_end
+    else:
+        window_end = _parse_iso(we_env) if we_env else default_end
+        window_start = window_end - timedelta(
+            hours=int(os.environ.get("LOOKBACK_HOURS", "48"))
+        )
+    if window_start >= window_end:
+        raise ValueError(
+            f"WINDOW_START ({window_start}) must be < WINDOW_END ({window_end})"
+        )
+    return window_start, window_end
 
 
 def find_missing_minutes(
@@ -156,7 +190,7 @@ def fetch_ohlcv_range(
 
 
 def insert_rows_raw_sql(
-    client, instrument: str, rows: list[tuple], batch_size: int = INSERT_BATCH_SIZE
+    client, instrument: str, rows: list[tuple], batch_size: int | None = None
 ) -> int:
     """INSERT via raw VALUES SQL (bulk-insert API silently drops on this Cloud).
 
@@ -164,6 +198,8 @@ def insert_rows_raw_sql(
     """
     if not rows:
         return 0
+    if batch_size is None:
+        batch_size = int(os.environ.get("INSERT_BATCH_SIZE", "200"))
     inserted = 0
     for i in range(0, len(rows), batch_size):
         batch = rows[i : i + batch_size]
@@ -216,23 +252,28 @@ def backfill_instrument(client, exchange, instrument: str, window_start, window_
 
 
 def main() -> int:
-    log.info(
-        "starting daily backfill: instruments=%s lookback_hours=%d",
-        INSTRUMENTS, LOOKBACK_HOURS,
+    instruments = [
+        s.strip()
+        for s in os.environ.get("INSTRUMENTS", DEFAULT_INSTRUMENTS).split(",")
+        if s.strip()
+    ]
+    window_start, window_end = resolve_window()
+    mode = (
+        "explicit-window"
+        if os.environ.get("WINDOW_START") or os.environ.get("WINDOW_END")
+        else "rolling-lookback"
     )
-    now = datetime.now(tz=timezone.utc).replace(tzinfo=None)
-    # Bound window_end to the previous full minute — partial-minute candles
-    # from Binance can be ambiguous (close may revise once the minute closes).
-    window_end = now.replace(second=0, microsecond=0) - timedelta(minutes=1)
-    window_start = window_end - timedelta(hours=LOOKBACK_HOURS)
-    log.info("scan window: [%s, %s)", window_start, window_end)
+    log.info(
+        "starting backfill (%s): instruments=%s window=[%s, %s)",
+        mode, instruments, window_start, window_end,
+    )
 
     client = get_ch_client()
     exchange = get_ccxt_exchange()
 
     grand_total = 0
     failures: list[str] = []
-    for instrument in INSTRUMENTS:
+    for instrument in instruments:
         try:
             grand_total += backfill_instrument(
                 client, exchange, instrument, window_start, window_end
