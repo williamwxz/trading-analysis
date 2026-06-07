@@ -300,33 +300,12 @@ jobs:
           echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
           echo "image_tag=${{ github.sha }}" >> $GITHUB_OUTPUT
 
-      # Lambda's image_uri is `lifecycle.ignore_changes`d in Terraform, so the
-      # daily Apply does not bump it. Point the function at the freshly pushed
-      # SHA-tagged image so cold starts pick it up.
-      #
-      # On the very first PR merge the function does not yet exist (Terraform
-      # creates it from the :latest tag that this build just pushed). In that
-      # case skip the update — the function will run on the freshly pushed
-      # :latest after Terraform creates it.
-      - name: Update Lambda function code
-        env:
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-          IMAGE_URI: ${{ steps.build.outputs.image_uri }}
-        run: |
-          FN=trading-analysis-backfill-prices
-          if aws lambda get-function --function-name "$FN" --region "$AWS_REGION" >/dev/null 2>&1; then
-            aws lambda update-function-code \
-              --function-name "$FN" \
-              --image-uri "$IMAGE_URI" \
-              --region "$AWS_REGION" \
-              --publish \
-              --no-cli-pager
-            aws lambda wait function-updated \
-              --function-name "$FN" \
-              --region "$AWS_REGION"
-          else
-            echo "Lambda $FN not yet provisioned — Terraform will create it from :latest"
-          fi
+      # No `aws lambda update-function-code` step here — Terraform owns the
+      # Lambda lifecycle end-to-end. The terraform job (which depends on this
+      # one) reads the freshly pushed :latest image's digest via a
+      # `data "aws_ecr_image"` block and pins `aws_lambda_function.image_uri`
+      # to repo@sha256:… — so a Terraform apply updates the function whenever
+      # this build pushed a new digest.
 
   deploy-dagster:
     runs-on: ubuntu-latest

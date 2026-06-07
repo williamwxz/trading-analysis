@@ -82,6 +82,23 @@ resource "aws_iam_role_policy" "backfill_prices_lambda_secrets" {
 }
 
 # ── Lambda function (image package) ─────────────────────────────────────────
+#
+# Image deploy flow:
+#   1. CI build job pushes :latest (and :sha) to ECR before this job runs.
+#   2. This data block resolves :latest to its current immutable digest.
+#   3. `aws_lambda_function.image_uri` pins to that digest (repo@sha256:…),
+#      so a Terraform apply triggers a Lambda update whenever the digest
+#      changes — i.e. whenever a new image was pushed.
+#
+# Pinning to the digest (not the floating :latest tag) is required because
+# Lambda treats image_uri as opaque and won't re-pull a moved tag on its own.
+# This way the lifecycle is fully Terraform-managed — no `aws lambda
+# update-function-code` shelling out from CI.
+
+data "aws_ecr_image" "backfill_prices_latest" {
+  repository_name = data.aws_ecr_repository.backfill_prices.name
+  image_tag       = "latest"
+}
 
 resource "aws_lambda_function" "backfill_prices" {
   function_name = "${local.name_prefix}-backfill-prices"
@@ -89,10 +106,7 @@ resource "aws_lambda_function" "backfill_prices" {
   role          = aws_iam_role.backfill_prices_lambda.arn
 
   package_type = "Image"
-  # `:latest` is rebuilt by CI on every push to main; the deploy step then
-  # calls update-function-code with the SHA-tagged image to force a refresh
-  # (Lambda doesn't auto-pull a moved :latest tag).
-  image_uri = "${data.aws_ecr_repository.backfill_prices.repository_url}:latest"
+  image_uri    = "${data.aws_ecr_repository.backfill_prices.repository_url}@${data.aws_ecr_image.backfill_prices_latest.image_digest}"
 
   memory_size = 512 # MiB — comfortably above the ~100MB working set
   timeout     = 900 # seconds (15 min Lambda max); typical daily run ~60s
@@ -111,12 +125,6 @@ resource "aws_lambda_function" "backfill_prices" {
       LOOKBACK_HOURS        = "48"
       # INSTRUMENTS defaults to the streaming consumer's list inside the script.
     }
-  }
-
-  # CI updates the image after every push; ignore drift in image_uri so
-  # `terraform apply` doesn't fight the deploy step.
-  lifecycle {
-    ignore_changes = [image_uri]
   }
 
   depends_on = [
