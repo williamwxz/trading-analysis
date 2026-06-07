@@ -40,10 +40,14 @@ import ccxt
 
 from libs.clickhouse_client import get_client as get_ch_client
 
+# force=True overrides the WARNING-level root logger that the AWS Lambda
+# Python runtime attaches before our code imports — without it, our INFO
+# logs would be filtered out and CloudWatch would only show START/END/REPORT.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
     stream=sys.stdout,
+    force=True,
 )
 log = logging.getLogger(__name__)
 
