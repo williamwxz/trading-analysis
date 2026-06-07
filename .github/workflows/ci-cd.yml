@@ -299,13 +299,7 @@ jobs:
             --push .
           echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
           echo "image_tag=${{ github.sha }}" >> $GITHUB_OUTPUT
-
-      # No `aws lambda update-function-code` step here — Terraform owns the
-      # Lambda lifecycle end-to-end. The terraform job (which depends on this
-      # one) reads the freshly pushed :latest image's digest via a
-      # `data "aws_ecr_image"` block and pins `aws_lambda_function.image_uri`
-      # to repo@sha256:… — so a Terraform apply updates the function whenever
-      # this build pushed a new digest.
+      # Terraform owns Lambda updates (data.aws_ecr_image digest pin in backfill_prices.tf).
 
   deploy-dagster:
     runs-on: ubuntu-latest

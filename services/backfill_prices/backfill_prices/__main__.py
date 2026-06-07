@@ -37,7 +37,8 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import ccxt
-import clickhouse_connect
+
+from libs.clickhouse_client import get_client as get_ch_client
 
 logging.basicConfig(
     level=logging.INFO,
@@ -60,39 +61,19 @@ FETCH_RETRIES = 3
 FETCH_SLEEP_SECS = 0.25  # between paginated calls; well under rate limit
 
 
-# ── env accessors (re-read per call so warm Lambdas pick up overrides) ──────
-
-
-def _env_instruments() -> list[str]:
-    raw = os.environ.get("INSTRUMENTS", DEFAULT_INSTRUMENTS)
-    return [s.strip() for s in raw.split(",") if s.strip()]
-
-
-def _env_lookback_hours() -> int:
-    return int(os.environ.get("LOOKBACK_HOURS", "48"))
-
-
-def _env_insert_batch_size() -> int:
-    return int(os.environ.get("INSERT_BATCH_SIZE", "200"))
-
-
 # ── helpers ─────────────────────────────────────────────────────────────────
 
-
-def get_ch_client():
-    return clickhouse_connect.get_client(
-        host=os.environ["CLICKHOUSE_HOST"],
-        port=int(os.environ.get("CLICKHOUSE_PORT", 8443)),
-        user=os.environ["CLICKHOUSE_USER"],
-        password=os.environ["CLICKHOUSE_PASSWORD"],
-        secure=os.environ.get("CLICKHOUSE_SECURE", "true").lower() == "true",
-    )
+# Module-level singletons reused across warm Lambda invocations — saves the
+# ~500 ms-1 s of ccxt.load_markets() and the TLS handshake on every warm call.
+_EXCHANGE: ccxt.binanceusdm | None = None
 
 
 def get_ccxt_exchange() -> ccxt.binanceusdm:
-    ex = ccxt.binanceusdm()
-    ex.load_markets()
-    return ex
+    global _EXCHANGE
+    if _EXCHANGE is None:
+        _EXCHANGE = ccxt.binanceusdm()
+        _EXCHANGE.load_markets()
+    return _EXCHANGE
 
 
 def _instrument_to_symbol(instrument: str) -> str:
@@ -123,7 +104,9 @@ def resolve_window() -> tuple[datetime, datetime]:
         window_end = _parse_iso(we_env) if we_env else default_end
     else:
         window_end = _parse_iso(we_env) if we_env else default_end
-        window_start = window_end - timedelta(hours=_env_lookback_hours())
+        window_start = window_end - timedelta(
+            hours=int(os.environ.get("LOOKBACK_HOURS", "48"))
+        )
     if window_start >= window_end:
         raise ValueError(
             f"WINDOW_START ({window_start}) must be < WINDOW_END ({window_end})"
@@ -216,7 +199,7 @@ def insert_rows_raw_sql(
     if not rows:
         return 0
     if batch_size is None:
-        batch_size = _env_insert_batch_size()
+        batch_size = int(os.environ.get("INSERT_BATCH_SIZE", "200"))
     inserted = 0
     for i in range(0, len(rows), batch_size):
         batch = rows[i : i + batch_size]
@@ -269,7 +252,11 @@ def backfill_instrument(client, exchange, instrument: str, window_start, window_
 
 
 def main() -> int:
-    instruments = _env_instruments()
+    instruments = [
+        s.strip()
+        for s in os.environ.get("INSTRUMENTS", DEFAULT_INSTRUMENTS).split(",")
+        if s.strip()
+    ]
     window_start, window_end = resolve_window()
     mode = (
         "explicit-window"

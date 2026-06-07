@@ -14,6 +14,9 @@ RUN pip install --no-cache-dir \
 
 # Lambda task root is /var/task.
 COPY services/backfill_prices/backfill_prices/ ${LAMBDA_TASK_ROOT}/backfill_prices/
+# libs/clickhouse_client.get_client() is the shared CH factory; copy only the
+# two files we actually import (skip computation/, tests/, etc.).
+COPY libs/__init__.py libs/clickhouse_client.py ${LAMBDA_TASK_ROOT}/libs/
 
 # Entry: module-path to the handler function.
 CMD ["backfill_prices.handler.handler"]

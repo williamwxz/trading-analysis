@@ -34,39 +34,26 @@ import boto3
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
 
-_SECRET_ARN_ENV = "CLICKHOUSE_SECRET_ARN"
-# Map Secrets Manager JSON keys → env var names the script expects.
-_SECRET_KEY_TO_ENV = {
-    "host": "CLICKHOUSE_HOST",
-    "password": "CLICKHOUSE_PASSWORD",
-}
-
-
 def _fetch_secrets_into_env() -> None:
     """Pull the ClickHouse secret bundle and stuff host/password into env.
 
     Cached per cold-start container; warm invocations skip the network round-trip.
     """
-    if all(os.environ.get(v) for v in _SECRET_KEY_TO_ENV.values()):
+    if os.environ.get("CLICKHOUSE_HOST") and os.environ.get("CLICKHOUSE_PASSWORD"):
         return  # already populated this container
 
-    arn = os.environ.get(_SECRET_ARN_ENV)
+    arn = os.environ.get("CLICKHOUSE_SECRET_ARN")
     if not arn:
         log.warning(
-            "%s not set — assuming CLICKHOUSE_HOST/PASSWORD already in env "
-            "(local dev?)",
-            _SECRET_ARN_ENV,
+            "CLICKHOUSE_SECRET_ARN not set — assuming HOST/PASSWORD already in env"
         )
         return
 
-    sm = boto3.client("secretsmanager")
-    raw = sm.get_secret_value(SecretId=arn)["SecretString"]
-    bundle = json.loads(raw)
-    for key, env_name in _SECRET_KEY_TO_ENV.items():
-        if key in bundle:
-            os.environ[env_name] = str(bundle[key])
-        else:
-            log.warning("secret key %r missing from %s", key, arn)
+    bundle = json.loads(
+        boto3.client("secretsmanager").get_secret_value(SecretId=arn)["SecretString"]
+    )
+    os.environ["CLICKHOUSE_HOST"] = str(bundle["host"])
+    os.environ["CLICKHOUSE_PASSWORD"] = str(bundle["password"])
 
 
 _EVENT_TO_ENV = {

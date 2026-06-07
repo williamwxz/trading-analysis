@@ -112,19 +112,10 @@ resource "aws_subnet" "private" {
   tags              = merge(local.common_tags, { Name = "${local.name_prefix}-private-0" })
 }
 
-# NAT Instance — t4g.nano with Elastic IP (static outbound IP for ClickHouse allowlist)
-# Pinned to the AMI ID of the currently-running NAT instance
-# (fck-nat-al2023-hvm-1.4.0-20260126-arm64-ebs, published 2026-01-26).
-# Previously used `data "aws_ami" "nat" { most_recent = true }`, which silently
-# returned newer fck-nat releases and caused Terraform to plan a *replacement*
-# of the NAT instance on every apply once a new AMI shipped — that hit the
-# account vCPU quota (16) and failed the apply. Pinning keeps the running
-# instance stable across applies. To upgrade, change the literal below and
-# expect a brief NAT outage during replacement.
-locals {
-  nat_ami_id = "ami-0e00b812422d8cf2c"
-}
-
+# NAT Instance — t4g.nano with Elastic IP (static outbound IP for ClickHouse allowlist).
+# AMI pinned (was `data "aws_ami" "nat" { most_recent = true }` — every new
+# fck-nat release forced a NAT replacement and hit the account vCPU quota).
+# To upgrade: change the literal below and expect a brief NAT outage.
 resource "aws_eip" "nat" {
   domain = "vpc"
   tags   = merge(local.common_tags, { Name = "${local.name_prefix}-nat-eip" })
@@ -165,7 +156,7 @@ resource "aws_security_group" "nat" {
 }
 
 resource "aws_instance" "nat" {
-  ami                         = local.nat_ami_id
+  ami                         = "ami-0e00b812422d8cf2c" # fck-nat-al2023-hvm-1.4.0-20260126-arm64-ebs
   instance_type               = "t4g.nano"
   subnet_id                   = aws_subnet.public[0].id
   vpc_security_group_ids      = [aws_security_group.nat.id]

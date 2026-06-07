@@ -1,34 +1,9 @@
-# ──────────────────────────────────────────────────────────────────────────────
-# Daily futures-price backfill — AWS Lambda (image package) + EventBridge Rule
-#
-# Replaces the deprecated Dagster `binance_futures_backfill` asset. Fetches the
-# last 48h of 1-min OHLCV from Binance Futures and fills any gaps in
-# analytics.futures_price_1min.
-#
-# VPC-attached so it egresses through the fck-nat EIP (same outbound IP as the
-# streaming consumer). Must run in ap-northeast-1 (Tokyo) — Binance Futures
-# geo-blocks US IPs.
-#
-# Cost: free tier (daily 60s × 512 MiB ≈ 900 GB-sec/month, well under 400k
-# GB-sec free tier).
-#
-# Replaces the prior ECS RunTask + EventBridge Scheduler setup. The reasons:
-#   - Cheaper (free tier vs ~$0.10/mo Fargate)
-#   - No `scheduler:*` IAM perm needed on the GitHub Actions role
-#   - EventBridge Rule is more widely supported than EventBridge Scheduler
-#
-# Ad-hoc historical run:
-#   aws lambda invoke --function-name trading-analysis-backfill-prices \
-#     --payload '{"window_start":"2026-06-04","window_end":"2026-06-06"}' \
-#     --cli-binary-format raw-in-base64-out /dev/stdout
-# ──────────────────────────────────────────────────────────────────────────────
+# Daily futures-price backfill — image-package Lambda + EventBridge Rule.
+# VPC-attached so it egresses through the fck-nat EIP (same outbound IP as
+# the streaming consumer); must run in ap-northeast-1 — Binance Futures
+# geo-blocks US IPs. See handler.py for the event-payload schema.
 
-# The ECR repo is owned by the `build-backfill-prices` CI job (it idempotently
-# creates the repo before docker push) — not by Terraform. This breaks the
-# chicken-and-egg between Terraform (which needs the image to exist when it
-# creates the Lambda) and the CI build step (which needs the ECR repo). Build
-# always runs before Terraform on this branch, so the image is guaranteed to
-# exist by the time Terraform reaches aws_lambda_function below.
+# ECR repo owned by the build-backfill-prices CI job (see ci-cd.yml).
 data "aws_ecr_repository" "backfill_prices" {
   name = "trading-analysis-backfill-prices"
 }
