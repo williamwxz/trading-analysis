@@ -133,14 +133,6 @@ resource "aws_security_group" "nat" {
     cidr_blocks = [aws_subnet.private.cidr_block]
   }
 
-  # Dagster UI — public access to port 3000 (DNAT forwards to Dagster Fargate task)
-  ingress {
-    from_port   = 3000
-    to_port     = 3000
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
   egress {
     from_port   = 0
     to_port     = 0
@@ -164,62 +156,15 @@ resource "aws_instance" "nat" {
   source_dest_check           = false
   associate_public_ip_address = true
 
-  # iptables DNAT: forward :3000 on the EIP → ECS task private IP:3000
-  # A cron job updates the DNAT rule when the ECS task IP changes
+  # Minimal cloud-init: install AWS CLI + SSM agent. The Dagster DNAT-to-:3000
+  # iptables script was removed when Dagster was deprecated; with no public
+  # ingress on this instance, the NAT just routes outbound traffic from the
+  # private subnet to its EIP.
   user_data = base64encode(<<EOF
 #!/bin/bash
 dnf install -y aws-cli jq amazon-ssm-agent
 systemctl enable amazon-ssm-agent
 systemctl start amazon-ssm-agent
-
-# Enable IP forwarding (required for DNAT)
-echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
-sysctl -p
-
-cat > /usr/local/bin/update-dagster-dnat.sh << 'SCRIPT'
-#!/bin/bash
-REGION="ap-northeast-1"
-CLUSTER="trading-analysis"
-SERVICE="trading-analysis-dagster"
-PORT=3000
-STATE_FILE="/var/run/dagster-dnat-ip"
-
-TASK_ARN=$(aws ecs list-tasks --region $REGION --cluster $CLUSTER --service-name $SERVICE --query 'taskArns[0]' --output text 2>/dev/null)
-[ -z "$TASK_ARN" ] || [ "$TASK_ARN" = "None" ] && exit 0
-
-PRIVATE_IP=$(aws ecs describe-tasks --region $REGION --cluster $CLUSTER --tasks $TASK_ARN --query 'tasks[0].containers[0].networkInterfaces[0].privateIpv4Address' --output text 2>/dev/null)
-[ -z "$PRIVATE_IP" ] || [ "$PRIVATE_IP" = "None" ] && exit 0
-
-CURRENT_IP=$(cat $STATE_FILE 2>/dev/null || echo "")
-
-# Skip update only if IP unchanged AND current target is reachable
-if [ "$CURRENT_IP" = "$PRIVATE_IP" ]; then
-    timeout 2 bash -c ">/dev/tcp/$PRIVATE_IP/$PORT" 2>/dev/null && exit 0
-fi
-
-# Remove old rule if exists
-if [ -n "$CURRENT_IP" ]; then
-    iptables -t nat -D PREROUTING -p tcp --dport $PORT -j DNAT --to-destination $CURRENT_IP:$PORT 2>/dev/null || true
-    iptables -t nat -D POSTROUTING -d $CURRENT_IP -p tcp --dport $PORT -j MASQUERADE 2>/dev/null || true
-fi
-
-# Add new DNAT rule
-iptables -t nat -A PREROUTING -p tcp --dport $PORT -j DNAT --to-destination $PRIVATE_IP:$PORT
-iptables -t nat -A POSTROUTING -d $PRIVATE_IP -p tcp --dport $PORT -j MASQUERADE
-echo "$PRIVATE_IP" > $STATE_FILE
-echo "$(date): updated DNAT to $PRIVATE_IP:$PORT"
-SCRIPT
-
-chmod +x /usr/local/bin/update-dagster-dnat.sh
-/usr/local/bin/update-dagster-dnat.sh || true
-mkdir -p /etc/cron.d
-# Run every 10 seconds via two staggered cron entries (cron minimum is 1 min)
-echo "* * * * * root sleep 0  && /usr/local/bin/update-dagster-dnat.sh >> /var/log/dagster-dnat.log 2>&1" > /etc/cron.d/dagster-dnat
-echo "* * * * * root sleep 10 && /usr/local/bin/update-dagster-dnat.sh >> /var/log/dagster-dnat.log 2>&1" >> /etc/cron.d/dagster-dnat
-echo "* * * * * root sleep 20 && /usr/local/bin/update-dagster-dnat.sh >> /var/log/dagster-dnat.log 2>&1" >> /etc/cron.d/dagster-dnat
-echo "* * * * * root sleep 30 && /usr/local/bin/update-dagster-dnat.sh >> /var/log/dagster-dnat.log 2>&1" >> /etc/cron.d/dagster-dnat
-echo "* * * * * root sleep 40 && /usr/local/bin/update-dagster-dnat.sh >> /var/log/dagster-dnat.log 2>&1" >> /etc/cron.d/dagster-dnat
-echo "* * * * * root sleep 50 && /usr/local/bin/update-dagster-dnat.sh >> /var/log/dagster-dnat.log 2>&1" >> /etc/cron.d/dagster-dnat
 EOF
   )
 
@@ -284,158 +229,13 @@ resource "aws_ecs_cluster_capacity_providers" "main" {
 }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ECS Task Definition — Dagster
-# ─────────────────────────────────────────────────────────────────────────────
-
-resource "aws_ecs_task_definition" "dagster" {
-  family                   = "${local.name_prefix}-dagster"
-  requires_compatibilities = ["FARGATE"]
-  network_mode             = "awsvpc"
-  cpu                      = 512
-  memory                   = 1024
-  execution_role_arn       = aws_iam_role.ecs_execution.arn
-  task_role_arn            = aws_iam_role.ecs_task.arn
-
-  container_definitions = jsonencode([
-    {
-      name      = "dagster-code-server"
-      image     = "${aws_ecr_repository.dagster.repository_url}:latest"
-      essential = true
-      command   = ["dagster", "code-server", "start", "-h", "0.0.0.0", "-p", "4266", "-m", "trading_dagster"]
-
-      environment = [
-        { name = "DAGSTER_HOME", value = "/app" },
-        { name = "CLICKHOUSE_USER", value = "dagster" },
-        { name = "CLICKHOUSE_PORT", value = "8443" },
-        { name = "CLICKHOUSE_SECURE", value = "true" },
-        { name = "DAGSTER_PG_DB", value = "postgres" },
-      ]
-
-      secrets = [
-        { name = "CLICKHOUSE_HOST", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
-        { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
-        { name = "DAGSTER_PG_HOST", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:host::" },
-        { name = "DAGSTER_PG_PASSWORD", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:password::" },
-        { name = "DAGSTER_PG_USER", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:user::" },
-      ]
-
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          "awslogs-group"         = aws_cloudwatch_log_group.dagster.name
-          "awslogs-region"        = var.aws_region
-          "awslogs-stream-prefix" = "code-server"
-        }
-      }
-    },
-    {
-      name      = "dagster-webserver"
-      image     = "${aws_ecr_repository.dagster.repository_url}:latest"
-      essential = true
-      command   = ["dagster-webserver", "-h", "0.0.0.0", "-p", "3000"]
-
-      dependsOn = [
-        { containerName = "dagster-code-server", condition = "START" }
-      ]
-
-      portMappings = [
-        {
-          containerPort = 3000
-          protocol      = "tcp"
-        }
-      ]
-
-      environment = [
-        { name = "DAGSTER_HOME", value = "/app" },
-        { name = "CLICKHOUSE_USER", value = "dagster" },
-        { name = "CLICKHOUSE_PORT", value = "8443" },
-        { name = "CLICKHOUSE_SECURE", value = "true" },
-        { name = "DAGSTER_PG_DB", value = "postgres" },
-      ]
-
-      secrets = [
-        { name = "CLICKHOUSE_HOST", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
-        { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
-        { name = "DAGSTER_PG_HOST", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:host::" },
-        { name = "DAGSTER_PG_PASSWORD", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:password::" },
-        { name = "DAGSTER_PG_USER", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:user::" },
-      ]
-
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          "awslogs-group"         = aws_cloudwatch_log_group.dagster.name
-          "awslogs-region"        = var.aws_region
-          "awslogs-stream-prefix" = "webserver"
-        }
-      }
-    },
-    {
-      name      = "dagster-daemon"
-      image     = "${aws_ecr_repository.dagster.repository_url}:latest"
-      essential = true
-      command   = ["dagster-daemon", "run"]
-
-      dependsOn = [
-        { containerName = "dagster-code-server", condition = "START" }
-      ]
-
-      environment = [
-        { name = "DAGSTER_HOME", value = "/app" },
-        { name = "CLICKHOUSE_USER", value = "dagster" },
-        { name = "CLICKHOUSE_PORT", value = "8443" },
-        { name = "CLICKHOUSE_SECURE", value = "true" },
-        { name = "DAGSTER_PG_DB", value = "postgres" },
-      ]
-
-      secrets = [
-        { name = "CLICKHOUSE_HOST", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:host::" },
-        { name = "CLICKHOUSE_PASSWORD", valueFrom = "${aws_secretsmanager_secret.clickhouse.arn}:password::" },
-        { name = "DAGSTER_PG_HOST", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:host::" },
-        { name = "DAGSTER_PG_PASSWORD", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:password::" },
-        { name = "DAGSTER_PG_USER", valueFrom = "${aws_secretsmanager_secret.supabase.arn}:user::" },
-      ]
-
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          "awslogs-group"         = aws_cloudwatch_log_group.dagster.name
-          "awslogs-region"        = var.aws_region
-          "awslogs-stream-prefix" = "daemon"
-        }
-      }
-    }
-  ])
-
-  tags = local.common_tags
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-resource "aws_ecs_service" "dagster" {
-  name            = "${local.name_prefix}-dagster"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.dagster.arn
-  desired_count   = 1
-
-  capacity_provider_strategy {
-    capacity_provider = "FARGATE_SPOT"
-    weight            = 1
-  }
-
-  network_configuration {
-    subnets          = [aws_subnet.private.id]
-    security_groups  = [aws_security_group.ecs_tasks.id]
-    assign_public_ip = false
-  }
-
-  tags = local.common_tags
-}
-
-
+# Dagster was deprecated 2026-06-09. The batch refresh assets were superseded
+# by the streaming pnl_consumer + a daily Lambda backfill (backfill_prices.tf).
+# Removed: aws_ecs_task_definition.dagster, aws_ecs_service.dagster,
+# aws_ecr_repository.dagster, aws_cloudwatch_log_group.dagster, the NAT SG
+# ingress :3000, the DNAT iptables script in the NAT instance user_data, the
+# ecs_tasks SG ingress :3000, and the `dagster_url` / `ecr_repository_url`
+# outputs. The services/dagster/ source remains in-tree for now.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Security Groups
@@ -444,15 +244,6 @@ resource "aws_ecs_service" "dagster" {
 resource "aws_security_group" "ecs_tasks" {
   name_prefix = "${local.name_prefix}-ecs-"
   vpc_id      = aws_vpc.main.id
-
-  # Dagster UI — port 3000 accepted only from the NAT instance (which DNATs
-  # public traffic on its EIP to this task's private IP).
-  ingress {
-    from_port       = 3000
-    to_port         = 3000
-    protocol        = "tcp"
-    security_groups = [aws_security_group.nat.id]
-  }
 
   # All outbound
   egress {
@@ -473,33 +264,9 @@ resource "aws_security_group" "ecs_tasks" {
 # ECR Repository
 # ─────────────────────────────────────────────────────────────────────────────
 
-resource "aws_ecr_repository" "dagster" {
-  name                 = "${local.name_prefix}-dagster"
-  image_tag_mutability = "MUTABLE"
-  force_delete         = true
-
-  image_scanning_configuration {
-    scan_on_push = true
-  }
-
-  tags = local.common_tags
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # CloudWatch Logs
 # ─────────────────────────────────────────────────────────────────────────────
-
-resource "aws_cloudwatch_log_group" "dagster" {
-  name              = "/ecs/${local.name_prefix}-dagster"
-  retention_in_days = 3
-  tags              = local.common_tags
-}
 
 resource "aws_cloudwatch_log_group" "streaming" {
   name              = "/ecs/${local.name_prefix}"
@@ -1316,15 +1083,6 @@ resource "aws_cloudwatch_metric_alarm" "pnl_consumer_crash" {
 
 output "ecs_cluster_name" {
   value = aws_ecs_cluster.main.name
-}
-
-output "ecr_repository_url" {
-  value = aws_ecr_repository.dagster.repository_url
-}
-
-output "dagster_url" {
-  value       = "http://${aws_eip.nat.public_ip}:3000"
-  description = "Dagster UI - NAT instance EIP (DNAT forwards :3000 to Dagster task)"
 }
 
 output "nat_static_ip" {
