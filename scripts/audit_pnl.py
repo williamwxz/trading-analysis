@@ -95,6 +95,14 @@ POSITION_SAMPLE_CAP = 50
 BATCH_SIZE = 50_000
 DEFAULT_REPORT_DIR = Path("./audit_reports")
 
+# Source-bar fetch lookback for fix paths. Must cover at least 2 × max(timeframe)
+# so the previous active bar for any tf is included. The largest tf is `1d` (1440min);
+# worst case a 1d bar at `ts = failure_ts - 24h - 1min` is needed to cover minute
+# `failure_ts` (its execution_ts = ts + 1440 = failure_ts - 1min, still active).
+# A 1440-min lookback misses that bar. 2880 (48h) covers it with margin.
+# Invariant guarded by tests/test_audit_pnl.py::TestBarFetchLookback.
+_BAR_FETCH_LOOKBACK_MINUTES = 2880
+
 # ── section A: dataclasses ──────────────────────────────────────────────────
 
 Category = Literal[
@@ -695,17 +703,15 @@ def fix_prod_rt_strategies(
             len(group),
         )
 
-        # Extend bar-fetch start back by the largest timeframe (1d = 1440min)
-        # so any bar whose coverage extends INTO the window — but whose `ts`
-        # falls just before window_start — is included. Without this lookback,
-        # the active_*_at lookup has no bar covering the boundary minute,
-        # leaving an empty minute (e.g., a 1h bar at ts=18:00 with closing_ts=19:00
-        # would be excluded if window_start=19:00, so minute 19:00 gets no row).
-        # fetch_new_bars_real_trade already extends back by _RT_BAR_LOOKBACK_MINUTES
-        # (1440) internally; we replicate the same lookback for prod here.
-        bar_fetch_start = (earliest - timedelta(minutes=1440)).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
+        # Extend bar-fetch start back so any bar whose coverage extends INTO the
+        # window — but whose `ts` falls just before window_start — is included.
+        # Without enough lookback, the active_*_at lookup has no bar covering the
+        # boundary minute (e.g., a 1d bar at ts=failure_ts-25h would be missed
+        # by a 24h lookback, leaving 1d-tf strategies with no rows for ~14h).
+        # See _BAR_FETCH_LOOKBACK_MINUTES at top of file.
+        bar_fetch_start = (
+            earliest - timedelta(minutes=_BAR_FETCH_LOOKBACK_MINUTES)
+        ).strftime("%Y-%m-%d %H:%M:%S")
         if type_ == "real_trade":
             bars = fetch_new_bars_real_trade(src, underlying, bar_fetch_start, ts_end, client)
         else:
@@ -914,16 +920,15 @@ def _fix_bt_underlying(
     ts_start = earliest.strftime("%Y-%m-%d %H:%M:%S")
     ts_end = (latest_end + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
 
-    # Extend the bar-fetch start back by the largest timeframe (1d = 1440min)
-    # so any bar whose coverage extends INTO the window — but whose `ts` falls
-    # just before window_start — is included. Without this lookback,
-    # `compute_bt_pnl` would produce no output for the boundary minutes between
-    # window_start and the first fetched bar's execution_ts, leaving gaps
-    # (strategy_count drops) and discontinuities at the boundary
-    # (shark-turn in cumulative_pnl) in the recomputed range.
-    bar_fetch_start = (earliest - timedelta(minutes=1440)).strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
+    # Extend the bar-fetch start back so any bar whose coverage extends INTO
+    # the window — but whose `ts` falls just before window_start — is included.
+    # Without enough lookback, `compute_bt_pnl` produces no output for boundary
+    # minutes between window_start and the first fetched bar's execution_ts
+    # (gaps + discontinuities in the recomputed range, especially for 1d-tf).
+    # See _BAR_FETCH_LOOKBACK_MINUTES at top of file.
+    bar_fetch_start = (
+        earliest - timedelta(minutes=_BAR_FETCH_LOOKBACK_MINUTES)
+    ).strftime("%Y-%m-%d %H:%M:%S")
     log.info(
         "[bt/%s] union window [%s, %s) (bar fetch from %s) for %d strategies",
         underlying,
