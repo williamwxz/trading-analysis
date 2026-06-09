@@ -86,6 +86,85 @@ def _revision(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# peek_reference_ts — regression: hard-fail on Kafka errors, never fall back
+# to now() (would let later commits silently advance past unprocessed messages)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_peek_reference_ts_raises_on_list_topics_failure():
+    """If the broker is unreachable, peek_reference_ts MUST raise — not return
+    None — so the caller exits before constructing a Consumer or committing
+    anything. Was a real bug observed 2026-06-09: a NAT-EIP rate-limit by
+    ClickHouse Cloud (separate from Kafka) caused both bt and prod consumers
+    to crash-loop, and the prior behavior (fall back to now() on Kafka
+    errors) would have silently advanced offsets past the backlog on the
+    first successful retry.
+    """
+    from pnl_consumer.pnl_consumer import peek_reference_ts
+
+    class _BrokenConsumer:
+        def list_topics(self, _topic, timeout):
+            raise RuntimeError("broker unreachable")
+
+        def close(self):
+            pass
+
+    with patch(f"{_MOD}.Consumer", return_value=_BrokenConsumer()):
+        with pytest.raises(RuntimeError, match="list_topics"):
+            peek_reference_ts("broker:9092", "grp")
+
+
+@pytest.mark.unit
+def test_peek_reference_ts_raises_on_committed_failure():
+    """Same intent as above — failure when fetching committed offsets must
+    raise, not fall back."""
+    from pnl_consumer.pnl_consumer import peek_reference_ts
+
+    class _Meta:
+        topics = {}  # empty: no partitions
+
+    class _PartialBroken:
+        def list_topics(self, _topic, timeout):
+            return _Meta()
+
+        def committed(self, _partitions, timeout):
+            raise RuntimeError("group coordinator down")
+
+        def close(self):
+            pass
+
+    with patch(f"{_MOD}.Consumer", return_value=_PartialBroken()):
+        with pytest.raises(RuntimeError, match="committed"):
+            peek_reference_ts("broker:9092", "grp")
+
+
+@pytest.mark.unit
+def test_peek_reference_ts_returns_none_for_genuinely_empty_topic():
+    """When the topic exists, all partitions are queried, and there's no
+    candle to read, the function returns None (caller treats this as a fresh
+    deploy — seed from now() with no walk-verify). This is the ONE remaining
+    None-return path; broker errors raise."""
+    from pnl_consumer.pnl_consumer import peek_reference_ts
+
+    class _Meta:
+        topics = {}  # topic not in metadata → 0 partitions → no commits to read
+
+    class _EmptyTopic:
+        def list_topics(self, _topic, timeout):
+            return _Meta()
+
+        def committed(self, _partitions, timeout):
+            return []
+
+        def close(self):
+            pass
+
+    with patch(f"{_MOD}.Consumer", return_value=_EmptyTopic()):
+        assert peek_reference_ts("broker:9092", "grp") is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SinkConfig
 # ─────────────────────────────────────────────────────────────────────────────
 
