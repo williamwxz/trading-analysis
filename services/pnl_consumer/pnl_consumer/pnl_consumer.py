@@ -636,6 +636,23 @@ def process_candle(
         fetched_bt_stns: set[str] = set()
         for bar in bt_bars:
             fetched_bt_stns.add(bar.strategy_table_name)
+            # bt-only: on each new bar, reset the anchor's pnl to row_json's
+            # authoritative cumulative_pnl and re-anchor the price to this
+            # candle's open. The subsequent _compute_pnl_row() then chains
+            # within the bar via the price-return formula. Without this reset
+            # the live chain drifts from the offline compute_bt_pnl (which
+            # treats row_json cumulative_pnl as authoritative at every bar).
+            # New-bar detection: bar.bar_ts > anchor.bar_ts. On a strategy's
+            # first appearance the anchor's bar_ts is datetime.min, so the
+            # first bar always seeds — matching _bootstrap_bt_state cold-start.
+            if bar.bar_ts > state_bt.get(bar.strategy_table_name).bar_ts:
+                state_bt.update(
+                    bar.strategy_table_name,
+                    pnl=bar.cumulative_pnl,
+                    price=candle.open,
+                    position=bar.position,
+                    bar_ts=bar.bar_ts,
+                )
             rows.append(
                 {
                     "_sink": "pnl_bt",
@@ -646,6 +663,7 @@ def process_candle(
                         bar,
                         "backtest",
                         now,
+                        bar_ts=bar.bar_ts,
                     ),
                 }
             )

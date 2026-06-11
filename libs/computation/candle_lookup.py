@@ -46,6 +46,11 @@ class StrategyBar:
     final_signal: float
     benchmark: float
     bar_ts: datetime
+    # bt-only: row_json's authoritative cumulative_pnl at the bar boundary. The
+    # bt consumer resets its anchor to this value on each new bar so the live
+    # chain matches the offline compute_bt_pnl. Prod leaves it at the 0.0 default
+    # (never read by the prod branch).
+    cumulative_pnl: float = 0.0
 
 
 @dataclass
@@ -96,6 +101,7 @@ def _parse_strategy_bar_scalar(row: dict) -> StrategyBar:
         final_signal=float(row.get("final_signal") or 0.0),
         benchmark=float(row.get("benchmark") or 0.0),
         bar_ts=row["latest_ts"],
+        cumulative_pnl=float(row.get("cumulative_pnl") or 0.0),
     )
 
 
@@ -188,9 +194,10 @@ SELECT
     config_timeframe,
     weighting,
     ts AS latest_ts,
-    argMin(JSONExtractFloat(row_json, 'position'),     revision_ts) AS position,
-    argMin(JSONExtractFloat(row_json, 'final_signal'), revision_ts) AS final_signal,
-    argMin(JSONExtractFloat(row_json, 'benchmark'),    revision_ts) AS benchmark
+    argMin(JSONExtractFloat(row_json, 'position'),       revision_ts) AS position,
+    argMin(JSONExtractFloat(row_json, 'final_signal'),   revision_ts) AS final_signal,
+    argMin(JSONExtractFloat(row_json, 'benchmark'),      revision_ts) AS benchmark,
+    argMin(JSONExtractFloat(row_json, 'cumulative_pnl'), revision_ts) AS cumulative_pnl
 FROM analytics.strategy_output_history_bt_v2
 WHERE underlying = '{underlying}'
   AND (strategy_instance_id, ts) IN (

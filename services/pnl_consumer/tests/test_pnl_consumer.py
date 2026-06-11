@@ -405,6 +405,14 @@ def test_process_candle_real_trade_lazy_seeds_new_strategy():
 
 @pytest.mark.unit
 def test_process_candle_bt_computes_pnl():
+    """A new bar resets cpnl to row_json's authoritative cumulative_pnl.
+
+    The anchor holds a stale chained pnl (0.05) at price 93100. A new bar
+    (bar_ts newer than the anchor's datetime.min default) carries row_json
+    cumulative_pnl=0.30. The emitted pnl must be exactly 0.30 — the price
+    re-anchors to candle.open so the within-minute price-return term is zero.
+    See test_bt_bar_boundary_reset.py for the within-bar chaining counterpart.
+    """
     state = AnchorState()
     state.set("strat_bt_1", AnchorRecord(pnl=0.05, price=93100.0))
     candle = _candle(open=93200.0)
@@ -420,6 +428,7 @@ def test_process_candle_bt_computes_pnl():
         final_signal=1.0,
         benchmark=0.0,
         bar_ts=_CANDLE_TS,
+        cumulative_pnl=0.30,
     )
     cfg = SinkConfig(price=False, prod=False, real_trade=False, bt=True)
 
@@ -429,8 +438,7 @@ def test_process_candle_bt_computes_pnl():
 
     bt_rows = [r for r in rows if r["_sink"] == "pnl_bt"]
     assert len(bt_rows) == 1
-    expected_pnl = 0.05 + 1.0 * (93200.0 - 93100.0) / 93100.0
-    assert bt_rows[0]["_row"][8] == pytest.approx(expected_pnl)
+    assert bt_rows[0]["_row"][8] == pytest.approx(0.30)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
