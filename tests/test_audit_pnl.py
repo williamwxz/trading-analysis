@@ -136,6 +136,47 @@ class TestQuoteEscape:
         assert _q("'") == "''"
 
 
+class TestBarFetchLookback:
+    """Regression: a 1440-min (24h) lookback silently dropped 1d-tf strategies
+    when their active bar's ts fell more than 24h before `failure_ts`. The
+    lookback must be at least 2 × max(timeframe) so any active bar at the
+    window boundary is included.
+
+    Concrete failure mode (observed 2026-06-09): 79 BTC/ETH/SOL 1d-tf
+    strategies missing rows for ~14h after `failure_ts=06/07 10:00` because
+    the bar at `ts=06/06 00:00` (active 06/07 00:00 → 06/08 00:00) was
+    excluded by `bar_fetch_start = failure_ts - 1440min = 06/06 10:00`.
+    """
+
+    def test_lookback_covers_largest_timeframe_with_margin(self):
+        from libs.computation.pnl_formula import TIMEFRAME_MAP
+
+        from scripts.audit_pnl import _BAR_FETCH_LOOKBACK_MINUTES
+
+        max_tf = max(TIMEFRAME_MAP.values())  # 1440 (1d) at time of writing
+        # 2× covers the worst case: bar at ts = failure_ts - max_tf - 1min
+        # (whose execution_ts is just before failure_ts, still active at it).
+        assert _BAR_FETCH_LOOKBACK_MINUTES >= 2 * max_tf, (
+            f"lookback {_BAR_FETCH_LOOKBACK_MINUTES} must be >= 2 × max tf "
+            f"({2 * max_tf}); see regression note in this class"
+        )
+
+    def test_1d_bar_at_failure_minus_25h_is_inside_lookback_window(self):
+        """The exact scenario from the production incident."""
+        from datetime import datetime as _dt
+        from datetime import timedelta as _td
+
+        from scripts.audit_pnl import _BAR_FETCH_LOOKBACK_MINUTES
+
+        failure_ts = _dt(2026, 6, 7, 10, 0, 0)
+        bar_ts = _dt(2026, 6, 6, 0, 0, 0)  # exec_ts = 06/07 00:00, active through 06/08 00:00
+        bar_fetch_start = failure_ts - _td(minutes=_BAR_FETCH_LOOKBACK_MINUTES)
+        assert bar_ts >= bar_fetch_start, (
+            f"1d bar at {bar_ts} must be >= bar_fetch_start "
+            f"({bar_fetch_start}); was failing with 1440-min lookback"
+        )
+
+
 class TestGroupViolationsByStrategy:
     def test_empty_input_returns_empty_dict(self):
         from scripts.audit_pnl import group_violations_by_strategy
