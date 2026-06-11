@@ -128,7 +128,24 @@ def peek_reference_ts(
     topic: str = TOPIC,
     timeout: float = 5.0,
 ) -> "datetime | None":
-    """Return min candle ts at this group's committed offsets. Falls back to latest offset."""
+    """Return min candle ts at this group's committed offsets.
+
+    Behavior:
+      - All partitions have committed offsets and we can read at least one
+        candle → returns min(candle.ts).
+      - All partitions are OFFSET_INVALID (genuinely fresh group: no prior
+        commits) → falls back to latest watermark; returns the most recent
+        candle's ts, or None if topic is empty.
+      - Any error talking to Kafka (timeout, broker unreachable, etc.) →
+        raises, so the caller exits without committing anything. We never
+        silently fall back to now() because that would let a subsequent
+        successful commit advance the offset past unprocessed messages,
+        permanently losing the backlog.
+
+    Raises:
+        RuntimeError: wraps any underlying Kafka exception encountered while
+        listing topics, fetching committed offsets, or polling.
+    """
     consumer = Consumer(
         {
             "bootstrap.servers": brokers,
@@ -139,15 +156,25 @@ def peek_reference_ts(
     try:
         try:
             meta = consumer.list_topics(topic, timeout=timeout)
-            partitions = (
-                [TopicPartition(topic, p) for p in meta.topics[topic].partitions]
-                if topic in meta.topics
-                else []
-            )
-        except Exception:
-            partitions = []
+        except Exception as exc:
+            raise RuntimeError(
+                f"peek_reference_ts: list_topics({topic!r}) failed; refusing "
+                f"to fall back to now() — see commit message for rationale"
+            ) from exc
+        partitions = (
+            [TopicPartition(topic, p) for p in meta.topics[topic].partitions]
+            if topic in meta.topics
+            else []
+        )
 
-        committed = consumer.committed(partitions, timeout=timeout)
+        try:
+            committed = consumer.committed(partitions, timeout=timeout)
+        except Exception as exc:
+            raise RuntimeError(
+                f"peek_reference_ts: committed() failed for {len(partitions)} "
+                f"partitions of {topic!r}; refusing to fall back to now()"
+            ) from exc
+
         timestamps: list[datetime] = []
         for tp in committed:
             offset = tp.offset
@@ -172,11 +199,6 @@ def peek_reference_ts(
             timestamps.append(datetime.fromisoformat(data["ts"]))
 
         return min(timestamps) if timestamps else None
-    except Exception:
-        logger.warning(
-            "peek_reference_ts failed — falling back to now()", exc_info=True
-        )
-        return None
     finally:
         consumer.close()
 
@@ -818,11 +840,18 @@ def run() -> None:
         sink_cfg.bt,
     )
 
+    # peek_reference_ts now raises on Kafka errors instead of falling back to
+    # now(), so a broker outage doesn't allow a later successful commit to
+    # advance past unprocessed messages. None is only returned when the topic
+    # is genuinely empty (true fresh deploy).
     reference_ts = peek_reference_ts(os.environ["REDPANDA_BROKERS"], resolve_group_id())
     if reference_ts is not None:
         logger.info("Cold-start reference_ts from committed offset: %s", reference_ts)
     else:
-        logger.info("No committed offset — using now() as reference_ts")
+        logger.info(
+            "No reference_ts (empty topic, fresh group) — bootstrap will seed "
+            "from now() with no walk-verify"
+        )
 
     state_prod = AnchorState()
     state_bt = AnchorState()
