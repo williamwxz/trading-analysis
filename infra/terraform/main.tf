@@ -168,7 +168,11 @@ systemctl start amazon-ssm-agent
 EOF
   )
 
-  user_data_replace_on_change = true
+  # Intentionally NOT setting user_data_replace_on_change: the script is just
+  # one-time bootstrap (installs CLI + SSM agent). Editing the user_data text
+  # later doesn't need to recycle the instance, and forcing replacement was
+  # tripping the account vCPU limit (create_before_destroy briefly needs 2x
+  # NAT vCPUs, which exceeded the 16-vCPU bucket cap).
 
   tags = merge(local.common_tags, { Name = "${local.name_prefix}-nat-instance" })
 
