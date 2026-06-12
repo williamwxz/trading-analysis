@@ -57,7 +57,28 @@ _WALK_HOURS = (
     2  # walk [ref_ts - 2h, ref_ts) to advance anchor price/position to present
 )
 _PNL_WARN_TOLERANCE = 1e-6
-_PNL_CRASH_TOLERANCE = 2e-3  # 0.2%
+# Abort the cold-start bootstrap only on a GROSS cumulative_pnl deviation that
+# signals real corruption. Was 2e-3 (0.2%), which crash-looped every restart:
+# late-arriving revisions routinely shift recent cpnl by ~0.3-1% now that the
+# Dagster batch recompute (which reconciled them) is deprecated, so the walk found
+# small drift on data the consumer itself had just written and aborted. The walk
+# already resumes from the STORED values regardless of this check (see the walk
+# loop), so aborting never repaired anything — it only blocked recovery. bt skips
+# the check entirely; prod/rt now warn on drift and abort only when clearly broken.
+_PNL_ABORT_TOLERANCE = 0.5
+
+
+def _walk_deviation_action(deviation: float) -> str:
+    """Classify a cold-start walk-verify cpnl deviation: "ok" | "warn" | "abort".
+
+    abort only above _PNL_ABORT_TOLERANCE (gross/corruption-scale); warn above
+    _PNL_WARN_TOLERANCE (routine late-revision drift); otherwise ok.
+    """
+    if deviation > _PNL_ABORT_TOLERANCE:
+        return "abort"
+    if deviation > _PNL_WARN_TOLERANCE:
+        return "warn"
+    return "ok"
 
 PRICE_COLUMNS = [
     "exchange",
@@ -420,13 +441,14 @@ def _bootstrap_state(
         if not is_bt and pp != 0.0 and effective_price != 0.0 and wr.cumulative_pnl != 0.0:
             recomputed = pp_pnl + wr.position * (effective_price - pp) / pp
             deviation = abs(recomputed - wr.cumulative_pnl)
-            if deviation > _PNL_CRASH_TOLERANCE:
+            action = _walk_deviation_action(deviation)
+            if action == "abort":
                 raise RuntimeError(
                     f"Cold-start PnL mismatch for {stn} at {wr.ts}: "
                     f"stored={wr.cumulative_pnl:.8f} recomputed={recomputed:.8f} "
-                    f"delta={deviation:.2e} > {_PNL_CRASH_TOLERANCE:.1e}"
+                    f"delta={deviation:.2e} > {_PNL_ABORT_TOLERANCE:.1e}"
                 )
-            if deviation > _PNL_WARN_TOLERANCE:
+            if action == "warn":
                 logger.warning(
                     "Cold-start PnL drift %s ts=%s stored=%.8f recomputed=%.8f delta=%.2e",
                     stn,
