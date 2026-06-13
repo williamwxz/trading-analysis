@@ -169,7 +169,9 @@ class TestBarFetchLookback:
         from scripts.audit_pnl import _BAR_FETCH_LOOKBACK_MINUTES
 
         failure_ts = _dt(2026, 6, 7, 10, 0, 0)
-        bar_ts = _dt(2026, 6, 6, 0, 0, 0)  # exec_ts = 06/07 00:00, active through 06/08 00:00
+        bar_ts = _dt(
+            2026, 6, 6, 0, 0, 0
+        )  # exec_ts = 06/07 00:00, active through 06/08 00:00
         bar_fetch_start = failure_ts - _td(minutes=_BAR_FETCH_LOOKBACK_MINUTES)
         assert bar_ts >= bar_fetch_start, (
             f"1d bar at {bar_ts} must be >= bar_fetch_start "
@@ -388,3 +390,89 @@ class TestRenderReport:
         assert "## prod" in body
         assert "my_strat_v3" in body
         assert "mid_gap" in body
+
+
+class TestGetClientMemoryCaps:
+    """get_client must cap per-query memory + enable disk-spill so a window
+    recompute over the bt tables cannot OOM ClickHouse Cloud. The fix_bt_strategies
+    worker threads resolve this same module-level get_client, so the caps reach
+    them too."""
+
+    def test_get_client_passes_memory_cap_settings(self, monkeypatch):
+        import clickhouse_connect
+
+        captured = {}
+
+        def fake_get_client(**kwargs):
+            captured.update(kwargs)
+            return object()
+
+        monkeypatch.setattr(clickhouse_connect, "get_client", fake_get_client)
+        for k in ("CLICKHOUSE_HOST", "CLICKHOUSE_USER", "CLICKHOUSE_PASSWORD"):
+            monkeypatch.setenv(k, "x")
+
+        from scripts.audit_pnl import _DEFAULT_QUERY_SETTINGS, get_client
+
+        get_client()
+        settings = captured.get("settings")
+        assert settings is not None
+        assert (
+            settings["max_memory_usage"] == _DEFAULT_QUERY_SETTINGS["max_memory_usage"]
+        )
+        assert 0 < settings["max_memory_usage"]
+        # spill thresholds sit below the per-query cap so spilling engages first
+        assert (
+            settings["max_bytes_before_external_group_by"]
+            < settings["max_memory_usage"]
+        )
+        assert settings["max_bytes_before_external_sort"] < settings["max_memory_usage"]
+
+
+class _CmdRecorder:
+    """Minimal client stub that records command() SQL."""
+
+    def __init__(self):
+        self.commands: list[str] = []
+
+    def command(self, sql: str):
+        self.commands.append(sql)
+
+
+class TestRefreshDayTable:
+    def test_rebuilds_day_from_hour_with_delete_then_insert(self):
+        from scripts.audit_pnl import refresh_day_table
+
+        client = _CmdRecorder()
+        refresh_day_table("bt", _dt("2026-06-07 12:30:00"), client, dry_run=False)
+
+        assert len(client.commands) == 2
+        delete_sql, insert_sql = client.commands
+        # DELETE scoped to whole days >= the window start, on the 1day table
+        assert "DELETE FROM analytics.strategy_pnl_1day_bt_v2" in delete_sql
+        assert "toStartOfDay(toDateTime('2026-06-07 12:30:00'))" in delete_sql
+        # INSERT rebuilds the 1day table FROM the 1hour table, day-bucketed argMax
+        assert "INSERT INTO analytics.strategy_pnl_1day_bt_v2" in insert_sql
+        assert "analytics.strategy_pnl_1hour_bt_v2" in insert_sql
+        assert "toStartOfDay(hour_ts)" in insert_sql
+        assert "argMax(cumulative_pnl, hour_ts)" in insert_sql
+
+    def test_dry_run_issues_no_commands(self):
+        from scripts.audit_pnl import refresh_day_table
+
+        client = _CmdRecorder()
+        refresh_day_table("prod", _dt("2026-06-11 00:00:00"), client, dry_run=True)
+        assert client.commands == []
+
+    def test_underlying_filter_scopes_both_statements(self):
+        from scripts.audit_pnl import refresh_day_table
+
+        client = _CmdRecorder()
+        refresh_day_table(
+            "real_trade",
+            _dt("2026-06-11 00:00:00"),
+            client,
+            dry_run=False,
+            underlying="BTC",
+        )
+        for sql in client.commands:
+            assert "underlying = 'BTC'" in sql
