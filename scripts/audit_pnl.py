@@ -1514,7 +1514,18 @@ def main() -> int:
             p.get("totals", {}).get("rows_fixed", 0),
         )
 
-    report = _run_audit(types, args.underlying, client, now_ts)
+    # --fix-window builds its own per-strategy fix list from the source-history
+    # table and never consults detection results, so skip the (expensive,
+    # GLOBAL_START_TS-wide) audit scan in that path — it only added latency.
+    if args.fix_window:
+        report = AuditReport(
+            started_at=_utcnow_naive(),
+            scope_types=list(types),
+            scope_underlying=_validate_underlying(args.underlying),
+            run_id=_utcnow_naive().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:4],
+        )
+    else:
+        report = _run_audit(types, args.underlying, client, now_ts)
     report.mode = "fix" if args.fix else ("fix-window" if args.fix_window else "audit")
     if args.dry_run:
         report.mode = "dry-run"
