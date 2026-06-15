@@ -874,7 +874,7 @@ locals {
       enable_bt         = "false"
       group_id          = "pnl-consumer-price"
       desired_count     = 1
-      clickhouse_user   = "dev_ro3"
+      clickhouse_user   = "streaming"
     }
     prod = {
       enable_price      = "false"
