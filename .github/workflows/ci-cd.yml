@@ -507,3 +507,19 @@ jobs:
             echo "OK: $file (HTTP $HTTP_STATUS)"
           done
           echo "All dashboards uploaded."
+
+      - name: Provision divergence alert rules + Telegram contact point
+        # Non-fatal: an alerting hiccup must never block the dashboard/deploy
+        # pipeline. Skips cleanly if the Telegram secrets aren't set yet.
+        continue-on-error: true
+        env:
+          GRAFANA_CLOUD_TOKEN: ${{ secrets.GRAFANA_CLOUD_TOKEN }}
+          GRAFANA_CLOUD_URL: ${{ secrets.GRAFANA_CLOUD_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+            echo "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set — skipping alert provisioning."
+            exit 0
+          fi
+          bash scripts/provision_grafana_alerts.sh

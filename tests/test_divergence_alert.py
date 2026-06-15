@@ -1,4 +1,5 @@
 """Unit tests for the position-divergence detector (pure logic, no ClickHouse)."""
+
 from datetime import datetime, timedelta
 
 import pytest

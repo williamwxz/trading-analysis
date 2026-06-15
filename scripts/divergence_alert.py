@@ -1,7 +1,11 @@
-"""Position-divergence watcher → Telegram.
+"""Position-divergence checker (local/manual diagnostic).
+
+Production alerting is Grafana-native — see infra/grafana/alerting/ (the rule
+SQL and 0.05/sustained threshold mirror this script). Use this for ad-hoc CLI
+spot-checks or a quick dry-run of the same logic against live ClickHouse.
 
 Computes the portfolio weighted-average POSITION for prod / real_trade / bt over
-the last N complete minutes and alerts when two modes trade meaningfully
+the last N complete minutes and reports when two modes trade meaningfully
 different positions for a SUSTAINED stretch:
 
     wpos(mode, minute) = sum(position * weighting) / sum(weighting)

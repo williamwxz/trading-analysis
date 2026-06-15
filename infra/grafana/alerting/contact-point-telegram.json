@@ -1,0 +1,11 @@
+{
+  "uid": "telegram-divergence",
+  "name": "telegram-divergence",
+  "type": "telegram",
+  "settings": {
+    "bottoken": "${TELEGRAM_BOT_TOKEN}",
+    "chatid": "${TELEGRAM_CHAT_ID}",
+    "parse_mode": "HTML"
+  },
+  "disableResolveMessage": false
+}
