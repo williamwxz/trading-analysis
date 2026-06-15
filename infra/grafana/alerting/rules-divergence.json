@@ -1,0 +1,176 @@
+[
+  {
+    "uid": "divergence-bt-prod",
+    "title": "Position divergence: Backtest − Production",
+    "folderUID": "__FOLDER_UID__",
+    "ruleGroup": "divergence",
+    "condition": "C",
+    "for": "10m",
+    "noDataState": "OK",
+    "execErrState": "Alerting",
+    "orgID": 1,
+    "labels": {
+      "alertgroup": "divergence",
+      "pair": "bt-prod"
+    },
+    "annotations": {
+      "summary": "Portfolio weighted position diverges (Backtest − Production) by more than 0.05 for 10m.",
+      "__dashboardUid__": "strategy-pnl-l5"
+    },
+    "notification_settings": {
+      "receiver": "telegram-divergence"
+    },
+    "data": [
+      {
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 1020,
+          "to": 0
+        },
+        "datasourceUid": "dfjc5vjyfcc8wf",
+        "model": {
+          "refId": "A",
+          "editorType": "sql",
+          "rawSql": "SELECT a.t AS time, a.wp - b.wp AS value FROM (SELECT toStartOfMinute(ts) t, sum(position * weighting) / nullIf(sum(weighting), 0) wp FROM analytics.strategy_pnl_1min_bt_v2 FINAL WHERE ts >= now() - INTERVAL 17 MINUTE AND toStartOfMinute(ts) IN (SELECT toStartOfMinute(ts) FROM analytics.strategy_pnl_1min_bt_v2 FINAL WHERE ts >= now() - INTERVAL 17 MINUTE GROUP BY toStartOfMinute(ts) HAVING countDistinct(underlying) = 8) GROUP BY t) a INNER JOIN (SELECT toStartOfMinute(ts) t, sum(position * weighting) / nullIf(sum(weighting), 0) wp FROM analytics.strategy_pnl_1min_prod_v2 FINAL WHERE ts >= now() - INTERVAL 17 MINUTE AND toStartOfMinute(ts) IN (SELECT toStartOfMinute(ts) FROM analytics.strategy_pnl_1min_prod_v2 FINAL WHERE ts >= now() - INTERVAL 17 MINUTE GROUP BY toStartOfMinute(ts) HAVING countDistinct(underlying) = 8) GROUP BY t) b USING (t) ORDER BY time",
+          "format": 1,
+          "queryType": "timeseries",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "dfjc5vjyfcc8wf"
+          },
+          "intervalMs": 60000,
+          "maxDataPoints": 100
+        }
+      },
+      {
+        "refId": "B",
+        "datasourceUid": "__expr__",
+        "model": {
+          "refId": "B",
+          "type": "reduce",
+          "datasource": {
+            "type": "__expr__",
+            "uid": "__expr__"
+          },
+          "expression": "A",
+          "reducer": "last",
+          "settings": {
+            "mode": "dropNN"
+          }
+        }
+      },
+      {
+        "refId": "C",
+        "datasourceUid": "__expr__",
+        "model": {
+          "refId": "C",
+          "type": "threshold",
+          "datasource": {
+            "type": "__expr__",
+            "uid": "__expr__"
+          },
+          "expression": "B",
+          "conditions": [
+            {
+              "type": "query",
+              "evaluator": {
+                "type": "outside_range",
+                "params": [
+                  -0.05,
+                  0.05
+                ]
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "uid": "divergence-prod-rt",
+    "title": "Position divergence: Production − Real-Trade",
+    "folderUID": "__FOLDER_UID__",
+    "ruleGroup": "divergence",
+    "condition": "C",
+    "for": "10m",
+    "noDataState": "OK",
+    "execErrState": "Alerting",
+    "orgID": 1,
+    "labels": {
+      "alertgroup": "divergence",
+      "pair": "prod-rt"
+    },
+    "annotations": {
+      "summary": "Portfolio weighted position diverges (Production − Real-Trade) by more than 0.05 for 10m.",
+      "__dashboardUid__": "strategy-pnl-l5"
+    },
+    "notification_settings": {
+      "receiver": "telegram-divergence"
+    },
+    "data": [
+      {
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 1020,
+          "to": 0
+        },
+        "datasourceUid": "dfjc5vjyfcc8wf",
+        "model": {
+          "refId": "A",
+          "editorType": "sql",
+          "rawSql": "SELECT a.t AS time, a.wp - b.wp AS value FROM (SELECT toStartOfMinute(ts) t, sum(position * weighting) / nullIf(sum(weighting), 0) wp FROM analytics.strategy_pnl_1min_prod_v2 FINAL WHERE ts >= now() - INTERVAL 17 MINUTE AND toStartOfMinute(ts) IN (SELECT toStartOfMinute(ts) FROM analytics.strategy_pnl_1min_prod_v2 FINAL WHERE ts >= now() - INTERVAL 17 MINUTE GROUP BY toStartOfMinute(ts) HAVING countDistinct(underlying) = 8) GROUP BY t) a INNER JOIN (SELECT toStartOfMinute(ts) t, sum(position * weighting) / nullIf(sum(weighting), 0) wp FROM analytics.strategy_pnl_1min_real_trade_v2 FINAL WHERE ts >= now() - INTERVAL 17 MINUTE AND toStartOfMinute(ts) IN (SELECT toStartOfMinute(ts) FROM analytics.strategy_pnl_1min_real_trade_v2 FINAL WHERE ts >= now() - INTERVAL 17 MINUTE GROUP BY toStartOfMinute(ts) HAVING countDistinct(underlying) = 8) GROUP BY t) b USING (t) ORDER BY time",
+          "format": 1,
+          "queryType": "timeseries",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "dfjc5vjyfcc8wf"
+          },
+          "intervalMs": 60000,
+          "maxDataPoints": 100
+        }
+      },
+      {
+        "refId": "B",
+        "datasourceUid": "__expr__",
+        "model": {
+          "refId": "B",
+          "type": "reduce",
+          "datasource": {
+            "type": "__expr__",
+            "uid": "__expr__"
+          },
+          "expression": "A",
+          "reducer": "last",
+          "settings": {
+            "mode": "dropNN"
+          }
+        }
+      },
+      {
+        "refId": "C",
+        "datasourceUid": "__expr__",
+        "model": {
+          "refId": "C",
+          "type": "threshold",
+          "datasource": {
+            "type": "__expr__",
+            "uid": "__expr__"
+          },
+          "expression": "B",
+          "conditions": [
+            {
+              "type": "query",
+              "evaluator": {
+                "type": "outside_range",
+                "params": [
+                  -0.05,
+                  0.05
+                ]
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+]
