@@ -69,9 +69,8 @@ def rule(a, b, tbl_a, tbl_b, title, uid):
         "annotations": {
             "summary": (
                 f"Portfolio weighted position diverges ({title}) by more than "
-                f"{THRESHOLD:g} for {FOR}."
+                f"{THRESHOLD:g} for {FOR}. See dashboard: Strategy PnL — L5 Portfolio."
             ),
-            "__dashboardUid__": "strategy-pnl-l5",
         },
         "notification_settings": {"receiver": "telegram-divergence"},
         "data": [
