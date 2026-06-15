@@ -14,8 +14,7 @@
       "pair": "bt-prod"
     },
     "annotations": {
-      "summary": "Portfolio weighted position diverges (Backtest − Production) by more than 0.05 for 10m.",
-      "__dashboardUid__": "strategy-pnl-l5"
+      "summary": "Portfolio weighted position diverges (Backtest − Production) by more than 0.05 for 10m. See dashboard: Strategy PnL — L5 Portfolio."
     },
     "notification_settings": {
       "receiver": "telegram-divergence"
@@ -101,8 +100,7 @@
       "pair": "prod-rt"
     },
     "annotations": {
-      "summary": "Portfolio weighted position diverges (Production − Real-Trade) by more than 0.05 for 10m.",
-      "__dashboardUid__": "strategy-pnl-l5"
+      "summary": "Portfolio weighted position diverges (Production − Real-Trade) by more than 0.05 for 10m. See dashboard: Strategy PnL — L5 Portfolio."
     },
     "notification_settings": {
       "receiver": "telegram-divergence"
