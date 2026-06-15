@@ -584,7 +584,7 @@
       "id": 7,
       "gridPos": {
         "x": 0,
-        "y": 39,
+        "y": 57,
         "w": 24,
         "h": 6
       },
@@ -647,6 +647,162 @@
         }
       ],
       "hide": true
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Position Divergence \u2014 Backtest \u2212 Production",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "dfjc5vjyfcc8wf"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 45
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "dfjc5vjyfcc8wf"
+          },
+          "editorType": "sql",
+          "rawSql": "SELECT a.time AS time, (a.wpos - b.wpos) AS `Backtest \u2212 Production`\nFROM (\n  SELECT $__timeInterval(ts) AS time, sum(position * weighting) / nullIf(sum(weighting), 0) AS wpos\n      FROM (SELECT * FROM analytics.strategy_pnl_1min_bt_v2 INNER JOIN (SELECT ts FROM analytics.strategy_pnl_1min_bt_v2 WHERE ts >= toStartOfHour(now() - INTERVAL 6 HOUR) GROUP BY ts HAVING countDistinct(underlying) = 8) AS complete USING (ts) WHERE ts >= toStartOfHour(now() - INTERVAL 6 HOUR) UNION ALL SELECT * FROM analytics.strategy_pnl_1hour_bt_v2 INNER JOIN (SELECT ts FROM (SELECT * FROM analytics.strategy_pnl_1min_bt_v2 WHERE ts >= toStartOfHour(now() - INTERVAL 6 HOUR) UNION ALL SELECT * FROM analytics.strategy_pnl_1hour_bt_v2 WHERE ts >= toStartOfDay(now() - INTERVAL 30 DAY) AND ts < toStartOfHour(now() - INTERVAL 6 HOUR) UNION ALL SELECT * FROM analytics.strategy_pnl_1day_bt_v2 WHERE ts < toStartOfDay(now() - INTERVAL 30 DAY)) WHERE ts < toStartOfHour(now() - INTERVAL 6 HOUR) GROUP BY ts HAVING countDistinct(underlying) = 8) AS complete USING (ts) WHERE ts < toStartOfHour(now() - INTERVAL 6 HOUR)) WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))\n  GROUP BY time\n) AS a\nINNER JOIN (\n  SELECT $__timeInterval(ts) AS time, sum(position * weighting) / nullIf(sum(weighting), 0) AS wpos\n      FROM (SELECT strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, source, version, ts, cumulative_pnl, benchmark, position, price, final_signal, weighting, updated_at FROM (SELECT * FROM analytics.strategy_pnl_1min_prod_v2 FINAL INNER JOIN (SELECT ts FROM analytics.strategy_pnl_1min_prod_v2 FINAL WHERE ts >= toStartOfHour(now() - INTERVAL 6 HOUR) GROUP BY ts HAVING countDistinct(underlying) = 8) AS complete USING (ts) WHERE ts >= toStartOfHour(now() - INTERVAL 6 HOUR) UNION ALL SELECT * FROM analytics.strategy_pnl_1hour_prod_v2 FINAL INNER JOIN (SELECT ts FROM (SELECT * FROM analytics.strategy_pnl_1min_prod_v2 FINAL WHERE ts >= toStartOfHour(now() - INTERVAL 6 HOUR) UNION ALL SELECT * FROM analytics.strategy_pnl_1hour_prod_v2 FINAL WHERE ts >= toStartOfDay(now() - INTERVAL 30 DAY) AND ts < toStartOfHour(now() - INTERVAL 6 HOUR) UNION ALL SELECT * FROM analytics.strategy_pnl_1day_prod_v2 FINAL WHERE ts < toStartOfDay(now() - INTERVAL 30 DAY)) WHERE ts < toStartOfHour(now() - INTERVAL 6 HOUR) GROUP BY ts HAVING countDistinct(underlying) = 8) AS complete USING (ts) WHERE ts < toStartOfHour(now() - INTERVAL 6 HOUR))) WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) AND (strategy_table_name, toStartOfMinute(ts)) NOT IN (SELECT trace_text_paused_strategy_table, toStartOfMinute(event_ts_utc + INTERVAL n MINUTE) FROM analytics.strategy_pause_events ARRAY JOIN range(0, 5) AS n WHERE event_ts_utc BETWEEN toDateTime(intDiv(${__from},1000)) - INTERVAL 5 MINUTE AND toDateTime(intDiv(${__to},1000)) AND '${hide_paused}' = '1')\n  GROUP BY time\n) AS b USING (time)\nORDER BY time",
+          "format": 1,
+          "queryType": "timeseries"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "orange"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisCenteredZero": true,
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "green"
+              },
+              {
+                "value": 0.05,
+                "color": "red"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "description": "Weighted-average position difference per time bucket (sum(position*weighting)/sum(weighting)). Sustained |delta| > 0.05 indicates the two PnL modes are trading different positions and triggers a Telegram alert."
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Position Divergence \u2014 Production \u2212 Real-Trade",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "dfjc5vjyfcc8wf"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 51
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "dfjc5vjyfcc8wf"
+          },
+          "editorType": "sql",
+          "rawSql": "SELECT a.time AS time, (a.wpos - b.wpos) AS `Production \u2212 Real-Trade`\nFROM (\n  SELECT $__timeInterval(ts) AS time, sum(position * weighting) / nullIf(sum(weighting), 0) AS wpos\n      FROM (SELECT strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, source, version, ts, cumulative_pnl, benchmark, position, price, final_signal, weighting, updated_at FROM (SELECT * FROM analytics.strategy_pnl_1min_prod_v2 FINAL INNER JOIN (SELECT ts FROM analytics.strategy_pnl_1min_prod_v2 FINAL WHERE ts >= toStartOfHour(now() - INTERVAL 6 HOUR) GROUP BY ts HAVING countDistinct(underlying) = 8) AS complete USING (ts) WHERE ts >= toStartOfHour(now() - INTERVAL 6 HOUR) UNION ALL SELECT * FROM analytics.strategy_pnl_1hour_prod_v2 FINAL INNER JOIN (SELECT ts FROM (SELECT * FROM analytics.strategy_pnl_1min_prod_v2 FINAL WHERE ts >= toStartOfHour(now() - INTERVAL 6 HOUR) UNION ALL SELECT * FROM analytics.strategy_pnl_1hour_prod_v2 FINAL WHERE ts >= toStartOfDay(now() - INTERVAL 30 DAY) AND ts < toStartOfHour(now() - INTERVAL 6 HOUR) UNION ALL SELECT * FROM analytics.strategy_pnl_1day_prod_v2 FINAL WHERE ts < toStartOfDay(now() - INTERVAL 30 DAY)) WHERE ts < toStartOfHour(now() - INTERVAL 6 HOUR) GROUP BY ts HAVING countDistinct(underlying) = 8) AS complete USING (ts) WHERE ts < toStartOfHour(now() - INTERVAL 6 HOUR))) WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) AND (strategy_table_name, toStartOfMinute(ts)) NOT IN (SELECT trace_text_paused_strategy_table, toStartOfMinute(event_ts_utc + INTERVAL n MINUTE) FROM analytics.strategy_pause_events ARRAY JOIN range(0, 5) AS n WHERE event_ts_utc BETWEEN toDateTime(intDiv(${__from},1000)) - INTERVAL 5 MINUTE AND toDateTime(intDiv(${__to},1000)) AND '${hide_paused}' = '1')\n  GROUP BY time\n) AS a\nINNER JOIN (\n  SELECT $__timeInterval(ts) AS time, sum(position * weighting) / nullIf(sum(weighting), 0) AS wpos\n      FROM (SELECT strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, source, version, ts, cumulative_pnl, benchmark, position, price, final_signal, weighting, updated_at FROM (SELECT * FROM analytics.strategy_pnl_1min_real_trade_v2 FINAL INNER JOIN (SELECT ts FROM analytics.strategy_pnl_1min_real_trade_v2 FINAL WHERE ts >= toStartOfHour(now() - INTERVAL 6 HOUR) GROUP BY ts HAVING countDistinct(underlying) = 8) AS complete USING (ts) WHERE ts >= toStartOfHour(now() - INTERVAL 6 HOUR) UNION ALL SELECT * FROM analytics.strategy_pnl_1hour_real_trade_v2 FINAL INNER JOIN (SELECT ts FROM (SELECT * FROM analytics.strategy_pnl_1min_real_trade_v2 FINAL WHERE ts >= toStartOfHour(now() - INTERVAL 6 HOUR) UNION ALL SELECT * FROM analytics.strategy_pnl_1hour_real_trade_v2 FINAL WHERE ts >= toStartOfDay(now() - INTERVAL 30 DAY) AND ts < toStartOfHour(now() - INTERVAL 6 HOUR) UNION ALL SELECT * FROM analytics.strategy_pnl_1day_real_trade_v2 FINAL WHERE ts < toStartOfDay(now() - INTERVAL 30 DAY)) WHERE ts < toStartOfHour(now() - INTERVAL 6 HOUR) GROUP BY ts HAVING countDistinct(underlying) = 8) AS complete USING (ts) WHERE ts < toStartOfHour(now() - INTERVAL 6 HOUR))) WHERE ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) AND (strategy_table_name, toStartOfMinute(ts)) NOT IN (SELECT trace_text_paused_strategy_table, toStartOfMinute(event_ts_utc + INTERVAL n MINUTE) FROM analytics.strategy_pause_events ARRAY JOIN range(0, 5) AS n WHERE event_ts_utc BETWEEN toDateTime(intDiv(${__from},1000)) - INTERVAL 5 MINUTE AND toDateTime(intDiv(${__to},1000)) AND '${hide_paused}' = '1')\n  GROUP BY time\n) AS b USING (time)\nORDER BY time",
+          "format": 1,
+          "queryType": "timeseries"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "purple"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisCenteredZero": true,
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "green"
+              },
+              {
+                "value": 0.05,
+                "color": "red"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "description": "Weighted-average position difference per time bucket (sum(position*weighting)/sum(weighting)). Sustained |delta| > 0.05 indicates the two PnL modes are trading different positions and triggers a Telegram alert."
     }
   ],
   "templating": {
