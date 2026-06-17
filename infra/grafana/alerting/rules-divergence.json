@@ -11,6 +11,7 @@
     "orgID": 1,
     "labels": {
       "alertgroup": "divergence",
+      "metric": "position",
       "pair": "bt-prod"
     },
     "annotations": {
@@ -97,6 +98,7 @@
     "orgID": 1,
     "labels": {
       "alertgroup": "divergence",
+      "metric": "position",
       "pair": "prod-rt"
     },
     "annotations": {
@@ -163,6 +165,93 @@
                 "params": [
                   -0.05,
                   0.05
+                ]
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "uid": "divergence-pnl-prod-rt",
+    "title": "PnL divergence: Production − Real-Trade",
+    "folderUID": "__FOLDER_UID__",
+    "ruleGroup": "divergence",
+    "condition": "C",
+    "for": "10m",
+    "noDataState": "OK",
+    "execErrState": "Alerting",
+    "orgID": 1,
+    "labels": {
+      "alertgroup": "divergence",
+      "metric": "cumulative_pnl",
+      "pair": "prod-rt"
+    },
+    "annotations": {
+      "summary": "Portfolio weighted PnL diverges (Production − Real-Trade) by more than 0.015 for 10m. See dashboard: Strategy PnL — L5 Portfolio."
+    },
+    "notification_settings": {
+      "receiver": "telegram-divergence"
+    },
+    "data": [
+      {
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 1020,
+          "to": 0
+        },
+        "datasourceUid": "dfjc5vjyfcc8wf",
+        "model": {
+          "refId": "A",
+          "editorType": "sql",
+          "rawSql": "SELECT a.t AS time, a.wp - b.wp AS value FROM (SELECT toStartOfMinute(ts) t, sum(cumulative_pnl * weighting) / nullIf(sum(weighting), 0) wp FROM analytics.strategy_pnl_1min_prod_v2 FINAL WHERE ts >= now() - INTERVAL 17 MINUTE AND toStartOfMinute(ts) IN (SELECT toStartOfMinute(ts) FROM analytics.strategy_pnl_1min_prod_v2 FINAL WHERE ts >= now() - INTERVAL 17 MINUTE GROUP BY toStartOfMinute(ts) HAVING countDistinct(underlying) = 8) GROUP BY t) a INNER JOIN (SELECT toStartOfMinute(ts) t, sum(cumulative_pnl * weighting) / nullIf(sum(weighting), 0) wp FROM analytics.strategy_pnl_1min_real_trade_v2 FINAL WHERE ts >= now() - INTERVAL 17 MINUTE AND toStartOfMinute(ts) IN (SELECT toStartOfMinute(ts) FROM analytics.strategy_pnl_1min_real_trade_v2 FINAL WHERE ts >= now() - INTERVAL 17 MINUTE GROUP BY toStartOfMinute(ts) HAVING countDistinct(underlying) = 8) GROUP BY t) b USING (t) ORDER BY time",
+          "format": 1,
+          "queryType": "timeseries",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "dfjc5vjyfcc8wf"
+          },
+          "intervalMs": 60000,
+          "maxDataPoints": 100
+        }
+      },
+      {
+        "refId": "B",
+        "datasourceUid": "__expr__",
+        "model": {
+          "refId": "B",
+          "type": "reduce",
+          "datasource": {
+            "type": "__expr__",
+            "uid": "__expr__"
+          },
+          "expression": "A",
+          "reducer": "last",
+          "settings": {
+            "mode": "dropNN"
+          }
+        }
+      },
+      {
+        "refId": "C",
+        "datasourceUid": "__expr__",
+        "model": {
+          "refId": "C",
+          "type": "threshold",
+          "datasource": {
+            "type": "__expr__",
+            "uid": "__expr__"
+          },
+          "expression": "B",
+          "conditions": [
+            {
+              "type": "query",
+              "evaluator": {
+                "type": "outside_range",
+                "params": [
+                  -0.015,
+                  0.015
                 ]
               }
             }
