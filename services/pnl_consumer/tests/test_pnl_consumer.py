@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from libs.computation import AnchorRecord, AnchorState, StrategyBar, StrategyRevision
-from libs.computation.bootstrap import BootstrapSeed, WalkRow
+from libs.computation.bootstrap import BootstrapSeed, LastPnlAnchor, WalkRow
 from pnl_consumer.pnl_consumer import (
     SinkConfig,
     _bootstrap_state,
@@ -677,18 +677,18 @@ def test_carry_forward_metadata_updated_after_new_bar():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# _bootstrap_state: walk must preserve seed metadata
+# _bootstrap_state: continuous seeding (anchor from last stored row, no re-anchor
+# step on restart) + seed metadata preserved.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.unit
-def test_bootstrap_state_walk_preserves_seed_metadata():
-    """Regression: the walk loop must merge into the seed-loaded AnchorRecord, not
-    replace it. Before this fix, the walk overwrote state with a fresh record
-    carrying only pnl/price/position/bar_ts/revision_ts, wiping
-    strategy_instance_id/underlying/etc. to defaults. That broke carry-forward
-    (returned None on empty strategy_instance_id) and the per-candle underlying
-    gate, so most strategies stopped emitting rows after a restart.
+def test_bootstrap_state_seeds_from_last_anchor_and_preserves_seed_metadata():
+    """The live anchor's pnl/price come from the strategy's LAST stored row
+    (fetch_last_pnl_anchors); position + metadata come from the current seed; the
+    verification walk overwrites neither. So a restart chains continuously from the
+    stored value (no re-anchor step), and metadata is preserved (defaults would
+    break carry-forward after a restart).
     """
     bar_ts = datetime(2026, 5, 25, 12, 0, 0)
     revision_ts = datetime(2026, 5, 25, 12, 1, 0)
@@ -710,14 +710,22 @@ def test_bootstrap_state_walk_preserves_seed_metadata():
         bar_ts=bar_ts,
         revision_ts=revision_ts,
     )
-    # Walk anchor before this row: pnl=11.0 price=70500.0
-    # Recompute check inside _bootstrap_state: 11.0 + 1.0 * (71000-70500)/70500 ≈ 11.00709
-    expected_pnl = 11.0 + 1.0 * (71000.0 - 70500.0) / 70500.0
+    # Last stored row — distinct values to prove the anchor comes from here.
+    anchors = {
+        "strat_rt_BTC_1h": LastPnlAnchor(
+            strategy_table_name="strat_rt_BTC_1h",
+            pnl=42.0,
+            price=99000.0,
+            ts=datetime(2026, 5, 26, 2, 59, 0),
+        )
+    }
+    # Walk row passes verification (prev anchor 11.0/70500) but must NOT seed.
+    verified_pnl = 11.0 + 1.0 * (71000.0 - 70500.0) / 70500.0
     walk_row = WalkRow(
         strategy_table_name="strat_rt_BTC_1h",
         strategy_instance_id="inst_BTC_001",
         ts=walk_ts,
-        cumulative_pnl=expected_pnl,
+        cumulative_pnl=verified_pnl,
         price=71000.0,
         position=1.0,
         bar_ts=bar_ts,
@@ -725,18 +733,24 @@ def test_bootstrap_state_walk_preserves_seed_metadata():
     )
 
     with (
+        patch(f"{_MOD}.fetch_last_pnl_anchors", return_value=anchors),
         patch(f"{_MOD}.fetch_bootstrap_seeds", return_value=[seed]),
-        patch(f"{_MOD}._fetch_walk_anchors", return_value=({"strat_rt_BTC_1h": 11.0}, {"strat_rt_BTC_1h": 70500.0})),
+        patch(
+            f"{_MOD}._fetch_walk_anchors",
+            return_value=({"strat_rt_BTC_1h": 11.0}, {"strat_rt_BTC_1h": 70500.0}),
+        ),
         patch(f"{_MOD}.fetch_walk_rows", return_value=[walk_row]),
     ):
-        state = _bootstrap_state("real_trade", reference_ts=datetime(2026, 5, 26, 3, 0, 0))
+        state = _bootstrap_state(
+            "real_trade", reference_ts=datetime(2026, 5, 26, 3, 0, 0)
+        )
 
     rec = state.get("strat_rt_BTC_1h")
-    # Walk advanced pnl/price/position
-    assert rec.pnl == pytest.approx(expected_pnl)
-    assert rec.price == pytest.approx(71000.0)
+    # Anchor comes from the last stored row, NOT the walk's verified_pnl.
+    assert rec.pnl == pytest.approx(42.0)
+    assert rec.price == pytest.approx(99000.0)
     assert rec.position == 1.0
-    # And kept the seed metadata — these would all be defaults if the walk wiped them.
+    # Seed metadata preserved — these would all be defaults if it were wiped.
     assert rec.strategy_instance_id == "inst_BTC_001"
     assert rec.underlying == "BTC"
     assert rec.strategy_id == 7
@@ -745,3 +759,30 @@ def test_bootstrap_state_walk_preserves_seed_metadata():
     assert rec.weighting == 1.0
     assert rec.final_signal == 1.0
     assert rec.benchmark == pytest.approx(0.01)
+
+
+@pytest.mark.unit
+def test_bootstrap_state_seeds_flat_when_pnl_chain_but_no_current_revision():
+    """A strategy with a stored pnl chain but no current revision is seeded flat,
+    continuing its pnl from the last stored value."""
+    anchors = {
+        "RETIRED": LastPnlAnchor(
+            strategy_table_name="RETIRED",
+            pnl=7.5,
+            price=50.0,
+            ts=datetime(2026, 6, 10, 0, 0, 0),
+        )
+    }
+    with (
+        patch(f"{_MOD}.fetch_last_pnl_anchors", return_value=anchors),
+        patch(f"{_MOD}.fetch_bootstrap_seeds", return_value=[]),
+        patch(f"{_MOD}._fetch_walk_anchors", return_value=({}, {})),
+        patch(f"{_MOD}.fetch_walk_rows", return_value=[]),
+    ):
+        state = _bootstrap_state(
+            "real_trade", reference_ts=datetime(2026, 6, 17, 20, 0, 0)
+        )
+
+    rec = state.get("RETIRED")
+    assert rec.pnl == pytest.approx(7.5)  # chain continues from last stored value
+    assert rec.position == pytest.approx(0.0)  # flat — no current revision

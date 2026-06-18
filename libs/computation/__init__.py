@@ -1,8 +1,10 @@
 from libs.computation.anchor_state import AnchorRecord, AnchorState
 from libs.computation.bootstrap import (
     BootstrapSeed,
+    LastPnlAnchor,
     WalkRow,
     fetch_bootstrap_seeds,
+    fetch_last_pnl_anchors,
     fetch_walk_rows,
 )
 from libs.computation.candle_lookup import (
@@ -52,8 +54,10 @@ __all__ = [
     "AnchorState",
     # bootstrap
     "BootstrapSeed",
+    "LastPnlAnchor",
     "WalkRow",
     "fetch_bootstrap_seeds",
+    "fetch_last_pnl_anchors",
     "fetch_walk_rows",
     # candle_lookup (pnl_consumer live loop)
     "StrategyBar",

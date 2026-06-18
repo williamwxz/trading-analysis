@@ -19,8 +19,10 @@ from libs.computation.candle_lookup import (
 from libs.computation.anchor_state import AnchorRecord, AnchorState
 from libs.computation.bootstrap import (
     BootstrapSeed,
+    LastPnlAnchor,
     WalkRow,
     fetch_bootstrap_seeds,
+    fetch_last_pnl_anchors,
     fetch_walk_rows,
 )
 
@@ -1207,3 +1209,152 @@ def test_anchor_state_should_apply_revision_no_anchor_always_applies():
     new_bar = datetime(2026, 5, 10, 10, 0, 0)
     new_rev = datetime(2026, 5, 10, 10, 3, 0)
     assert state.should_apply_revision("brand_new", new_bar, new_rev)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# fetch_last_pnl_anchors — continuous-seed anchors: last stored pnl/price row per
+# strategy over the FULL universe (distinct from the pnl table), 48h window with
+# an unbounded per-strategy fallback for strategies inactive longer than that.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _ch_router(universe, bounded, fallback):
+    """Return a query_dicts side_effect that dispatches by SQL shape.
+
+    universe: rows for the DISTINCT strategy_table_name query
+    bounded:  rows for the 48h GROUP BY last-row query
+    fallback: {strategy_table_name: rows} for per-strategy unbounded LIMIT 1 queries
+    """
+    calls: list[str] = []
+
+    def _route(sql, *a, **k):
+        calls.append(sql)
+        if "DISTINCT strategy_table_name" in sql:
+            return universe
+        if "GROUP BY strategy_table_name" in sql:
+            return bounded
+        for stn, rows in fallback.items():
+            if f"strategy_table_name = '{stn}'" in sql:
+                return rows
+        return []
+
+    _route.calls = calls
+    return _route
+
+
+@pytest.mark.unit
+def test_fetch_last_pnl_anchors_returns_last_row_per_strategy():
+    """Each strategy in the universe gets its last stored pnl/price/ts."""
+    universe = [{"strategy_table_name": "A"}, {"strategy_table_name": "B"}]
+    bounded = [
+        {
+            "strategy_table_name": "A",
+            "cumulative_pnl": 5.5,
+            "price": 93000.0,
+            "ts": datetime(2026, 5, 10, 11, 59, 0),
+        },
+        {
+            "strategy_table_name": "B",
+            "cumulative_pnl": -1.0,
+            "price": 100.0,
+            "ts": datetime(2026, 5, 10, 11, 58, 0),
+        },
+    ]
+    router = _ch_router(universe, bounded, {})
+    with patch("libs.computation.bootstrap.query_dicts", side_effect=router):
+        anchors = fetch_last_pnl_anchors(
+            pnl_table="analytics.strategy_pnl_1min_real_trade_v2",
+            reference_ts=_REF_TS,
+        )
+    assert set(anchors) == {"A", "B"}
+    assert isinstance(anchors["A"], LastPnlAnchor)
+    assert anchors["A"].pnl == pytest.approx(5.5)
+    assert anchors["A"].price == pytest.approx(93000.0)
+    assert anchors["B"].pnl == pytest.approx(-1.0)
+
+
+@pytest.mark.unit
+def test_fetch_last_pnl_anchors_universe_is_distinct_from_pnl_table():
+    """The universe query selects DISTINCT strategy_table_name from the pnl table."""
+    router = _ch_router([], [], {})
+    with patch("libs.computation.bootstrap.query_dicts", side_effect=router):
+        fetch_last_pnl_anchors(
+            pnl_table="analytics.strategy_pnl_1min_real_trade_v2",
+            reference_ts=_REF_TS,
+        )
+    first = router.calls[0]
+    assert "DISTINCT strategy_table_name" in first
+    assert "analytics.strategy_pnl_1min_real_trade_v2" in first
+
+
+@pytest.mark.unit
+def test_fetch_last_pnl_anchors_falls_back_unbounded_for_stale_strategy():
+    """A strategy with no row in the 48h window is found via an unbounded lookback."""
+    universe = [{"strategy_table_name": "A"}, {"strategy_table_name": "STALE"}]
+    bounded = [
+        {
+            "strategy_table_name": "A",
+            "cumulative_pnl": 2.0,
+            "price": 50.0,
+            "ts": datetime(2026, 5, 10, 11, 59, 0),
+        },
+    ]
+    fallback = {
+        "STALE": [
+            {"cumulative_pnl": -9.0, "price": 7.0, "ts": datetime(2026, 5, 1, 0, 0, 0)},
+        ]
+    }
+    router = _ch_router(universe, bounded, fallback)
+    with patch("libs.computation.bootstrap.query_dicts", side_effect=router):
+        anchors = fetch_last_pnl_anchors(
+            pnl_table="analytics.strategy_pnl_1min_real_trade_v2",
+            reference_ts=_REF_TS,
+        )
+    assert anchors["STALE"].pnl == pytest.approx(-9.0)
+    assert anchors["STALE"].price == pytest.approx(7.0)
+    # a per-strategy fallback query was issued for STALE, with no lower ts bound
+    fb = [c for c in router.calls if "strategy_table_name = 'STALE'" in c]
+    assert len(fb) == 1
+    assert "LIMIT 1" in fb[0]
+    assert "ts >=" not in fb[0]  # unbounded: no 48h lower bound
+
+
+@pytest.mark.unit
+def test_fetch_last_pnl_anchors_no_fallback_when_all_active():
+    """No per-strategy fallback queries when every strategy is in the 48h window."""
+    universe = [{"strategy_table_name": "A"}, {"strategy_table_name": "B"}]
+    bounded = [
+        {
+            "strategy_table_name": "A",
+            "cumulative_pnl": 1.0,
+            "price": 10.0,
+            "ts": datetime(2026, 5, 10, 11, 59, 0),
+        },
+        {
+            "strategy_table_name": "B",
+            "cumulative_pnl": 2.0,
+            "price": 20.0,
+            "ts": datetime(2026, 5, 10, 11, 59, 0),
+        },
+    ]
+    router = _ch_router(universe, bounded, {})
+    with patch("libs.computation.bootstrap.query_dicts", side_effect=router):
+        fetch_last_pnl_anchors(
+            pnl_table="analytics.strategy_pnl_1min_real_trade_v2",
+            reference_ts=_REF_TS,
+        )
+    fb = [c for c in router.calls if "LIMIT 1" in c and "GROUP BY" not in c]
+    assert fb == []
+
+
+@pytest.mark.unit
+def test_fetch_last_pnl_anchors_empty_universe_returns_empty():
+    """No strategies -> empty dict, and no bounded/fallback queries."""
+    router = _ch_router([], [], {})
+    with patch("libs.computation.bootstrap.query_dicts", side_effect=router):
+        anchors = fetch_last_pnl_anchors(
+            pnl_table="analytics.strategy_pnl_1min_real_trade_v2",
+            reference_ts=_REF_TS,
+        )
+    assert anchors == {}
+    assert len(router.calls) == 1  # only the universe query ran
