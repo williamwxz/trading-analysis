@@ -116,12 +116,15 @@ def fetch_last_pnl_anchors(
     anchors: dict[str, LastPnlAnchor] = {}
 
     # Cheap bounded pass: last row per strategy within the 48h window.
+    # NB: alias max(ts) as last_ts, NOT ts — ClickHouse's analyzer resolves a bare
+    # `ts` in WHERE to the SELECT alias, and an aggregate in WHERE is illegal
+    # (ILLEGAL_AGGREGATION). Same reason argMax orders by the raw ts column.
     bounded_sql = f"""\
 SELECT
     strategy_table_name,
     argMax(cumulative_pnl, (ts, updated_at)) AS cumulative_pnl,
     argMax(price,          (ts, updated_at)) AS price,
-    max(ts)                                  AS ts
+    max(ts)                                  AS last_ts
 FROM {pnl_table}
 WHERE ts >= '{window_start_str}' AND ts < '{ref_str}'
 GROUP BY strategy_table_name
@@ -131,7 +134,7 @@ GROUP BY strategy_table_name
             strategy_table_name=r["strategy_table_name"],
             pnl=float(r["cumulative_pnl"] or 0.0),
             price=float(r["price"]),
-            ts=r["ts"],
+            ts=r["last_ts"],
         )
 
     # Unbounded fallback for strategies inactive beyond the window — look all the

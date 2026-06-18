@@ -1251,13 +1251,13 @@ def test_fetch_last_pnl_anchors_returns_last_row_per_strategy():
             "strategy_table_name": "A",
             "cumulative_pnl": 5.5,
             "price": 93000.0,
-            "ts": datetime(2026, 5, 10, 11, 59, 0),
+            "last_ts": datetime(2026, 5, 10, 11, 59, 0),
         },
         {
             "strategy_table_name": "B",
             "cumulative_pnl": -1.0,
             "price": 100.0,
-            "ts": datetime(2026, 5, 10, 11, 58, 0),
+            "last_ts": datetime(2026, 5, 10, 11, 58, 0),
         },
     ]
     router = _ch_router(universe, bounded, {})
@@ -1296,7 +1296,7 @@ def test_fetch_last_pnl_anchors_falls_back_unbounded_for_stale_strategy():
             "strategy_table_name": "A",
             "cumulative_pnl": 2.0,
             "price": 50.0,
-            "ts": datetime(2026, 5, 10, 11, 59, 0),
+            "last_ts": datetime(2026, 5, 10, 11, 59, 0),
         },
     ]
     fallback = {
@@ -1328,13 +1328,13 @@ def test_fetch_last_pnl_anchors_no_fallback_when_all_active():
             "strategy_table_name": "A",
             "cumulative_pnl": 1.0,
             "price": 10.0,
-            "ts": datetime(2026, 5, 10, 11, 59, 0),
+            "last_ts": datetime(2026, 5, 10, 11, 59, 0),
         },
         {
             "strategy_table_name": "B",
             "cumulative_pnl": 2.0,
             "price": 20.0,
-            "ts": datetime(2026, 5, 10, 11, 59, 0),
+            "last_ts": datetime(2026, 5, 10, 11, 59, 0),
         },
     ]
     router = _ch_router(universe, bounded, {})
@@ -1358,3 +1358,32 @@ def test_fetch_last_pnl_anchors_empty_universe_returns_empty():
         )
     assert anchors == {}
     assert len(router.calls) == 1  # only the universe query ran
+
+
+@pytest.mark.unit
+def test_fetch_last_pnl_anchors_bounded_sql_aliases_max_ts_safely():
+    """Regression: the bounded GROUP BY must alias max(ts) as last_ts, NOT ts.
+
+    Aliasing it `AS ts` makes ClickHouse resolve the bare `ts` in the WHERE to the
+    aggregate alias and raise ILLEGAL_AGGREGATION (crash-looped the consumer).
+    """
+    universe = [{"strategy_table_name": "A"}]
+    bounded = [
+        {
+            "strategy_table_name": "A",
+            "cumulative_pnl": 1.0,
+            "price": 10.0,
+            "last_ts": datetime(2026, 5, 10, 11, 59, 0),
+        }
+    ]
+    router = _ch_router(universe, bounded, {})
+    with patch("libs.computation.bootstrap.query_dicts", side_effect=router):
+        fetch_last_pnl_anchors(
+            pnl_table="analytics.strategy_pnl_1min_real_trade_v2",
+            reference_ts=_REF_TS,
+        )
+    bounded_sql = next(c for c in router.calls if "GROUP BY strategy_table_name" in c)
+    assert "max(ts)" in bounded_sql
+    assert "AS last_ts" in bounded_sql
+    # the aggregate must NOT be aliased back to the filtered column name `ts`
+    assert "AS ts" not in bounded_sql
