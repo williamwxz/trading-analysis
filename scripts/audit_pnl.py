@@ -79,6 +79,11 @@ HOUR_TABLE = {
     "bt": "strategy_pnl_1hour_bt_v2",
     "real_trade": "strategy_pnl_1hour_real_trade_v2",
 }
+DAY_TABLE = {
+    "prod": "strategy_pnl_1day_prod_v2",
+    "bt": "strategy_pnl_1day_bt_v2",
+    "real_trade": "strategy_pnl_1day_real_trade_v2",
+}
 SOURCE_LABEL = {"prod": "production", "bt": "backtest", "real_trade": "real_trade"}
 ECS_SERVICE = {
     "prod": "trading-analysis-pnl-consumer-prod",
@@ -169,6 +174,20 @@ class AuditReport:
 # ── section A: ECS + CH client helpers ──────────────────────────────────────
 
 
+# Per-query memory controls applied to EVERY client (incl. fix_bt_strategies
+# worker threads, which resolve this module-level get_client). ClickHouse Cloud
+# leaves max_memory_usage = 0 (unlimited per query); a window recompute over the
+# bt tables (billions of rows) can then try to grab the whole server's memory and
+# trip `(total) memory limit exceeded`, OOM-crashing Cloud. Capping per-query
+# memory and lowering the external-aggregation/sort thresholds forces GROUP BY /
+# ORDER BY to spill to disk instead of holding everything in RAM.
+_DEFAULT_QUERY_SETTINGS = {
+    "max_memory_usage": 4_000_000_000,  # 4 GiB hard cap per query
+    "max_bytes_before_external_group_by": 2_000_000_000,  # spill GROUP BY at 2 GiB
+    "max_bytes_before_external_sort": 2_000_000_000,  # spill ORDER BY at 2 GiB
+}
+
+
 def get_client():
     return clickhouse_connect.get_client(
         host=os.environ["CLICKHOUSE_HOST"],
@@ -176,6 +195,9 @@ def get_client():
         user=os.environ["CLICKHOUSE_USER"],
         password=os.environ["CLICKHOUSE_PASSWORD"],
         secure=os.environ.get("CLICKHOUSE_SECURE", "true").lower() == "true",
+        connect_timeout=15,
+        send_receive_timeout=1800,
+        settings=_DEFAULT_QUERY_SETTINGS,
     )
 
 
@@ -208,9 +230,7 @@ def _parse_ts(s) -> datetime:
 def _parse_ts_utc(s) -> datetime:
     """tz-aware UTC; required for clickhouse-connect inserts so the host's local
     offset doesn't silently shift every row by hours."""
-    return datetime.strptime(str(s)[:19], "%Y-%m-%d %H:%M:%S").replace(
-        tzinfo=UTC
-    )
+    return datetime.strptime(str(s)[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
 
 
 def _utcnow_naive() -> datetime:
@@ -713,7 +733,9 @@ def fix_prod_rt_strategies(
             earliest - timedelta(minutes=_BAR_FETCH_LOOKBACK_MINUTES)
         ).strftime("%Y-%m-%d %H:%M:%S")
         if type_ == "real_trade":
-            bars = fetch_new_bars_real_trade(src, underlying, bar_fetch_start, ts_end, client)
+            bars = fetch_new_bars_real_trade(
+                src, underlying, bar_fetch_start, ts_end, client
+            )
         else:
             bars = fetch_new_bars_prod(src, underlying, bar_fetch_start, ts_end, client)
         stn_set = {f.strategy_table_name for f in group}
@@ -999,9 +1021,7 @@ def _fix_bt_underlying(
 
     # Per-underlying hour-table refresh — the checkpoint that makes partial
     # runs leave consistent state.
-    refresh_hour_table(
-        "bt", earliest, client, dry_run=dry_run, underlying=underlying
-    )
+    refresh_hour_table("bt", earliest, client, dry_run=dry_run, underlying=underlying)
 
 
 def refresh_hour_table(
@@ -1024,9 +1044,7 @@ def refresh_hour_table(
     u_clause = f" AND underlying = '{_q(underlying)}'" if underlying else ""
     scope_str = f"{type_}/{underlying}" if underlying else type_
     if dry_run:
-        log.info(
-            "[hour-refresh:%s] DRY-RUN would rebuild from %s", scope_str, ts_str
-        )
+        log.info("[hour-refresh:%s] DRY-RUN would rebuild from %s", scope_str, ts_str)
         return
     log.info("[hour-refresh:%s] rebuilding from %s", scope_str, ts_str)
     client.command(
@@ -1060,6 +1078,65 @@ GROUP BY strategy_table_name, strategy_id, strategy_name, underlying,
          config_timeframe, source, version, toStartOfHour(minute_ts)
 """)
     log.info("[hour-refresh:%s] done", scope_str)
+
+
+def refresh_day_table(
+    type_: Mode,
+    earliest_ts: datetime,
+    client,
+    *,
+    dry_run: bool,
+    underlying: str | None = None,
+) -> None:
+    """Rebuild the 1-day table from the 1-hour table for ts >= earliest_ts.
+
+    The 1-day tables are normally fed by an MV on 1-hour INSERTs, but a window
+    recompute needs an explicit, correct full-day argMax rebuild: the MV produces
+    per-INSERT-batch partial daily aggregates, so relying on the cascade after a
+    refresh leaves the 1-day table with stale/partial rows. DELETE + a single
+    full-window INSERT (same toStartOfDay + argMax shape as the schema backfill)
+    gives the correct daily rollup. Mirrors refresh_hour_table.
+    """
+    day = DAY_TABLE[type_]
+    hour = HOUR_TABLE[type_]
+    ts_str = earliest_ts.strftime("%Y-%m-%d %H:%M:%S")
+    u_clause = f" AND underlying = '{_q(underlying)}'" if underlying else ""
+    scope_str = f"{type_}/{underlying}" if underlying else type_
+    if dry_run:
+        log.info("[day-refresh:%s] DRY-RUN would rebuild from %s", scope_str, ts_str)
+        return
+    log.info("[day-refresh:%s] rebuilding from %s", scope_str, ts_str)
+    client.command(
+        f"DELETE FROM analytics.{day} "
+        f"WHERE ts >= toStartOfDay(toDateTime('{ts_str}')){u_clause}"
+    )
+    client.command(f"""
+INSERT INTO analytics.{day}
+SELECT
+    strategy_table_name, strategy_id, strategy_name, underlying,
+    config_timeframe, source, version,
+    toStartOfDay(hour_ts)              AS ts,
+    argMax(cumulative_pnl, hour_ts)    AS cumulative_pnl,
+    argMax(benchmark, hour_ts)         AS benchmark,
+    argMax(position, hour_ts)          AS position,
+    argMax(price, hour_ts)             AS price,
+    argMax(final_signal, hour_ts)      AS final_signal,
+    argMax(weighting, hour_ts)         AS weighting,
+    now()                              AS updated_at,
+    any(strategy_instance_id)          AS strategy_instance_id
+FROM (
+    SELECT *, ts AS hour_ts
+    FROM analytics.{hour}
+    WHERE ts >= toStartOfDay(toDateTime('{ts_str}')){u_clause}
+    ORDER BY strategy_table_name, strategy_id, strategy_name, underlying,
+             config_timeframe, source, version, ts, updated_at DESC
+    LIMIT 1 BY strategy_table_name, strategy_id, strategy_name, underlying,
+               config_timeframe, source, version, ts
+)
+GROUP BY strategy_table_name, strategy_id, strategy_name, underlying,
+         config_timeframe, source, version, toStartOfDay(hour_ts)
+""")
+    log.info("[day-refresh:%s] done", scope_str)
 
 
 # ── section E: state file + history (Task 6) ────────────────────────────────
@@ -1180,9 +1257,7 @@ def render_console(report: AuditReport) -> str:
             continue
         s = report.by_type[t]
         suffix = "clean" if s.violations == 0 else f"{s.violations} violations"
-        num_underlyings = len(
-            {v.underlying for v in report.violations if v.type == t}
-        )
+        num_underlyings = len({v.underlying for v in report.violations if v.type == t})
         lines.append(
             f"[{t}] {s.strategies_checked} strategies / "
             f"{num_underlyings} underlyings — {suffix}"
@@ -1439,7 +1514,18 @@ def main() -> int:
             p.get("totals", {}).get("rows_fixed", 0),
         )
 
-    report = _run_audit(types, args.underlying, client, now_ts)
+    # --fix-window builds its own per-strategy fix list from the source-history
+    # table and never consults detection results, so skip the (expensive,
+    # GLOBAL_START_TS-wide) audit scan in that path — it only added latency.
+    if args.fix_window:
+        report = AuditReport(
+            started_at=_utcnow_naive(),
+            scope_types=list(types),
+            scope_underlying=_validate_underlying(args.underlying),
+            run_id=_utcnow_naive().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:4],
+        )
+    else:
+        report = _run_audit(types, args.underlying, client, now_ts)
     report.mode = "fix" if args.fix else ("fix-window" if args.fix_window else "audit")
     if args.dry_run:
         report.mode = "dry-run"
@@ -1450,24 +1536,29 @@ def main() -> int:
         ws, we = _parse_ts(args.fix_window[0]), _parse_ts(args.fix_window[1])
         report.scope_fix_window = (ws, we)
         t = types[0]
-        # Find strategies with >10% under-coverage in the window (same heuristic
-        # the old backfill_rt_window_gap.py used, generalized to any type).
-        tgt = TARGET_TABLE[t]
-        gap_sql = f"""
-        WITH expected AS (
-            SELECT dateDiff('minute',
-                toDateTime('{ws:%Y-%m-%d %H:%M:%S}'),
-                toDateTime('{we:%Y-%m-%d %H:%M:%S}')) AS minutes
+        # Select EVERY strategy with source bars in the window — a full
+        # delete+recompute of the window, not a coverage-gap fill. The old
+        # heuristic only picked strategies under 90% coverage, which silently
+        # skipped strategies that were fully present but holding WRONG values
+        # (e.g. late-revision pnl drift) — exactly the case a window recompute
+        # exists to repair. Sourcing the list from the source-history table also
+        # catches strategies entirely missing from the target. The bar-fetch
+        # lookback mirrors the fix functions so 1d-tf strategies whose bar ts
+        # precedes the window are included.
+        src = SOURCE_TABLE[t]
+        fetch_start = (ws - timedelta(minutes=_BAR_FETCH_LOOKBACK_MINUTES)).strftime(
+            "%Y-%m-%d %H:%M:%S"
         )
-        SELECT t.strategy_table_name, any(t.underlying)
-        FROM analytics.{tgt} t CROSS JOIN expected
-        WHERE t.ts >= toDateTime('{ws:%Y-%m-%d %H:%M:%S}')
-          AND t.ts <  toDateTime('{we:%Y-%m-%d %H:%M:%S}')
-        GROUP BY t.strategy_table_name
-        HAVING count() < expected.minutes * 0.9
+        strat_sql = f"""
+        SELECT strategy_table_name, any(underlying)
+        FROM analytics.{src}
+        WHERE ts >= toDateTime('{fetch_start}')
+          AND ts <  toDateTime('{we:%Y-%m-%d %H:%M:%S}')
+          AND strategy_table_name NOT LIKE 'manual_probe%'
+        GROUP BY strategy_table_name
         """
         synthetic: list[StrategyFix] = []
-        for stn, und in client.query(gap_sql).result_rows:
+        for stn, und in client.query(strat_sql).result_rows:
             synthetic.append(
                 StrategyFix(
                     type=t,
@@ -1479,7 +1570,10 @@ def main() -> int:
                 )
             )
         log.info(
-            "[--fix-window] %d strategies under 90%% coverage in window", len(synthetic)
+            "[--fix-window] %d strategies with source bars in [%s, %s) — recompute",
+            len(synthetic),
+            ws,
+            we,
         )
         ecs = get_ecs_client() if not args.no_pause and not args.dry_run else None
         try:
@@ -1495,6 +1589,9 @@ def main() -> int:
                 fix_bt_strategies(
                     synthetic, client, dry_run=args.dry_run, now_ts=now_ts
                 )
+            # The 1-day rollup is MV-fed from 1-hour INSERTs and is not corrected
+            # by the refresh above; rebuild it explicitly for the window.
+            refresh_day_table(t, ws, client, dry_run=args.dry_run)
         finally:
             if ecs:
                 resume_consumer(ecs, t)
