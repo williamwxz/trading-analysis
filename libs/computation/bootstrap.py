@@ -32,6 +32,7 @@ _DATETIME_MIN = datetime.min
 @dataclass
 class BootstrapSeed:
     """Anchor state for one strategy at start_ts."""
+
     strategy_table_name: str
     strategy_instance_id: str
     pnl: float
@@ -54,6 +55,7 @@ class BootstrapSeed:
 @dataclass
 class WalkRow:
     """One stored PnL row used during the [start_ts, reference_ts) verification walk."""
+
     strategy_table_name: str
     strategy_instance_id: str
     ts: datetime
@@ -63,6 +65,97 @@ class WalkRow:
     # real_trade only: the bar_ts and revision_ts active at this minute.
     bar_ts: datetime = field(default_factory=lambda: _DATETIME_MIN)
     revision_ts: datetime = field(default_factory=lambda: _DATETIME_MIN)
+
+
+@dataclass
+class LastPnlAnchor:
+    """A strategy's last stored pnl/price row before reference_ts.
+
+    Used to seed the live AnchorState continuously: the first post-restart write
+    chains from the exact last stored value, so a consumer restart produces no
+    re-anchor step.
+    """
+
+    strategy_table_name: str
+    pnl: float
+    price: float
+    ts: datetime
+
+
+def fetch_last_pnl_anchors(
+    pnl_table: str,
+    reference_ts: datetime,
+    lookback_hours: int = 48,
+) -> dict[str, LastPnlAnchor]:
+    """Return each strategy's LAST stored pnl/price row before reference_ts.
+
+    The universe is every strategy_table_name that has ever appeared in pnl_table,
+    so a strategy is never dropped just because it has been quiet. A single 48h
+    GROUP BY covers all currently-active strategies cheaply; any strategy with no
+    row in that window is resolved with an unbounded per-strategy
+    ``ORDER BY ts DESC LIMIT 1`` (cheap via the ``(strategy_table_name, ts)`` sort
+    key) — i.e. look all the way back for the stale ones only.
+
+    Args:
+        pnl_table:      e.g. 'analytics.strategy_pnl_1min_real_trade_v2'
+        reference_ts:   anchors are the last stored row with ts < reference_ts
+        lookback_hours: bounded window for the cheap pass (default 48h)
+    """
+    ref_str = reference_ts.strftime("%Y-%m-%d %H:%M:%S")
+    window_start_str = (reference_ts - timedelta(hours=lookback_hours)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    universe = [
+        r["strategy_table_name"]
+        for r in query_dicts(f"SELECT DISTINCT strategy_table_name FROM {pnl_table}")
+    ]
+    if not universe:
+        return {}
+
+    anchors: dict[str, LastPnlAnchor] = {}
+
+    # Cheap bounded pass: last row per strategy within the 48h window.
+    bounded_sql = f"""\
+SELECT
+    strategy_table_name,
+    argMax(cumulative_pnl, (ts, updated_at)) AS cumulative_pnl,
+    argMax(price,          (ts, updated_at)) AS price,
+    max(ts)                                  AS ts
+FROM {pnl_table}
+WHERE ts >= '{window_start_str}' AND ts < '{ref_str}'
+GROUP BY strategy_table_name
+"""
+    for r in query_dicts(bounded_sql):
+        anchors[r["strategy_table_name"]] = LastPnlAnchor(
+            strategy_table_name=r["strategy_table_name"],
+            pnl=float(r["cumulative_pnl"] or 0.0),
+            price=float(r["price"]),
+            ts=r["ts"],
+        )
+
+    # Unbounded fallback for strategies inactive beyond the window — look all the
+    # way back for these (few) only.
+    for stn in universe:
+        if stn in anchors:
+            continue
+        fallback_sql = f"""\
+SELECT cumulative_pnl, price, ts
+FROM {pnl_table}
+WHERE strategy_table_name = '{stn}' AND ts < '{ref_str}'
+ORDER BY ts DESC, updated_at DESC
+LIMIT 1
+"""
+        rows = query_dicts(fallback_sql)
+        if rows:
+            r = rows[0]
+            anchors[stn] = LastPnlAnchor(
+                strategy_table_name=stn,
+                pnl=float(r["cumulative_pnl"] or 0.0),
+                price=float(r["price"]),
+                ts=r["ts"],
+            )
+    return anchors
 
 
 def _fetch_active_strategy_table_names(
@@ -217,7 +310,9 @@ LIMIT 1 BY strategy_instance_id
     for siid in all_siids:
         pnl_info = pnl_seeds.get(siid, {})
         pos_info = pos_rows.get(siid, {})
-        stn = pnl_info.get("strategy_table_name") or pos_info.get("strategy_table_name", "")
+        stn = pnl_info.get("strategy_table_name") or pos_info.get(
+            "strategy_table_name", ""
+        )
         seeds.append(
             BootstrapSeed(
                 strategy_table_name=stn,

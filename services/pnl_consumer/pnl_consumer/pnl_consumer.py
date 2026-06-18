@@ -27,6 +27,8 @@ from confluent_kafka import (
     KafkaException,
     TopicPartition,
 )
+from streaming.binance_ws_consumer import INSTRUMENTS
+from streaming.models import CandleEvent
 
 from libs.clickhouse_client import insert_rows, query_dicts
 from libs.computation import (
@@ -39,12 +41,11 @@ from libs.computation import (
     build_pnl_row,
     fetch_bootstrap_seeds,
     fetch_bt_strategies_for_candle,
+    fetch_last_pnl_anchors,
     fetch_real_trade_for_candle,
     fetch_strategies_for_candle,
     fetch_walk_rows,
 )
-from streaming.binance_ws_consumer import INSTRUMENTS
-from streaming.models import CandleEvent
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,6 @@ TOPIC = "binance.price.ticks"
 _UNDERLYINGS = [inst.removesuffix("USDT") for inst in INSTRUMENTS]
 _DEFAULT_GROUP_ID = "flink-pnl-consumer"
 
-_SEED_HOURS = 48  # seed anchor from last row before ref_ts - 48h (covers all timeframes incl 1d bars)
 _WALK_HOURS = (
     2  # walk [ref_ts - 2h, ref_ts) to advance anchor price/position to present
 )
@@ -79,6 +79,7 @@ def _walk_deviation_action(deviation: float) -> str:
     if deviation > _PNL_WARN_TOLERANCE:
         return "warn"
     return "ok"
+
 
 PRICE_COLUMNS = [
     "exchange",
@@ -357,38 +358,67 @@ def _bootstrap_state(
     is_bt = False
     now = datetime.now(UTC).replace(tzinfo=None)
     ref_ts = reference_ts if reference_ts is not None else now
-    # seed_ts: far enough back (48h) that all strategies have a position row before
-    # this cutoff, including 4h/1d timeframe strategies inactive for 24h+.
-    # walk_ts: start of the walk window (2h). Walk covers [walk_ts, ref_ts).
-    # walk_anchor_ts: the pnl/price baseline for the walk — last pnl row just before
-    # walk_ts. This must come from walk_ts, NOT seed_ts, because Dagster may have
-    # refreshed rows in the 46h gap between seed_ts and walk_ts, producing a different
-    # PnL chain than the old consumer output at seed_ts.
-    seed_ts = ref_ts - timedelta(hours=_SEED_HOURS)
+    pnl_table = str(cfg["pnl_table"])
+    history_table = str(cfg["history_table"])
+    real_trade = bool(cfg["real_trade"])
+    # walk_ts: start of the verification-only walk window (2h). The walk replays the
+    # last 2h of stored rows to catch upstream corruption — it does NOT seed the live
+    # anchor (continuous seeding from the last stored row does, below).
     walk_ts = ref_ts - timedelta(hours=_WALK_HOURS)
 
-    # Position seeds: read from seed_ts so 4h/1d strategies with no recent bar are found.
+    # Position + revision guard: the latest accepted revision as of ref_ts.
     seeds: list[BootstrapSeed] = fetch_bootstrap_seeds(
-        pnl_table=cfg["pnl_table"],
-        history_table=cfg["history_table"],
-        start_ts=seed_ts,
-        real_trade=cfg["real_trade"],
+        pnl_table=pnl_table,
+        history_table=history_table,
+        start_ts=ref_ts,
+        real_trade=real_trade,
     )
+    seed_by_stn: dict[str, BootstrapSeed] = {s.strategy_table_name: s for s in seeds}
 
-    # Walk pnl/price anchors: last pnl row per strategy just before walk_ts.
-    # This ensures prev_pnl and prev_price agree with the stored rows in [walk_ts, ref_ts),
-    # preventing mismatch when Dagster refreshed rows in the 46h gap between seed_ts and walk_ts.
-    walk_anchor_pnl, walk_anchor_price = _fetch_walk_anchors(cfg["pnl_table"], walk_ts, _UNDERLYINGS)
+    # Continuous PnL/price anchor: each strategy's ACTUAL last stored pnl row. The
+    # universe is every strategy in the pnl table, with an unbounded fallback for the
+    # quiet ones, so the first post-restart write chains exactly from the stored
+    # value — no re-anchor step.
+    last_anchors = fetch_last_pnl_anchors(pnl_table, ref_ts)
 
     state = AnchorState()
+    for stn, anchor in last_anchors.items():
+        seed = seed_by_stn.get(stn)
+        if seed is not None:
+            state.set(
+                stn,
+                AnchorRecord(
+                    pnl=anchor.pnl,
+                    price=anchor.price,
+                    position=seed.position,
+                    bar_ts=seed.bar_ts,
+                    revision_ts=seed.revision_ts,
+                    strategy_instance_id=seed.strategy_instance_id,
+                    underlying=seed.underlying,
+                    strategy_id=seed.strategy_id,
+                    strategy_name=seed.strategy_name,
+                    config_timeframe=seed.config_timeframe,
+                    weighting=seed.weighting,
+                    final_signal=seed.final_signal,
+                    benchmark=seed.benchmark,
+                ),
+            )
+        else:
+            # PnL chain exists but no current revision (retired/quiet) — seed flat;
+            # guard stays at datetime.min so any future revision is accepted.
+            state.set(
+                stn, AnchorRecord(pnl=anchor.pnl, price=anchor.price, position=0.0)
+            )
+
+    # Brand-new strategies: a current revision but no stored pnl row yet.
     for seed in seeds:
-        # Use walk anchor pnl/price if available; fall back to seed pnl/price for strategies
-        # with no pnl row before walk_ts (e.g. brand-new or long-inactive strategies).
+        if seed.strategy_table_name in last_anchors:
+            continue
         state.set(
             seed.strategy_table_name,
             AnchorRecord(
-                pnl=walk_anchor_pnl.get(seed.strategy_table_name, seed.pnl),
-                price=walk_anchor_price.get(seed.strategy_table_name, seed.price),
+                pnl=seed.pnl,
+                price=seed.price,
                 position=seed.position,
                 bar_ts=seed.bar_ts,
                 revision_ts=seed.revision_ts,
@@ -403,33 +433,39 @@ def _bootstrap_state(
             ),
         )
 
+    # ── Verification-only walk: replay the last 2h, abort on gross corruption ──
+    walk_anchor_pnl, walk_anchor_price = _fetch_walk_anchors(
+        pnl_table, walk_ts, _UNDERLYINGS
+    )
     walk_rows: list[WalkRow] = fetch_walk_rows(
-        pnl_table=cfg["pnl_table"],
-        history_table=cfg["history_table"],
+        pnl_table=pnl_table,
+        history_table=history_table,
         start_ts=walk_ts,
         reference_ts=ref_ts,
-        real_trade=cfg["real_trade"],
+        real_trade=real_trade,
     )
 
+    bounded = sum(1 for a in last_anchors.values() if a.ts >= walk_ts)
+    oldest_min = (
+        int(max((ref_ts - a.ts).total_seconds() // 60 for a in last_anchors.values()))
+        if last_anchors
+        else 0
+    )
     logger.info(
-        "Bootstrap [%s]: seed_ts=%s walk_ts=%s ref_ts=%s seeds=%d walk_anchors=%d walk_rows=%d",
+        "Bootstrap [%s]: ref_ts=%s anchored=%d (bounded=%d fallback=%d oldest=%dmin) "
+        "seeds=%d walk_rows=%d (verify-only)",
         mode,
-        seed_ts,
-        walk_ts,
         ref_ts,
+        len(last_anchors),
+        bounded,
+        len(last_anchors) - bounded,
+        oldest_min,
         len(seeds),
-        len(walk_anchor_pnl),
         len(walk_rows),
     )
 
-    prev_pnl: dict[str, float] = {
-        s.strategy_table_name: walk_anchor_pnl.get(s.strategy_table_name, s.pnl)
-        for s in seeds
-    }
-    prev_price: dict[str, float] = {
-        s.strategy_table_name: walk_anchor_price.get(s.strategy_table_name, s.price)
-        for s in seeds
-    }
+    prev_pnl: dict[str, float] = dict(walk_anchor_pnl)
+    prev_price: dict[str, float] = dict(walk_anchor_price)
 
     for wr in walk_rows:
         stn = wr.strategy_table_name
@@ -438,7 +474,12 @@ def _bootstrap_state(
         # Use previous price as fallback when current price is missing (0.0 from coalesce).
         effective_price = wr.price if wr.price != 0.0 else pp
 
-        if not is_bt and pp != 0.0 and effective_price != 0.0 and wr.cumulative_pnl != 0.0:
+        if (
+            not is_bt
+            and pp != 0.0
+            and effective_price != 0.0
+            and wr.cumulative_pnl != 0.0
+        ):
             recomputed = pp_pnl + wr.position * (effective_price - pp) / pp
             deviation = abs(recomputed - wr.cumulative_pnl)
             action = _walk_deviation_action(deviation)
@@ -460,24 +501,8 @@ def _bootstrap_state(
 
         prev_pnl[stn] = wr.cumulative_pnl
         prev_price[stn] = effective_price
-        # update() preserves seed-loaded metadata (strategy_instance_id, underlying,
-        # etc.). Using set() with a fresh AnchorRecord here would clobber those
-        # fields to defaults and break carry-forward in the live loop.
-        state.update(
-            stn,
-            pnl=wr.cumulative_pnl,
-            price=effective_price,
-            position=wr.position,
-            bar_ts=wr.bar_ts,
-            revision_ts=wr.revision_ts,
-        )
+        # verification-only: the walk no longer seeds the live AnchorState.
 
-    logger.info(
-        "Bootstrap [%s]: seeded %d strategies, walked %d rows",
-        mode,
-        len(state),
-        len(walk_rows),
-    )
     return state
 
 
