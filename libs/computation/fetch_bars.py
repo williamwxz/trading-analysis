@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 from libs.clickhouse_client import query_dicts
-from libs.computation.pnl_formula import TIMEFRAME_MAP
+from libs.computation.pnl_formula import TIMEFRAME_MAP, BtAnchor
 
 _TF_EXPR = """\
 multiIf(
@@ -127,66 +127,88 @@ LIMIT 1 BY strategy_table_name, strategy_id, strategy_name, underlying, config_t
     ]
 
 
-def fetch_new_bars_bt(
-    source_table: str,
+_BT_ANCHOR_LOOKBACK_DAYS = 2  # covers the straddling anchor (1d bars => up to 24h back)
+
+
+def fetch_bt_anchors(
     underlying: str,
     ts_start: str,
     ts_end: str,
     client=None,
-) -> List[dict]:
-    """Fetch bars for bt batch recompute in [ts_start, ts_end).
+) -> Dict[str, List[BtAnchor]]:
+    """Per-strategy cum-table anchors for [ts_start - lookback, ts_end), deduped.
 
-    Like fetch_new_bars_prod but also extracts cumulative_pnl (bt cold-start seed)
-    and computes execution_ts = ts + tf_minutes (bar close time).
-
-    Uses LIMIT 1 BY instead of argMin(row_json) to avoid materializing all row_json
-    blobs for sorting — ClickHouse picks the first row per group using the sort key.
+    The lookback includes the one anchor straddling ts_start so the first minute of
+    the window has an anchor. Returns {strategy_table_name: [BtAnchor sorted by ts]}.
+    The cum-table has no `underlying` column — filter by the u= token in
+    strategy_table_name. SharedReplacingMergeTree(computed_at) => dedupe via LIMIT 1 BY.
     """
+    fetch_start = (
+        datetime.strptime(ts_start[:19], "%Y-%m-%d %H:%M:%S")
+        - timedelta(days=_BT_ANCHOR_LOOKBACK_DAYS)
+    ).strftime("%Y-%m-%d %H:%M:%S")
+    like = f"%|u={underlying}|%"
     sql = f"""\
 SELECT
     strategy_table_name,
-    strategy_id,
-    strategy_name,
-    underlying,
     config_timeframe,
-    strategy_instance_id,
-    weighting,
-    toString(ts)                                                         AS ts,
-    JSONExtractFloat(row_json, 'position')       AS position,
-    JSONExtractFloat(row_json, 'final_signal')   AS final_signal,
-    JSONExtractFloat(row_json, 'benchmark')      AS bar_benchmark,
-    JSONExtractFloat(row_json, 'cumulative_pnl') AS cumulative_pnl
-FROM analytics.{source_table}
+    toString(ts)   AS ts_str,
+    cum_pnl_first,
+    pos_first,
+    weighting
+FROM analytics.strategy_cum_pnl_bt_v2
+WHERE strategy_table_name LIKE '{like}'
+  AND ts >= toDateTime('{fetch_start}')
+  AND ts <  toDateTime('{ts_end}')
+ORDER BY strategy_table_name, config_timeframe, ts, computed_at DESC
+LIMIT 1 BY strategy_table_name, config_timeframe, ts
+"""
+    result: Dict[str, List[BtAnchor]] = {}
+    for r in query_dicts(sql, client):
+        result.setdefault(r["strategy_table_name"], []).append(
+            BtAnchor(
+                strategy_table_name=r["strategy_table_name"],
+                config_timeframe=str(r["config_timeframe"]),
+                ts=str(r["ts_str"]),
+                cum_pnl_first=float(r["cum_pnl_first"]),
+                pos_first=float(r["pos_first"]),
+                weighting=float(r["weighting"]),
+            )
+        )
+    return result
+
+
+def fetch_bt_benchmarks(
+    underlying: str,
+    ts_start: str,
+    ts_end: str,
+    client=None,
+) -> Dict[Tuple[str, str], float]:
+    """Per-bar first-revision benchmark from history, keyed by (strategy_table_name, ts).
+
+    Joined onto anchors by anchor.ts (cum-table ts aligns exactly with history bar ts).
+    Same lookback as fetch_bt_anchors so straddling anchors resolve a benchmark.
+    """
+    fetch_start = (
+        datetime.strptime(ts_start[:19], "%Y-%m-%d %H:%M:%S")
+        - timedelta(days=_BT_ANCHOR_LOOKBACK_DAYS)
+    ).strftime("%Y-%m-%d %H:%M:%S")
+    sql = f"""\
+SELECT
+    strategy_table_name,
+    toString(ts) AS ts_str,
+    argMin(JSONExtractFloat(row_json, 'benchmark'), revision_ts) AS benchmark
+FROM analytics.strategy_output_history_bt_v2
 WHERE underlying = '{underlying}'
   AND strategy_table_name NOT LIKE 'manual_probe%'
-  AND toDateTime(ts) >= toDateTime('{ts_start}')
-  AND toDateTime(ts) < toDateTime('{ts_end}')
-ORDER BY strategy_table_name, ts, revision_ts
-LIMIT 1 BY strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, ts
+  AND toDateTime(ts) >= toDateTime('{fetch_start}')
+  AND toDateTime(ts) <  toDateTime('{ts_end}')
+GROUP BY strategy_table_name, ts
 """
-    result = []
-    for r in query_dicts(sql, client):
-        tf = str(r["config_timeframe"])
-        if tf not in TIMEFRAME_MAP:
-            raise ValueError(f"Unknown config_timeframe '{tf}' in {source_table}")
-        bar_ts = _parse_ts(r["ts"])
-        execution_ts = (bar_ts + timedelta(minutes=TIMEFRAME_MAP[tf])).strftime("%Y-%m-%d %H:%M:%S")
-        result.append({
-            "strategy_table_name": r["strategy_table_name"],
-            "strategy_id": int(r["strategy_id"]),
-            "strategy_name": r["strategy_name"],
-            "underlying": r["underlying"],
-            "config_timeframe": tf,
-            "strategy_instance_id": str(r["strategy_instance_id"]),
-            "weighting": float(r["weighting"]),
-            "ts": str(r["ts"]),
-            "execution_ts": execution_ts,
-            "position": float(r["position"]),
-            "final_signal": float(r["final_signal"]),
-            "bar_benchmark": float(r["bar_benchmark"]),
-            "cumulative_pnl": float(r["cumulative_pnl"]),
-        })
-    return result
+    return {
+        (r["strategy_table_name"], str(r["ts_str"])): float(r["benchmark"])
+        for r in query_dicts(sql, client)
+    }
 
 
 _RT_BAR_LOOKBACK_MINUTES = max(TIMEFRAME_MAP.values())  # 1440 — covers 1d bars

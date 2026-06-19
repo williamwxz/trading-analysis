@@ -37,7 +37,8 @@ from libs.computation import (
     check_strategy_drop,
     compute_bt_pnl,
     fetch_anchors,
-    fetch_new_bars_bt,
+    fetch_bt_anchors,
+    fetch_bt_benchmarks,
     fetch_new_bars_prod,
     fetch_new_bars_real_trade,
     fetch_prices_multi,
@@ -193,6 +194,20 @@ def _get_source_strategies(
     return {str(r[0]) for r in rows}
 
 
+def _get_bt_source_strategies(
+    underlying: str, ts_start: str, ts_end: str, client
+) -> set[str]:
+    """Distinct strategy_table_names in the cum-table for the window (BT universe)."""
+    like = f"%|u={underlying}|%"
+    rows = query_rows(
+        f"SELECT DISTINCT strategy_table_name FROM analytics.strategy_cum_pnl_bt_v2 "
+        f"WHERE strategy_table_name LIKE '{like}' "
+        f"  AND ts >= toDateTime('{ts_start}') AND ts < toDateTime('{ts_end}')",
+        client=client,
+    )
+    return {str(r[0]) for r in rows}
+
+
 def _check_output_completeness(
     target_table: str,
     underlying: str,
@@ -298,10 +313,6 @@ def _process_underlying_recent(
     # ── Fetch all bars/revisions and prices for the full window upfront ──────
     if mode == "prod":
         all_bars = fetch_new_bars_prod(
-            source_table, underlying, window_start_ts, end_ts, client
-        )
-    elif mode == "bt":
-        all_bars = fetch_new_bars_bt(
             source_table, underlying, window_start_ts, end_ts, client
         )
     else:
@@ -437,11 +448,17 @@ _BT_STRATEGY_WORKERS = _CPU_COUNT * 2
 
 def _compute_bt_strategy(
     stn: str,
-    bars: list[dict],
+    anchors: list,
     prices: dict[str, float],
+    price_keys: list[str],
+    benchmarks: dict,
+    window_start_ts: str,
+    end_ts: str,
 ) -> list[list]:
-    """Compute and prepare rows for a single BT strategy. Safe to run in parallel."""
-    rows = compute_bt_pnl(bars, prices)
+    """Compute + prepare rows for one BT strategy. Safe to run in parallel."""
+    rows = compute_bt_pnl(
+        anchors, prices, benchmarks, window_start_ts, end_ts, price_keys=price_keys
+    )
     _prepare_rows_for_clickhouse(rows)
     return rows
 
@@ -449,33 +466,32 @@ def _compute_bt_strategy(
 def _process_underlying_bt(
     underlying: str,
     target_table: str,
-    source_table: str,
+    source_table: str,  # retained for signature parity; unused (cum-table is source)
     default_window_start: datetime,
     end_dt: datetime,
     log_fn=None,
 ) -> tuple[int, datetime]:
-    """BT recompute for one underlying: parallel per-strategy, single bulk insert.
+    """BT recompute for one underlying from strategy_cum_pnl_bt_v2.
 
-    Since BT bars are independent (no cross-bar anchor chaining), each strategy
-    can be computed concurrently. All rows are bulk-inserted in one call per underlying.
+    Anchor-reset model: each minute is recomputed from the most-recent cum-table
+    anchor (no chaining), so strategies compute independently in parallel.
     """
     _emit = log_fn or _log.info
     client = get_client()
 
     resume_dt = _get_underlying_resume_dt(underlying, target_table, client)
-    window_start = resume_dt if resume_dt is not None else default_window_start
-    window_start = window_start.replace(tzinfo=None)
+    window_start = (
+        resume_dt if resume_dt is not None else default_window_start
+    ).replace(tzinfo=None)
     end_dt = end_dt.replace(tzinfo=None)
     window_start_ts = window_start.strftime("%Y-%m-%d %H:%M:%S")
     end_ts = end_dt.strftime("%Y-%m-%d %H:%M:%S")
     _emit(f"[{underlying}] bt window_start={window_start_ts}")
 
-    source_stns = _get_source_strategies(
-        source_table, underlying, window_start_ts, end_ts, client
+    source_stns = _get_bt_source_strategies(
+        underlying, window_start_ts, end_ts, client
     )
-    _emit(
-        f"[{underlying}] bt source has {len(source_stns)} strategies in [{window_start_ts}, {end_ts})"
-    )
+    _emit(f"[{underlying}] bt cum-table has {len(source_stns)} strategies in window")
 
     execute(
         f"DELETE FROM analytics.{target_table}"
@@ -484,29 +500,36 @@ def _process_underlying_bt(
     )
     _emit(f"[{underlying}] bt deleted rows >= {window_start_ts}")
 
-    all_bars = fetch_new_bars_bt(
-        source_table, underlying, window_start_ts, end_ts, client
-    )
-    if not all_bars:
-        _emit(f"[{underlying}] bt no bars in window — skipping")
+    anchors_by_stn = fetch_bt_anchors(underlying, window_start_ts, end_ts, client)
+    if not anchors_by_stn:
+        _emit(f"[{underlying}] bt no anchors in window — skipping")
         return 0, window_start
 
+    benchmarks = fetch_bt_benchmarks(underlying, window_start_ts, end_ts, client)
+
+    # Extend price lower bound back 1 day to cover the straddling anchor's ts.
+    price_lo = (window_start - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
     prices_map = fetch_prices_multi(
-        [underlying], window_start_ts, end_ts, client, extend_minutes=1440
+        [underlying], price_lo, end_ts, client, extend_minutes=0
     )
     prices = prices_map.pop(underlying, {})
+    price_keys = sorted(prices)
 
-    # Split bars by strategy for parallel computation.
-    by_strategy: dict[str, list[dict]] = {}
-    for bar in all_bars:
-        by_strategy.setdefault(bar["strategy_table_name"], []).append(bar)
-
-    _emit(f"[{underlying}] bt computing {len(by_strategy)} strategies in parallel")
+    _emit(f"[{underlying}] bt computing {len(anchors_by_stn)} strategies in parallel")
     all_rows: list[list] = []
     with ThreadPoolExecutor(max_workers=_BT_STRATEGY_WORKERS) as pool:
         futures = {
-            pool.submit(_compute_bt_strategy, stn, bars, prices): stn
-            for stn, bars in by_strategy.items()
+            pool.submit(
+                _compute_bt_strategy,
+                stn,
+                anchors,
+                prices,
+                price_keys,
+                benchmarks,
+                window_start_ts,
+                end_ts,
+            ): stn
+            for stn, anchors in anchors_by_stn.items()
         }
         for future in as_completed(futures):
             all_rows.extend(future.result())
@@ -610,9 +633,13 @@ def _recompute_pnl_recent(
     # When the target table is empty (cold start / full wipe), fall back to
     # min(ts) from the source so we rebuild the full history, not just 7 days.
     source_min_ts = _get_source_min_ts(source_table)
-    default_window_start = source_min_ts if source_min_ts is not None else datetime.strptime(
-        PROD_REAL_TRADE_START_DATE, "%Y-%m-%d"
-    ).replace(tzinfo=UTC)
+    default_window_start = (
+        source_min_ts
+        if source_min_ts is not None
+        else datetime.strptime(PROD_REAL_TRADE_START_DATE, "%Y-%m-%d").replace(
+            tzinfo=UTC
+        )
+    )
     underlyings = _get_underlyings(source_table)
     context.log.info(
         f"Recent recompute {label}: {len(underlyings)} underlyings, ecs={ecs_service}"
@@ -762,9 +789,7 @@ def _rollup_recent_hours(min_table: str, hour_table: str, log_fn=None) -> str | 
     _emit = log_fn or _log.info
     client = get_client()
 
-    max_ts = query_scalar(
-        f"SELECT max(ts) FROM analytics.{min_table}", client=client
-    )
+    max_ts = query_scalar(f"SELECT max(ts) FROM analytics.{min_table}", client=client)
     if max_ts is None:
         _emit(f"[hourly_rollup] {min_table} is empty — skipping")
         return None

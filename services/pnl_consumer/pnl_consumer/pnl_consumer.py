@@ -36,11 +36,13 @@ from libs.computation import (
     AnchorRecord,
     AnchorState,
     BootstrapSeed,
+    BtLiveAnchor,
     WalkRow,
     build_carry_forward_row,
     build_pnl_row,
+    compute_bt_live_cpnl,
     fetch_bootstrap_seeds,
-    fetch_bt_strategies_for_candle,
+    fetch_bt_anchors_for_candle,
     fetch_last_pnl_anchors,
     fetch_real_trade_for_candle,
     fetch_strategies_for_candle,
@@ -237,7 +239,6 @@ def _fetch_walk_anchors(
     whose last bar may be up to 24h+ ago. underlyings comes from the seeds already
     discovered by fetch_bootstrap_seeds so no extra discovery query is needed.
     """
-    from libs.clickhouse_client import query_dicts
 
     ts_str = walk_ts.strftime("%Y-%m-%d %H:%M:%S")
     window_start_str = (walk_ts - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
@@ -258,95 +259,6 @@ GROUP BY strategy_table_name
             pnl_map[row["strategy_table_name"]] = float(row["cumulative_pnl"] or 0.0)
             price_map[row["strategy_table_name"]] = float(row["price"])
     return pnl_map, price_map
-
-
-def _bootstrap_bt_state(reference_ts: "datetime | None") -> AnchorState:
-    """Seed AnchorState for bt directly from row_json.cumulative_pnl.
-
-    BT bars carry an authoritative cumulative_pnl in row_json (set by the backtest
-    engine), so there is no need to walk the pnl table or fetch price history.
-    We seed each strategy from its latest bar before ref_ts: pnl from row_json,
-    price from futures_price_1min at that bar's closing_ts, position from row_json.
-
-    A single scoped query per underlying keeps memory usage small.
-    """
-    cfg = _MODE_CONFIG["bt"]
-    now = datetime.now(UTC).replace(tzinfo=None)
-    ref_ts = (reference_ts if reference_ts is not None else now).replace(tzinfo=None)
-    lookback_str = (ref_ts - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
-    ref_str = ref_ts.strftime("%Y-%m-%d %H:%M:%S")
-
-    state = AnchorState()
-    for underlying in _UNDERLYINGS:
-        # Latest first-revision bar per strategy whose closing_ts <= ref_ts.
-        tf_expr = (
-            "multiIf(config_timeframe='1m',1,config_timeframe='3m',3,"
-            "config_timeframe='5m',5,config_timeframe='15m',15,"
-            "config_timeframe='30m',30,config_timeframe='1h',60,"
-            "config_timeframe='4h',240,config_timeframe='1d',1440,5)"
-        )
-        bars_sql = f"""\
-SELECT
-    strategy_table_name,
-    strategy_instance_id,
-    strategy_id,
-    strategy_name,
-    underlying,
-    config_timeframe,
-    weighting,
-    max(ts) AS latest_ts,
-    JSONExtractFloat(argMin(row_json, revision_ts), 'cumulative_pnl') AS cumulative_pnl,
-    JSONExtractFloat(argMin(row_json, revision_ts), 'position')       AS position,
-    JSONExtractFloat(argMin(row_json, revision_ts), 'final_signal')   AS final_signal,
-    JSONExtractFloat(argMin(row_json, revision_ts), 'benchmark')      AS benchmark,
-    toString(max(ts) + toIntervalMinute({tf_expr}))                   AS closing_ts
-FROM {cfg['history_table']}
-WHERE underlying = '{underlying}'
-  AND ts >= '{lookback_str}'
-  AND ts + toIntervalMinute({tf_expr}) <= '{ref_str}'
-GROUP BY strategy_table_name, strategy_instance_id, strategy_id,
-         strategy_name, underlying, config_timeframe, weighting
-ORDER BY strategy_instance_id, latest_ts DESC
-LIMIT 1 BY strategy_instance_id
-"""
-        bars = query_dicts(bars_sql)
-        if not bars:
-            continue
-
-        # Fetch prices at each bar's closing_ts in one query.
-        closing_ts_list = ", ".join(f"'{r['closing_ts']}'" for r in bars)
-        instrument = underlying + "USDT"
-        price_sql = f"""\
-SELECT toString(ts) AS ts, open
-FROM analytics.futures_price_1min
-WHERE exchange = 'binance'
-  AND instrument = '{instrument}'
-  AND ts IN ({closing_ts_list})
-"""
-        price_map = {r["ts"]: float(r["open"]) for r in query_dicts(price_sql)}
-
-        for r in bars:
-            stn = r["strategy_table_name"]
-            price = price_map.get(r["closing_ts"], 0.0)
-            state.set(
-                stn,
-                AnchorRecord(
-                    pnl=float(r["cumulative_pnl"] or 0.0),
-                    price=price,
-                    position=float(r["position"] or 0.0),
-                    strategy_instance_id=str(r["strategy_instance_id"]),
-                    underlying=r["underlying"],
-                    strategy_id=int(r["strategy_id"]),
-                    strategy_name=r["strategy_name"],
-                    config_timeframe=r["config_timeframe"],
-                    weighting=float(r["weighting"]),
-                    final_signal=float(r["final_signal"] or 0.0),
-                    benchmark=float(r["benchmark"] or 0.0),
-                ),
-            )
-
-    logger.info("Bootstrap [bt]: seeded %d strategies from row_json", len(state))
-    return state
 
 
 def _bootstrap_state(
@@ -570,6 +482,32 @@ def _compute_pnl_row(
     )
 
 
+def _build_bt_live_row(a: BtLiveAnchor, candle: CandleEvent, now: datetime) -> list:
+    """Stateless BT row from a resolved cum-table anchor (no AnchorState)."""
+    cpnl = compute_bt_live_cpnl(
+        a.cum_pnl_first, a.pos_first, candle.open, a.anchor_price
+    )
+    return build_pnl_row(
+        a.strategy_table_name,
+        {
+            "strategy_id": a.strategy_id,
+            "strategy_name": a.strategy_name,
+            "underlying": a.underlying,
+            "config_timeframe": a.config_timeframe,
+            "weighting": a.weighting,
+            "strategy_instance_id": a.strategy_instance_id,
+            "final_signal": 0.0,
+            "bar_benchmark": a.benchmark,
+            "position": a.pos_first,
+        },
+        candle.open,
+        cpnl,
+        "backtest",
+        candle.ts,
+        now,
+    )
+
+
 def _carry_forward_row(
     state: AnchorState,
     strategy_table_name: str,
@@ -610,7 +548,6 @@ def process_candle(
     candle: CandleEvent,
     state_prod: AnchorState,
     state_real_trade: AnchorState,
-    state_bt: AnchorState,
     cfg: SinkConfig,
 ) -> tuple[list[dict], int, int, int]:
     """Compute all output rows for one candle.
@@ -619,12 +556,16 @@ def process_candle(
     fetched counts are the number of strategy instances returned by each
     candle lookup query — used by the caller to validate flush completeness.
 
-    For prod/bt: strategies in state that return no active bar receive a
+    For prod: strategies in state that return no active bar receive a
     carry-forward row using their last known position. For real_trade:
     strategies whose revision guard returns False (revision already applied)
     also get a carry-forward row, ensuring continuous per-minute coverage.
     Strategies in state that weren't returned by the candle query also get
     carry-forward rows (for their matching underlying).
+
+    BT is stateless: per candle, fetch_bt_anchors_for_candle returns resolved
+    anchors (cum_pnl_first, pos_first, anchor_price) and each row is computed
+    directly — no AnchorState chaining, no bootstrap, no carry-forward for BT.
     """
     now = datetime.now(UTC).replace(tzinfo=None)
     rows: list[dict] = []
@@ -678,50 +619,10 @@ def process_candle(
                     rows.append({"_sink": "pnl_prod", "_row": row})
 
     if cfg.bt:
-        bt_bars = fetch_bt_strategies_for_candle(candle.instrument, candle.ts)
-        bt_fetched = len(bt_bars)
-        fetched_bt_stns: set[str] = set()
-        for bar in bt_bars:
-            fetched_bt_stns.add(bar.strategy_table_name)
-            # bt-only: on each new bar, reset the anchor's pnl to row_json's
-            # authoritative cumulative_pnl and re-anchor the price to this
-            # candle's open. The subsequent _compute_pnl_row() then chains
-            # within the bar via the price-return formula. Without this reset
-            # the live chain drifts from the offline compute_bt_pnl (which
-            # treats row_json cumulative_pnl as authoritative at every bar).
-            # New-bar detection: bar.bar_ts > anchor.bar_ts. On a strategy's
-            # first appearance the anchor's bar_ts is datetime.min, so the
-            # first bar always seeds — matching _bootstrap_bt_state cold-start.
-            if bar.bar_ts > state_bt.get(bar.strategy_table_name).bar_ts:
-                state_bt.update(
-                    bar.strategy_table_name,
-                    pnl=bar.cumulative_pnl,
-                    price=candle.open,
-                    position=bar.position,
-                    bar_ts=bar.bar_ts,
-                )
-            rows.append(
-                {
-                    "_sink": "pnl_bt",
-                    "_row": _compute_pnl_row(
-                        state_bt,
-                        bar.strategy_table_name,
-                        candle,
-                        bar,
-                        "backtest",
-                        now,
-                        bar_ts=bar.bar_ts,
-                    ),
-                }
-            )
-        for stn in list(state_bt.keys()):
-            if (
-                stn not in fetched_bt_stns
-                and state_bt.get(stn).underlying == candle_underlying
-            ):
-                row = _carry_forward_row(state_bt, stn, candle, "backtest", now)
-                if row is not None:
-                    rows.append({"_sink": "pnl_bt", "_row": row})
+        bt_anchors = fetch_bt_anchors_for_candle(candle.instrument, candle.ts)
+        bt_fetched = len(bt_anchors)
+        for a in bt_anchors:
+            rows.append({"_sink": "pnl_bt", "_row": _build_bt_live_row(a, candle, now)})
 
     if cfg.real_trade:
         rt_revs = fetch_real_trade_for_candle(candle.instrument, candle.ts)
@@ -919,14 +820,11 @@ def run() -> None:
         )
 
     state_prod = AnchorState()
-    state_bt = AnchorState()
     state_real_trade = AnchorState()
 
     try:
         if sink_cfg.prod:
             state_prod = _bootstrap_state("prod", reference_ts)
-        if sink_cfg.bt:
-            state_bt = _bootstrap_bt_state(reference_ts)
         if sink_cfg.real_trade:
             state_real_trade = _bootstrap_state("real_trade", reference_ts)
     except Exception:
@@ -998,7 +896,6 @@ def run() -> None:
                 candle,
                 state_prod,
                 state_real_trade,
-                state_bt,
                 sink_cfg,
             )
 

@@ -5,7 +5,8 @@ Kept for backward-compatible imports from pnl_strategy_v2.py.
 
 from libs.computation.fetch_bars import (
     fetch_anchors,
-    fetch_new_bars_bt,
+    fetch_bt_anchors,
+    fetch_bt_benchmarks,
     fetch_new_bars_prod,
     fetch_new_bars_real_trade,
 )
@@ -33,7 +34,8 @@ __all__ = [
     "compute_real_trade_pnl",
     "iter_compute_prod_pnl",
     "fetch_anchors",
-    "fetch_new_bars_bt",
+    "fetch_bt_anchors",
+    "fetch_bt_benchmarks",
     "fetch_new_bars_prod",
     "fetch_new_bars_real_trade",
     "fetch_prices_multi",

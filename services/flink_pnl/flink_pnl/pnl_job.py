@@ -6,15 +6,15 @@ import json
 import logging
 import os
 
+from pnl_consumer.pnl_consumer import _bootstrap_state, peek_reference_ts
 from pyflink.datastream import ProcessFunction, RuntimeContext
+from streaming.models import CandleEvent
 
 from flink_pnl.clickhouse_sink import ClickHouseSinkFunction
 from flink_pnl.metrics import bootstrap_complete, emit_candle_lag, rows_emitted
 from flink_pnl.process_candle import process_candle
 from flink_pnl.sink_config import SinkConfig
 from flink_pnl.state import StateMap, build_state_from_bootstrap
-from pnl_consumer.pnl_consumer import _bootstrap_state, peek_reference_ts
-from streaming.models import CandleEvent
 
 logger = logging.getLogger(__name__)
 
@@ -39,17 +39,12 @@ class PnlProcessFunction(ProcessFunction):
         else:
             self._state_prod = {}
 
-        if cfg.bt:
-            anchor_bt = _bootstrap_state("bt", reference_ts)
-            self._state_bt: StateMap = build_state_from_bootstrap(anchor_bt)
-            bootstrap_complete("bt", sum(len(v) for v in self._state_bt.values()))
-        else:
-            self._state_bt = {}
-
         if cfg.real_trade:
             anchor_rt = _bootstrap_state("real_trade", reference_ts)
             self._state_rt: StateMap = build_state_from_bootstrap(anchor_rt)
-            bootstrap_complete("real_trade", sum(len(v) for v in self._state_rt.values()))
+            bootstrap_complete(
+                "real_trade", sum(len(v) for v in self._state_rt.values())
+            )
         else:
             self._state_rt = {}
 
@@ -58,7 +53,7 @@ class PnlProcessFunction(ProcessFunction):
     def process_element(self, value: str, ctx: ProcessFunction.Context) -> None:
         candle = CandleEvent.from_dict(json.loads(value))
         rows, prod_fetched, bt_fetched, rt_fetched = process_candle(
-            candle, self._state_prod, self._state_bt, self._state_rt, self._cfg
+            candle, self._state_prod, self._state_rt, self._cfg
         )
         for row in rows:
             self._sink.invoke(row)

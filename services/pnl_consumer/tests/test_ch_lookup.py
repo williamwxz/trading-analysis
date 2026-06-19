@@ -5,9 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from libs.computation.candle_lookup import (
-    StrategyBar,
     StrategyRevision,
-    fetch_bt_strategies_for_candle,
     fetch_real_trade_for_candle,
     fetch_strategies_for_candle,
 )
@@ -134,71 +132,6 @@ def test_fetch_real_trade_filters_by_revision_ts():
 
 
 @pytest.mark.unit
-def test_fetch_bt_strategies_returns_list_of_strategy_bars():
-    mock_rows = [
-        {
-            "strategy_table_name": "strat_bt_1",
-            "strategy_instance_id": "strat_bt_1__2",
-            "strategy_id": 2,
-            "strategy_name": "bt_momentum",
-            "underlying": "BTC",
-            "config_timeframe": "5m",
-            "weighting": 1.0,
-            "latest_ts": datetime(2026, 4, 26, 0, 1, 0),
-            "position": -1.0,
-            "final_signal": -1.0,
-            "benchmark": 0.01,
-        }
-    ]
-    with patch("libs.computation.candle_lookup.query_dicts", return_value=mock_rows):
-        bars = fetch_bt_strategies_for_candle(
-            instrument="BTCUSDT",
-            candle_ts=datetime(2026, 4, 26, 0, 1, 0),
-        )
-    assert len(bars) == 1
-    bar = bars[0]
-    assert isinstance(bar, StrategyBar)
-    assert bar.strategy_table_name == "strat_bt_1"
-    assert bar.position == -1.0
-
-
-@pytest.mark.unit
-def test_fetch_bt_strategies_returns_empty_when_no_rows():
-    with patch("libs.computation.candle_lookup.query_dicts", return_value=[]):
-        bars = fetch_bt_strategies_for_candle(
-            instrument="BTCUSDT",
-            candle_ts=datetime(2026, 4, 26, 0, 1, 0),
-        )
-    assert bars == []
-
-
-@pytest.mark.unit
-def test_fetch_bt_strategies_parses_position_from_row_json():
-    mock_rows = [
-        {
-            "strategy_table_name": "strat_bt_2",
-            "strategy_instance_id": "strat_bt_2__3",
-            "strategy_id": 3,
-            "strategy_name": "bt_mean_rev",
-            "underlying": "ETH",
-            "config_timeframe": "15m",
-            "weighting": 0.5,
-            "latest_ts": datetime(2026, 4, 26, 0, 1, 0),
-            "position": 0.0,
-            "final_signal": 0.0,
-            "benchmark": 0.0,
-        }
-    ]
-    with patch("libs.computation.candle_lookup.query_dicts", return_value=mock_rows):
-        bars = fetch_bt_strategies_for_candle(
-            instrument="ETHUSDT",
-            candle_ts=datetime(2026, 4, 26, 0, 1, 0),
-        )
-    assert bars[0].position == 0.0
-    assert bars[0].final_signal == 0.0
-
-
-@pytest.mark.unit
 def test_fetch_strategies_uses_closing_ts_filter():
     """Prod/bt positions activate at closing_ts (ts + tf_minutes), not ts."""
     captured_sql = []
@@ -209,25 +142,6 @@ def test_fetch_strategies_uses_closing_ts_filter():
 
     with patch("libs.computation.candle_lookup.query_dicts", side_effect=capture):
         fetch_strategies_for_candle(
-            instrument="BTCUSDT",
-            candle_ts=datetime(2026, 5, 10, 18, 5, 0),
-        )
-    sql = captured_sql[0]
-    assert "ts + toIntervalMinute" in sql, "must filter on closing_ts, not raw ts"
-    assert "<= '2026-05-10 18:05:00'" in sql
-
-
-@pytest.mark.unit
-def test_fetch_bt_strategies_uses_closing_ts_filter():
-    """Same closing_ts activation invariant for bt candle lookup."""
-    captured_sql = []
-
-    def capture(sql):
-        captured_sql.append(sql)
-        return []
-
-    with patch("libs.computation.candle_lookup.query_dicts", side_effect=capture):
-        fetch_bt_strategies_for_candle(
             instrument="BTCUSDT",
             candle_ts=datetime(2026, 5, 10, 18, 5, 0),
         )
@@ -333,25 +247,5 @@ def test_prod_lookup_picks_latest_bar_first_revision_not_oldest_in_window(
     assert bar.bar_ts == datetime(2026, 5, 27, 17, 0, 0)
     # first revision of the latest bar (1.0), not the oldest-in-window bar (-1.0)
     # and not the latest bar's later revision (0.5)
-    assert bar.position == 1.0
-    assert bar.final_signal == 1.0
-
-
-@pytest.mark.unit
-def test_bt_lookup_picks_latest_bar_first_revision_not_oldest_in_window(
-    history_session,
-):
-    _seed_old_and_latest_bar(history_session, "strategy_output_history_bt_v2")
-    with patch(
-        "libs.computation.candle_lookup.query_dicts",
-        side_effect=_make_query_dicts(history_session),
-    ):
-        bars = fetch_bt_strategies_for_candle(
-            instrument="XRPUSDT",
-            candle_ts=datetime(2026, 5, 27, 18, 0, 0),
-        )
-    assert len(bars) == 1
-    bar = bars[0]
-    assert bar.bar_ts == datetime(2026, 5, 27, 17, 0, 0)
     assert bar.position == 1.0
     assert bar.final_signal == 1.0

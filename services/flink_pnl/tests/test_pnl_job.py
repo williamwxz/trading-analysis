@@ -40,7 +40,6 @@ def _make_fn(sink_label: str = "bt") -> PnlProcessFunction:
     fn = PnlProcessFunction.__new__(PnlProcessFunction)
     fn._cfg = MagicMock()
     fn._state_prod = {}
-    fn._state_bt = {}
     fn._state_rt = {}
     fn._sink = MagicMock()
     fn._sink_label = sink_label
@@ -74,7 +73,9 @@ def test_process_element_calls_process_candle():
 
     with (
         patch("flink_pnl.pnl_job.CandleEvent") as mock_ce,
-        patch("flink_pnl.pnl_job.process_candle", return_value=([], 0, 0, 0)) as mock_pc,
+        patch(
+            "flink_pnl.pnl_job.process_candle", return_value=([], 0, 0, 0)
+        ) as mock_pc,
         patch("flink_pnl.pnl_job.emit_candle_lag"),
     ):
         mock_ce.from_dict.return_value = mock_candle
@@ -84,7 +85,6 @@ def test_process_element_calls_process_candle():
         mock_pc.assert_called_once_with(
             mock_candle,
             fn._state_prod,
-            fn._state_bt,
             fn._state_rt,
             fn._cfg,
         )

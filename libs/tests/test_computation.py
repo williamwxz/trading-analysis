@@ -4,18 +4,11 @@ All tests mock libs.computation.*.query_dicts so no real ClickHouse is needed.
 """
 
 import json
-from datetime import datetime, date
+from datetime import datetime
 from unittest.mock import patch
 
 import pytest
 
-from libs.computation.candle_lookup import (
-    StrategyBar,
-    StrategyRevision,
-    fetch_bt_strategies_for_candle,
-    fetch_real_trade_for_candle,
-    fetch_strategies_for_candle,
-)
 from libs.computation.anchor_state import AnchorRecord, AnchorState
 from libs.computation.bootstrap import (
     BootstrapSeed,
@@ -24,6 +17,12 @@ from libs.computation.bootstrap import (
     fetch_bootstrap_seeds,
     fetch_last_pnl_anchors,
     fetch_walk_rows,
+)
+from libs.computation.candle_lookup import (
+    StrategyBar,
+    StrategyRevision,
+    fetch_real_trade_for_candle,
+    fetch_strategies_for_candle,
 )
 
 DATETIME_MIN = datetime.min
@@ -208,80 +207,6 @@ def test_fetch_strategies_strips_usdt_suffix_from_instrument():
         bars = fetch_strategies_for_candle(instrument="BTCUSDT", candle_ts=_CANDLE_TS)
     assert bars[0].underlying == "BTC"
     assert "'BTC'" in captured_sql[0]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# candle_lookup — fetch_bt_strategies_for_candle
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-@pytest.mark.unit
-def test_fetch_bt_strategies_closing_ts_filter():
-    """bt lookup also gates on closing_ts, not raw ts."""
-    captured = []
-
-    def capture(sql):
-        captured.append(sql)
-        return []
-
-    with patch("libs.computation.candle_lookup.query_dicts", side_effect=capture):
-        fetch_bt_strategies_for_candle(
-            instrument="BTCUSDT", candle_ts=datetime(2026, 5, 10, 18, 5, 0)
-        )
-    sql = captured[0]
-    assert "ts + toIntervalMinute" in sql
-    assert "<= '2026-05-10 18:05:00'" in sql
-
-
-@pytest.mark.unit
-def test_fetch_bt_strategies_uses_argmin_revision_ts():
-    """bt lookup uses argMin on scalar fields keyed by revision_ts — first revision only."""
-    captured = []
-
-    def capture(sql):
-        captured.append(sql)
-        return []
-
-    with patch("libs.computation.candle_lookup.query_dicts", side_effect=capture):
-        fetch_bt_strategies_for_candle(instrument="BTCUSDT", candle_ts=_CANDLE_TS)
-    assert "argMin(" in captured[0]
-    assert "revision_ts" in captured[0]
-    assert "'position'" in captured[0]
-
-
-@pytest.mark.unit
-def test_fetch_bt_strategies_queries_bt_table():
-    """bt lookup queries strategy_output_history_bt_v2, not the prod table."""
-    captured = []
-
-    def capture(sql):
-        captured.append(sql)
-        return []
-
-    with patch("libs.computation.candle_lookup.query_dicts", side_effect=capture):
-        fetch_bt_strategies_for_candle(instrument="BTCUSDT", candle_ts=_CANDLE_TS)
-    assert "strategy_output_history_bt_v2" in captured[0]
-    assert "strategy_output_history_v2" not in captured[0].replace(
-        "strategy_output_history_bt_v2", ""
-    )
-
-
-@pytest.mark.unit
-def test_fetch_bt_strategies_selects_latest_bar_per_strategy_instance():
-    """bt lookup picks the latest bar per strategy_instance_id via a max(ts)
-    subquery, then takes that bar's first revision."""
-    captured = []
-
-    def capture(sql):
-        captured.append(sql)
-        return []
-
-    with patch("libs.computation.candle_lookup.query_dicts", side_effect=capture):
-        fetch_bt_strategies_for_candle(instrument="BTCUSDT", candle_ts=_CANDLE_TS)
-    sql = captured[0]
-    assert "(strategy_instance_id, ts) IN (" in sql
-    assert "max(ts)" in sql
-    assert "GROUP BY strategy_instance_id" in sql
 
 
 # ─────────────────────────────────────────────────────────────────────────────
