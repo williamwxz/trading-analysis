@@ -9,8 +9,6 @@ chains forward, so any earlier error poisons the tail). BT: fix window-local
 
 Persists one JSONL record per run to ./audit_reports/history.jsonl so a later
 run can summarize prior state via --show-history.
-
-Spec: docs/superpowers/specs/2026-05-30-audit-pnl-script-design.md
 """
 
 from __future__ import annotations

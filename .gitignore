@@ -51,3 +51,6 @@ flink_job/connectors/*.jar
 
 .claude/
 audit_reports/
+
+# Superpowers process artifacts (brainstorm specs / implementation plans — keep local)
+docs/superpowers/

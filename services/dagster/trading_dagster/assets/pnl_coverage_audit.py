@@ -3,8 +3,6 @@
 Daily read-only check that walks every (underlying, strategy) in the nine PnL
 tables (1-min + 1-hour + 1-day, for prod / bt / real_trade) and fails the Dagster run
 on any missing minute or position drift.
-
-See docs/superpowers/specs/2026-05-26-pnl-coverage-audit-design.md.
 """
 
 import logging
