@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from libs.computation import AnchorRecord, AnchorState, StrategyBar, StrategyRevision
+from libs.computation import AnchorRecord, AnchorState, BtLiveAnchor, StrategyBar, StrategyRevision
 from libs.computation.bootstrap import BootstrapSeed, LastPnlAnchor, WalkRow
 from pnl_consumer.pnl_consumer import (
     SinkConfig,
@@ -222,7 +222,7 @@ def test_resolve_group_id_default():
 def test_process_candle_always_emits_price_row():
     candle = _candle()
     cfg = SinkConfig(price=True, prod=False, real_trade=False, bt=False)
-    rows, _, _, _ = process_candle(candle, AnchorState(), AnchorState(), AnchorState(),
+    rows, _, _, _ = process_candle(candle, AnchorState(), AnchorState(),
                           cfg)
     price_rows = [r for r in rows if r["_sink"] == "price"]
     assert len(price_rows) == 1
@@ -234,7 +234,7 @@ def test_process_candle_always_emits_price_row():
 def test_process_candle_no_price_row_when_disabled():
     candle = _candle()
     cfg = SinkConfig(price=False, prod=False, real_trade=False, bt=False)
-    rows, _, _, _ = process_candle(candle, AnchorState(), AnchorState(), AnchorState(),
+    rows, _, _, _ = process_candle(candle, AnchorState(), AnchorState(),
                           cfg)
     assert rows == []
 
@@ -253,7 +253,7 @@ def test_process_candle_prod_computes_pnl():
     cfg = SinkConfig(price=False, prod=True, real_trade=False, bt=False)
 
     with patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[bar]):
-        rows, _, _, _ = process_candle(candle, state, AnchorState(), AnchorState(),
+        rows, _, _, _ = process_candle(candle, state, AnchorState(),
                               cfg)
 
     pnl_rows = [r for r in rows if r["_sink"] == "pnl_prod"]
@@ -274,7 +274,7 @@ def test_process_candle_prod_lazy_seeds_new_strategy():
     cfg = SinkConfig(price=False, prod=True, real_trade=False, bt=False)
 
     with patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[bar]):
-        rows, _, _, _ = process_candle(candle, AnchorState(), AnchorState(), AnchorState(),
+        rows, _, _, _ = process_candle(candle, AnchorState(), AnchorState(),
                               cfg)
 
     pnl_rows = [r for r in rows if r["_sink"] == "pnl_prod"]
@@ -289,7 +289,7 @@ def test_process_candle_prod_disabled_emits_no_rows():
     candle = _candle()
     bar = _bar()
     with patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[bar]):
-        rows, _, _, _ = process_candle(candle, AnchorState(), AnchorState(), AnchorState(),
+        rows, _, _, _ = process_candle(candle, AnchorState(), AnchorState(),
                               cfg)
     assert [r for r in rows if r["_sink"] == "pnl_prod"] == []
 
@@ -310,7 +310,7 @@ def test_process_candle_real_trade_applies_new_revision():
     cfg = SinkConfig(price=False, prod=False, real_trade=True, bt=False)
 
     with patch(f"{_MOD}.fetch_real_trade_for_candle", return_value=[rev]):
-        rows, _, _, _ = process_candle(candle, AnchorState(), state, AnchorState(),
+        rows, _, _, _ = process_candle(candle, AnchorState(), state,
                               cfg)
 
     rt_rows = [r for r in rows if r["_sink"] == "pnl_real_trade"]
@@ -337,7 +337,7 @@ def test_process_candle_real_trade_ignores_stale_revision():
     cfg = SinkConfig(price=False, prod=False, real_trade=True, bt=False)
 
     with patch(f"{_MOD}.fetch_real_trade_for_candle", return_value=[stale_rev]):
-        rows, _, _, _ = process_candle(candle, AnchorState(), state, AnchorState(),
+        rows, _, _, _ = process_candle(candle, AnchorState(), state,
                               cfg)
 
     assert [r for r in rows if r["_sink"] == "pnl_real_trade"] == []
@@ -357,7 +357,7 @@ def test_process_candle_real_trade_ignores_same_revision_twice():
     cfg = SinkConfig(price=False, prod=False, real_trade=True, bt=False)
 
     with patch(f"{_MOD}.fetch_real_trade_for_candle", return_value=[rev]):
-        rows, _, _, _ = process_candle(candle, AnchorState(), state, AnchorState(),
+        rows, _, _, _ = process_candle(candle, AnchorState(), state,
                               cfg)
 
     assert [r for r in rows if r["_sink"] == "pnl_real_trade"] == []
@@ -377,7 +377,7 @@ def test_process_candle_real_trade_same_bar_newer_revision_applies():
     cfg = SinkConfig(price=False, prod=False, real_trade=True, bt=False)
 
     with patch(f"{_MOD}.fetch_real_trade_for_candle", return_value=[newer_rev]):
-        rows, _, _, _ = process_candle(candle, AnchorState(), state, AnchorState(),
+        rows, _, _, _ = process_candle(candle, AnchorState(), state,
                               cfg)
 
     assert len([r for r in rows if r["_sink"] == "pnl_real_trade"]) == 1
@@ -391,7 +391,7 @@ def test_process_candle_real_trade_lazy_seeds_new_strategy():
     cfg = SinkConfig(price=False, prod=False, real_trade=True, bt=False)
 
     with patch(f"{_MOD}.fetch_real_trade_for_candle", return_value=[rev]):
-        rows, _, _, _ = process_candle(candle, AnchorState(), AnchorState(), AnchorState(),
+        rows, _, _, _ = process_candle(candle, AnchorState(), AnchorState(),
                               cfg)
 
     rt_rows = [r for r in rows if r["_sink"] == "pnl_real_trade"]
@@ -405,18 +405,13 @@ def test_process_candle_real_trade_lazy_seeds_new_strategy():
 
 @pytest.mark.unit
 def test_process_candle_bt_computes_pnl():
-    """A new bar resets cpnl to row_json's authoritative cumulative_pnl.
+    """Stateless BT: cpnl = cum_pnl_first + pos * (price - anchor_price) / anchor_price.
 
-    The anchor holds a stale chained pnl (0.05) at price 93100. A new bar
-    (bar_ts newer than the anchor's datetime.min default) carries row_json
-    cumulative_pnl=0.30. The emitted pnl must be exactly 0.30 — the price
-    re-anchors to candle.open so the within-minute price-return term is zero.
-    See test_bt_bar_boundary_reset.py for the within-bar chaining counterpart.
+    anchor_price == candle.open → price-return term is zero → cpnl == cum_pnl_first.
+    No AnchorState involved; row computed purely from BtLiveAnchor.
     """
-    state = AnchorState()
-    state.set("strat_bt_1", AnchorRecord(pnl=0.05, price=93100.0))
     candle = _candle(open=93200.0)
-    bt_bar = StrategyBar(
+    anchor = BtLiveAnchor(
         strategy_table_name="strat_bt_1",
         strategy_instance_id="inst_bt_001",
         strategy_id=2,
@@ -424,16 +419,16 @@ def test_process_candle_bt_computes_pnl():
         underlying="BTC",
         config_timeframe="5m",
         weighting=1.0,
-        position=1.0,
-        final_signal=1.0,
+        cum_pnl_first=0.30,
+        pos_first=1.0,
+        anchor_ts=_CANDLE_TS.strftime("%Y-%m-%d %H:%M:%S"),
+        anchor_price=93200.0,  # same as candle.open → zero price-return term
         benchmark=0.0,
-        bar_ts=_CANDLE_TS,
-        cumulative_pnl=0.30,
     )
     cfg = SinkConfig(price=False, prod=False, real_trade=False, bt=True)
 
-    with patch(f"{_MOD}.fetch_bt_strategies_for_candle", return_value=[bt_bar]):
-        rows, _, _, _ = process_candle(candle, AnchorState(), AnchorState(), state,
+    with patch(f"{_MOD}.fetch_bt_anchors_for_candle", return_value=[anchor]):
+        rows, _, _, _ = process_candle(candle, AnchorState(), AnchorState(),
                               cfg)
 
     bt_rows = [r for r in rows if r["_sink"] == "pnl_bt"]
@@ -593,8 +588,7 @@ def test_carry_forward_emits_row_when_bar_absent():
 
     # No bars returned — simulates the case where the next bar hasn't arrived yet
     with patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[]):
-        rows, _, _, _ = process_candle(candle, state, AnchorState(), AnchorState(),
-                              cfg)
+        rows, _, _, _ = process_candle(candle, state, AnchorState(), cfg)
 
     pnl_rows = [r for r in rows if r["_sink"] == "pnl_prod"]
     assert len(pnl_rows) == 1, "carry-forward must emit one row for the late strategy"
@@ -618,8 +612,7 @@ def test_carry_forward_skipped_when_no_metadata():
     cfg = SinkConfig(price=False, prod=True, real_trade=False, bt=False)
 
     with patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[]):
-        rows, _, _, _ = process_candle(candle, state, AnchorState(), AnchorState(),
-                              cfg)
+        rows, _, _, _ = process_candle(candle, state, AnchorState(), cfg)
 
     pnl_rows = [r for r in rows if r["_sink"] == "pnl_prod"]
     assert pnl_rows == [], "no metadata means no carry-forward row"
@@ -640,8 +633,7 @@ def test_carry_forward_not_emitted_when_bar_present():
     cfg = SinkConfig(price=False, prod=True, real_trade=False, bt=False)
 
     with patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[bar]):
-        rows, _, _, _ = process_candle(candle, state, AnchorState(), AnchorState(),
-                              cfg)
+        rows, _, _, _ = process_candle(candle, state, AnchorState(), cfg)
 
     pnl_rows = [r for r in rows if r["_sink"] == "pnl_prod"]
     # Exactly 1 row — from the bar, not a duplicate carry-forward
@@ -663,13 +655,12 @@ def test_carry_forward_metadata_updated_after_new_bar():
     cfg = SinkConfig(price=False, prod=True, real_trade=False, bt=False)
 
     with patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[bar_new]):
-        process_candle(candle1, state, AnchorState(), AnchorState(), cfg)
+        process_candle(candle1, state, AnchorState(), cfg)
 
     # Candle 2: no bar — carry-forward should use position=-1.0
     candle2 = _candle(open=93200.0)
     with patch(f"{_MOD}.fetch_strategies_for_candle", return_value=[]):
-        rows, _, _, _ = process_candle(candle2, state, AnchorState(), AnchorState(),
-                              cfg)
+        rows, _, _, _ = process_candle(candle2, state, AnchorState(), cfg)
 
     pnl_rows = [r for r in rows if r["_sink"] == "pnl_prod"]
     assert len(pnl_rows) == 1

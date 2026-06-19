@@ -10,6 +10,9 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from libs.clickhouse_client import query_dicts
+from libs.computation.pnl_formula import parse_strategy_table_name
+
+_BT_STREAM_LOOKBACK = "3 DAY"
 
 # 2-day lookback: a 1d bar stays the active bar up to ~2 days after its ts
 # (execution_ts ≈ next midnight, held until the following day's bar). A 1-day
@@ -88,23 +91,6 @@ def _parse_strategy_bar(row: dict) -> StrategyBar:
     )
 
 
-def _parse_strategy_bar_scalar(row: dict) -> StrategyBar:
-    return StrategyBar(
-        strategy_table_name=row["strategy_table_name"],
-        strategy_instance_id=row["strategy_instance_id"],
-        strategy_id=row["strategy_id"],
-        strategy_name=row["strategy_name"],
-        underlying=row["underlying"],
-        config_timeframe=row["config_timeframe"],
-        weighting=row["weighting"],
-        position=float(row.get("position") or 0.0),
-        final_signal=float(row.get("final_signal") or 0.0),
-        benchmark=float(row.get("benchmark") or 0.0),
-        bar_ts=row["latest_ts"],
-        cumulative_pnl=float(row.get("cumulative_pnl") or 0.0),
-    )
-
-
 def _parse_revision(row: dict) -> StrategyRevision:
     rj = json.loads(row["row_json"])
     return StrategyRevision(
@@ -171,48 +157,102 @@ GROUP BY
     return [_parse_strategy_bar(r) for r in query_dicts(sql)]
 
 
-def fetch_bt_strategies_for_candle(
+@dataclass
+class BtLiveAnchor:
+    """Resolved BT anchor for one strategy at a live candle (stateless compute)."""
+
+    strategy_table_name: str
+    strategy_instance_id: str
+    strategy_id: int
+    strategy_name: str
+    underlying: str
+    config_timeframe: str
+    weighting: float
+    cum_pnl_first: float
+    pos_first: float
+    anchor_ts: str
+    anchor_price: float
+    benchmark: float
+
+
+def fetch_bt_anchors_for_candle(
     instrument: str,
     candle_ts: datetime,
-) -> list[StrategyBar]:
-    """Return active bt bar per strategy_instance_id for instrument at candle_ts.
+) -> list[BtLiveAnchor]:
+    """Latest cum-table anchor per strategy with ts <= candle_ts, fully resolved.
 
-    Same two-step latest-bar / first-revision logic as fetch_strategies_for_candle
-    (see that docstring for why the two steps must stay separate), but queries
-    _bt_v2 and extracts only the needed scalar fields from row_json instead of
-    buffering the full JSON blob, reducing ClickHouse memory usage.
+    Resolves anchor_price from futures_price_1min at anchor_ts and benchmark from
+    strategy_output_history_bt_v2 at anchor_ts. Stateless: the consumer computes
+    cpnl = compute_bt_live_cpnl(cum_pnl_first, pos_first, candle.open, anchor_price).
     """
     underlying = instrument.removesuffix("USDT")
     ts_str = candle_ts.strftime("%Y-%m-%d %H:%M:%S")
-    sql = f"""\
+    like = f"%|u={underlying}|%"
+    anchor_sql = f"""\
 SELECT
     strategy_table_name,
-    strategy_instance_id,
-    strategy_id,
-    strategy_name,
-    underlying,
     config_timeframe,
-    weighting,
-    ts AS latest_ts,
-    argMin(JSONExtractFloat(row_json, 'position'),       revision_ts) AS position,
-    argMin(JSONExtractFloat(row_json, 'final_signal'),   revision_ts) AS final_signal,
-    argMin(JSONExtractFloat(row_json, 'benchmark'),      revision_ts) AS benchmark,
-    argMin(JSONExtractFloat(row_json, 'cumulative_pnl'), revision_ts) AS cumulative_pnl
+    toString(ts)  AS anchor_ts,
+    cum_pnl_first,
+    pos_first,
+    weighting
+FROM analytics.strategy_cum_pnl_bt_v2
+WHERE strategy_table_name LIKE '{like}'
+  AND ts <= '{ts_str}'
+  AND ts >  '{ts_str}'::DateTime - INTERVAL {_BT_STREAM_LOOKBACK}
+ORDER BY strategy_table_name, ts DESC, computed_at DESC
+LIMIT 1 BY strategy_table_name
+"""
+    anchor_rows = query_dicts(anchor_sql)
+    if not anchor_rows:
+        return []
+
+    anchor_ts_set = {str(r["anchor_ts"]) for r in anchor_rows}
+    ts_in = ", ".join(f"'{t}'" for t in sorted(anchor_ts_set))
+
+    price_sql = f"""\
+SELECT toString(ts) AS ts, open
+FROM analytics.futures_price_1min
+WHERE exchange = 'binance' AND instrument = '{instrument}'
+  AND ts IN ({ts_in})
+"""
+    price_map = {r["ts"]: float(r["open"]) for r in query_dicts(price_sql)}
+
+    bench_sql = f"""\
+SELECT strategy_table_name, toString(ts) AS ts,
+       argMin(JSONExtractFloat(row_json, 'benchmark'), revision_ts) AS benchmark
 FROM analytics.strategy_output_history_bt_v2
 WHERE underlying = '{underlying}'
-  AND (strategy_instance_id, ts) IN (
-      SELECT strategy_instance_id, max(ts)
-      FROM analytics.strategy_output_history_bt_v2
-      WHERE underlying = '{underlying}'
-        AND ts + toIntervalMinute({_TF_MINUTES_EXPR_NO_ALIAS}) <= '{ts_str}'
-        AND ts >= '{ts_str}'::DateTime - INTERVAL {_LOOKBACK}
-      GROUP BY strategy_instance_id
-  )
-GROUP BY
-    strategy_table_name, strategy_instance_id, strategy_id, strategy_name,
-    underlying, config_timeframe, weighting, ts
+  AND ts IN ({ts_in})
+GROUP BY strategy_table_name, ts
 """
-    return [_parse_strategy_bar_scalar(r) for r in query_dicts(sql)]
+    bench_map = {
+        (r["strategy_table_name"], str(r["ts"])): float(r["benchmark"])
+        for r in query_dicts(bench_sql)
+    }
+
+    out: list[BtLiveAnchor] = []
+    for r in anchor_rows:
+        stn = r["strategy_table_name"]
+        anchor_ts = str(r["anchor_ts"])
+        sid, name, u, siid = parse_strategy_table_name(stn)
+        out.append(
+            BtLiveAnchor(
+                strategy_table_name=stn,
+                strategy_instance_id=siid,
+                strategy_id=sid,
+                strategy_name=name,
+                underlying=u,
+                config_timeframe=str(r["config_timeframe"]),
+                weighting=float(r["weighting"]),
+                cum_pnl_first=float(r["cum_pnl_first"]),
+                pos_first=float(r["pos_first"]),
+                anchor_ts=anchor_ts,
+                anchor_price=price_map.get(anchor_ts, 0.0),
+                benchmark=bench_map.get((stn, anchor_ts), 0.0),
+            )
+        )
+    return out
 
 
 def fetch_real_trade_for_candle(

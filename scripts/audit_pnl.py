@@ -47,7 +47,8 @@ from libs.computation import (  # noqa: E402
     build_prod_lookup,
     build_rt_lookup,
     compute_bt_pnl,
-    fetch_new_bars_bt,
+    fetch_bt_anchors,
+    fetch_bt_benchmarks,
     fetch_new_bars_prod,
     fetch_new_bars_real_trade,
     fetch_prices_multi,
@@ -869,8 +870,6 @@ def fix_bt_strategies(
     cumulative_pnl from row_json). No consumer pause (no streaming consumer)."""
     if not fixes:
         return
-    src = SOURCE_TABLE["bt"]
-    tgt = TARGET_TABLE["bt"]
 
     by_underlying: dict[str, list[StrategyFix]] = {}
     for f in fixes:
@@ -915,7 +914,6 @@ def _fix_bt_underlying(
     window, per-strategy DELETE + compute_bt_pnl, a single batch INSERT, then
     a scoped hour-table refresh for THIS underlying as a checkpoint.
     """
-    src = SOURCE_TABLE["bt"]
     tgt = TARGET_TABLE["bt"]
     client = get_client()
 
@@ -960,15 +958,18 @@ def _fix_bt_underlying(
         len(fixes),
     )
 
-    all_bars = fetch_new_bars_bt(src, underlying, bar_fetch_start, ts_end, client)
-    bars_by_stn: dict[str, list[dict]] = {}
-    for b in all_bars:
-        bars_by_stn.setdefault(b["strategy_table_name"], []).append(b)
+    anchors_by_stn = fetch_bt_anchors(underlying, ts_start, ts_end, client)
+    benchmarks = fetch_bt_benchmarks(underlying, ts_start, ts_end, client)
 
+    # Extend price lower bound back 1 day to cover the straddling anchor's ts.
+    price_lo = (
+        datetime.strptime(ts_start[:19], "%Y-%m-%d %H:%M:%S") - timedelta(days=1)
+    ).strftime("%Y-%m-%d %H:%M:%S")
     prices_map = fetch_prices_multi(
-        [underlying], ts_start, ts_end, client, extend_minutes=1440
+        [underlying], price_lo, ts_end, client, extend_minutes=0
     )
     prices = prices_map.pop(underlying, {})
+    price_keys = sorted(prices)
 
     all_rows: list[list] = []
     for f in fixes:
@@ -976,10 +977,10 @@ def _fix_bt_underlying(
         window_end = f.window_end if f.window_end is not None else now_ts
         ws_str = window_start.strftime("%Y-%m-%d %H:%M:%S")
         we_str = (window_end + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
-        strat_bars = bars_by_stn.get(f.strategy_table_name, [])
-        if not strat_bars:
+        anchors = anchors_by_stn.get(f.strategy_table_name, [])
+        if not anchors:
             log.warning(
-                "[bt/%s] %s: no source bars in window — skipping",
+                "[bt/%s] %s: no cum-pnl anchors in window — skipping",
                 underlying,
                 f.strategy_table_name,
             )
@@ -993,13 +994,9 @@ def _fix_bt_underlying(
                 f"  AND ts <  toDateTime('{we_str}')"
             )
 
-        rows = compute_bt_pnl(strat_bars, prices)
-        # The lookback fetched bars before window_start so compute_bt_pnl could
-        # produce the boundary minutes. But the DELETE only cleared
-        # ts >= window_start, so pre-window output rows would duplicate
-        # existing rows (eventually deduped by ReplacingMergeTree but wasteful).
-        # Drop them now. ts is at INSERT_COLUMNS index 7.
-        rows = [r for r in rows if _parse_ts(r[7]) >= window_start]
+        rows = compute_bt_pnl(
+            anchors, prices, benchmarks, ws_str, we_str, price_keys=price_keys
+        )
         f.rows_written = len(rows)
         f.fix_applied = not dry_run
         all_rows.extend(rows)

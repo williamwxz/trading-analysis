@@ -12,8 +12,6 @@ from datetime import datetime, timedelta
 
 from libs.computation.pnl_formula import (
     INSERT_COLUMNS,
-    TIMEFRAME_MAP,
-    compute_bt_pnl,
     compute_prod_pnl,
     compute_real_trade_pnl,
     extract_row_anchor,
@@ -695,110 +693,6 @@ class TestRealTradePnlFormula:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# compute_bt_pnl
-# ═════════════════════════════════════════════════════════════════════════════
-
-@pytest.mark.unit
-class TestBtPnlFormula:
-
-    def test_single_bar_expands_to_tf_rows(self):
-        """5m bar → 5 rows starting at execution_ts."""
-        bar = _bt_bar(ts="2024-01-01 00:00:00", execution_ts="2024-01-01 00:05:00", position=1.0)
-        prices = _prices("2024-01-01 00:05:00", 5, base=100.0)
-        rows = compute_bt_pnl([bar], prices)
-        assert len(rows) == 5
-        assert rows[0][_TS] == "2024-01-01 00:05:00"
-
-    def test_bt_source_label(self):
-        """source column must be 'backtest'."""
-        bar = _bt_bar()
-        prices = _prices("2024-01-01 00:05:00", 1, base=100.0)
-        rows = compute_bt_pnl([bar], prices)
-        assert rows[0][_SRC] == "backtest"
-
-    def test_cold_start_uses_bar_cumulative_pnl(self):
-        """No prior anchor — first bar seeds from its own cumulative_pnl."""
-        bar = _bt_bar(cumulative_pnl=0.05, position=0.0, execution_ts="2024-01-01 00:05:00")
-        prices = _prices("2024-01-01 00:05:00", 5, base=100.0)  # flat, position=0
-        rows = compute_bt_pnl([bar], prices)
-        for row in rows:
-            assert row[_CPNL] == pytest.approx(0.05)
-
-    def test_anchor_ignored_bar_cumulative_pnl_always_wins(self):
-        """anchors parameter is accepted but ignored — bar's cumulative_pnl is always authoritative."""
-        bar = _bt_bar(cumulative_pnl=0.05, position=0.0)
-        prices = _prices("2024-01-01 00:05:00", 5, base=100.0)
-        anchors = {"S1": (0.10, 100.0, 0.0)}
-        rows = compute_bt_pnl([bar], prices, anchors=anchors)
-        for row in rows:
-            assert row[_CPNL] == pytest.approx(0.05)
-
-    def test_two_bars_each_reset_to_own_cumulative_pnl(self):
-        """Each bar resets running_pnl to its own cumulative_pnl — no cross-bar chaining."""
-        bars = [
-            _bt_bar(ts="2024-01-01 00:00:00", execution_ts="2024-01-01 00:05:00",
-                    position=1.0, cumulative_pnl=0.0),
-            _bt_bar(ts="2024-01-01 00:05:00", execution_ts="2024-01-01 00:10:00",
-                    position=1.0, cumulative_pnl=0.05),
-        ]
-        prices = _prices("2024-01-01 00:05:00", 10, base=100.0)  # flat prices
-        rows = compute_bt_pnl(bars, prices)
-        assert len(rows) == 10
-        # First 5 rows: base from bar1's cumulative_pnl=0.0, flat prices → pnl stays 0.0
-        for row in rows[:5]:
-            assert row[_CPNL] == pytest.approx(0.0, abs=1e-10)
-        # Second 5 rows: base resets to bar2's cumulative_pnl=0.05, flat prices → pnl stays 0.05
-        for row in rows[5:]:
-            assert row[_CPNL] == pytest.approx(0.05, abs=1e-10)
-
-    def test_bt_pnl_arithmetic_minute_by_minute(self):
-        """Verify exact pnl values for 3 rising price minutes."""
-        bar = _bt_bar(position=1.0, cumulative_pnl=0.0)
-        prices = {
-            "2024-01-01 00:05:00": 100.0,
-            "2024-01-01 00:06:00": 110.0,
-            "2024-01-01 00:07:00": 121.0,
-        }
-        rows = compute_bt_pnl([bar], prices)
-        # min0 (00:05): anchor=0 seed, anchor_price=100, live=100 → pnl = 0 + 1*(100-100)/100 = 0
-        assert rows[0][_CPNL] == pytest.approx(0.0)
-        # min1 (00:06): prev_price=100, live=110 → delta = 1*(110-100)/100 = 0.10
-        assert rows[1][_CPNL] == pytest.approx(0.10)
-        # min2 (00:07): prev_price=110, live=121 → delta = 1*(121-110)/110 ≈ 0.10
-        # total = 0.10 + 0.10 = 0.20
-        assert rows[2][_CPNL] == pytest.approx(0.10 + 1.0 * (121.0 - 110.0) / 110.0)
-
-    def test_bt_output_row_column_count(self):
-        bar = _bt_bar()
-        prices = _prices("2024-01-01 00:05:00", 1, base=100.0)
-        rows = compute_bt_pnl([bar], prices)
-        assert len(rows[0]) == 16
-
-    def test_bt_single_bar_expands_one_tf(self):
-        """Single bt bar expands for tf_minutes rows starting at execution_ts."""
-        bar = _bt_bar(tf="5m")
-        prices = _prices("2024-01-01 00:05:00", 5, base=100.0)
-        rows = compute_bt_pnl([bar], prices)
-        assert len(rows) == 5
-        assert rows[0][_TS] == "2024-01-01 00:05:00"
-        assert rows[-1][_TS] == "2024-01-01 00:09:00"
-
-    def test_bt_missing_price_uses_carry_forward(self):
-        """Once anchor price is set, bt missing minute uses carry-forward (emitted)."""
-        bar = _bt_bar()
-        prices = {
-            "2024-01-01 00:05:00": 100.0,
-            # 00:06 missing — carry-forward from anchor_price=100
-            "2024-01-01 00:07:00": 102.0,
-        }
-        rows = compute_bt_pnl([bar], prices)
-        ts_values = [r[_TS] for r in rows]
-        assert "2024-01-01 00:06:00" in ts_values
-        row_06 = next(r for r in rows if r[_TS] == "2024-01-01 00:06:00")
-        assert row_06[_PRC] == pytest.approx(100.0)
-
-
-# ═════════════════════════════════════════════════════════════════════════════
 # Additional missing-price, stale-revision, and BT≡prod tests
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -877,25 +771,6 @@ class TestMissingPriceCases:
             row = next(r for r in rows if r[_TS] == t)
             assert row[_PRC] == pytest.approx(100.0)
             assert row[_CPNL] == pytest.approx(0.0)
-
-    def test_bt_no_anchor_no_price_row_skipped(self):
-        """BT: no price at all, no anchor → no rows emitted."""
-        bar = _bt_bar(cumulative_pnl=0.05)
-        rows = compute_bt_pnl([bar], {})
-        assert rows == []
-
-    def test_bt_multiple_consecutive_missing_prices_carry_forward(self):
-        """BT: consecutive gap minutes carry-forward once anchor price is set."""
-        bar = _bt_bar()
-        prices = {
-            "2024-01-01 00:05:00": 100.0,
-            # 00:06, 00:07 missing
-            "2024-01-01 00:08:00": 100.0,
-        }
-        rows = compute_bt_pnl([bar], prices)
-        ts_values = [r[_TS] for r in rows]
-        assert "2024-01-01 00:06:00" in ts_values
-        assert "2024-01-01 00:07:00" in ts_values
 
 
 @pytest.mark.unit
@@ -1007,62 +882,6 @@ class TestRealTradeStaleRevision:
         assert by_ts["2024-01-01 01:00:00"][_POS] == pytest.approx(1.0)
         assert by_ts["2024-01-01 01:29:00"][_POS] == pytest.approx(1.0)
         assert by_ts["2024-01-01 01:30:00"][_POS] == pytest.approx(-1.0)
-
-
-@pytest.mark.unit
-class TestBtRawJsonPnlSeeding:
-    """BT always seeds from bar's raw_json cumulative_pnl — no cross-bar anchor chaining."""
-
-    def test_bt_uses_raw_json_pnl_as_base_flat_prices(self):
-        """Flat prices: each bar's pnl stays at its own cumulative_pnl throughout."""
-        bt_bar_obj = _bt_bar(
-            ts="2024-01-01 00:00:00", execution_ts="2024-01-01 00:05:00",
-            position=1.0, cumulative_pnl=0.05,
-        )
-        prices = _prices("2024-01-01 00:05:00", 5, base=100.0)
-        rows = compute_bt_pnl([bt_bar_obj], prices)
-        assert len(rows) == 5
-        for row in rows:
-            assert row[_CPNL] == pytest.approx(0.05)
-
-    def test_bt_uses_raw_json_pnl_as_base_rising_prices(self):
-        """Rising prices: pnl rolls from bar's cumulative_pnl, not from any prior anchor."""
-        bt_bar_obj = _bt_bar(
-            ts="2024-01-01 00:00:00", execution_ts="2024-01-01 00:05:00",
-            position=1.0, cumulative_pnl=0.05,
-        )
-        prices = {
-            "2024-01-01 00:05:00": 100.0,
-            "2024-01-01 00:06:00": 102.0,
-            "2024-01-01 00:07:00": 105.0,
-            "2024-01-01 00:08:00": 108.0,
-            "2024-01-01 00:09:00": 110.0,
-        }
-        rows = compute_bt_pnl([bt_bar_obj], prices)
-        assert len(rows) == 5
-        # Minute 0: first price seen — cpnl = 0.05 (bar base), no change
-        assert rows[0][_CPNL] == pytest.approx(0.05)
-        # Minute 1: 0.05 + 1*(102-100)/100 = 0.07
-        assert rows[1][_CPNL] == pytest.approx(0.05 + 1.0 * (102.0 - 100.0) / 100.0, rel=1e-9)
-        assert rows[1][_PRC] == pytest.approx(102.0)
-
-    def test_bt_missing_price_carry_forward_uses_prev_minute_price(self):
-        """Missing minute emits with previous minute's price as carry-forward."""
-        bt_bar_obj = _bt_bar(
-            ts="2024-01-01 00:00:00", execution_ts="2024-01-01 00:05:00",
-            position=1.0, cumulative_pnl=0.0,
-        )
-        prices = {
-            "2024-01-01 00:05:00": 100.0,
-            # 00:06 missing — carry-forward from 100.0
-            "2024-01-01 00:07:00": 102.0,
-        }
-        rows = compute_bt_pnl([bt_bar_obj], prices)
-        ts_values = [r[_TS] for r in rows]
-        assert "2024-01-01 00:06:00" in ts_values
-        row_06 = next(r for r in rows if r[_TS] == "2024-01-01 00:06:00")
-        assert row_06[_PRC] == pytest.approx(100.0)
-        assert row_06[_CPNL] == pytest.approx(0.0)  # flat carry, pnl unchanged
 
 
 # ═════════════════════════════════════════════════════════════════════════════

@@ -8,15 +8,17 @@ from libs.computation.bootstrap import (
     fetch_walk_rows,
 )
 from libs.computation.candle_lookup import (
+    BtLiveAnchor,
     StrategyBar,
     StrategyRevision,
-    fetch_bt_strategies_for_candle,
+    fetch_bt_anchors_for_candle,
     fetch_real_trade_for_candle,
     fetch_strategies_for_candle,
 )
 from libs.computation.fetch_bars import (
     fetch_anchors,
-    fetch_new_bars_bt,
+    fetch_bt_anchors,
+    fetch_bt_benchmarks,
     fetch_new_bars_prod,
     fetch_new_bars_real_trade,
 )
@@ -39,13 +41,16 @@ from libs.computation.pnl_formula import (
     PROD_INSERT_COLUMNS,
     REAL_TRADE_INSERT_COLUMNS,
     TIMEFRAME_MAP,
+    BtAnchor,
     build_carry_forward_row,
     build_pnl_row,
+    compute_bt_live_cpnl,
     compute_bt_pnl,
     compute_prod_pnl,
     compute_real_trade_pnl,
     extract_row_anchor,
     iter_compute_prod_pnl,
+    parse_strategy_table_name,
 )
 
 __all__ = [
@@ -60,14 +65,16 @@ __all__ = [
     "fetch_last_pnl_anchors",
     "fetch_walk_rows",
     # candle_lookup (pnl_consumer live loop)
+    "BtLiveAnchor",
     "StrategyBar",
     "StrategyRevision",
-    "fetch_bt_strategies_for_candle",
+    "fetch_bt_anchors_for_candle",
     "fetch_real_trade_for_candle",
     "fetch_strategies_for_candle",
     # fetch_bars (Dagster batch)
     "fetch_anchors",
-    "fetch_new_bars_bt",
+    "fetch_bt_anchors",
+    "fetch_bt_benchmarks",
     "fetch_new_bars_prod",
     "fetch_new_bars_real_trade",
     # fetch_prices (Dagster batch)
@@ -89,11 +96,14 @@ __all__ = [
     "PROD_INSERT_COLUMNS",
     "REAL_TRADE_INSERT_COLUMNS",
     "TIMEFRAME_MAP",
+    "BtAnchor",
     "build_carry_forward_row",
     "build_pnl_row",
+    "compute_bt_live_cpnl",
     "compute_bt_pnl",
     "compute_prod_pnl",
     "compute_real_trade_pnl",
     "extract_row_anchor",
     "iter_compute_prod_pnl",
+    "parse_strategy_table_name",
 ]

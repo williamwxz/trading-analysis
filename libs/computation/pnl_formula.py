@@ -11,7 +11,9 @@ Formula:
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Dict, Generator, List, Optional, Tuple, Union
 
@@ -58,6 +60,42 @@ REAL_TRADE_INSERT_COLUMNS = INSERT_COLUMNS
 
 def _parse_ts(s: str) -> datetime:
     return datetime.strptime(str(s)[:19], "%Y-%m-%d %H:%M:%S")
+
+
+@dataclass
+class BtAnchor:
+    """One cum-table anchor: per (strategy, native-timeframe bar) cumulative PnL."""
+    strategy_table_name: str
+    config_timeframe: str
+    ts: str            # bar open time, "YYYY-MM-DD HH:MM:SS"
+    cum_pnl_first: float
+    pos_first: float
+    weighting: float
+
+
+def parse_strategy_table_name(stn: str) -> Tuple[int, str, str, str]:
+    """Parse 'sid=N|sno=N|u=X|name=Y|inst=Z' into
+    (strategy_id, strategy_name, underlying, strategy_instance_id).
+
+    Pipe-delimited key=value tokens. 'name' values never contain a pipe
+    (verified against live data), so a plain split is safe. Missing keys
+    default to (0, '', '', '').
+    """
+    parts: Dict[str, str] = {}
+    for tok in stn.split("|"):
+        key, sep, val = tok.partition("=")
+        if sep:
+            parts[key] = val
+    try:
+        strategy_id = int(parts.get("sid", ""))
+    except ValueError:
+        strategy_id = 0
+    return (
+        strategy_id,
+        parts.get("name", ""),
+        parts.get("u", ""),
+        parts.get("inst", ""),
+    )
 
 
 def build_pnl_row(
@@ -224,82 +262,108 @@ def compute_prod_pnl(
     return result
 
 
-def compute_bt_pnl(
-    bars: List[dict],
-    prices: Dict[str, float],
-    anchors: Optional[Dict[str, Tuple[float, float, float]]] = None,
-) -> List[list]:
-    """Expand bt bars to 1-min rows starting from execution_ts (= ts + tf_minutes).
+def compute_bt_live_cpnl(
+    cum_pnl_first: float,
+    pos_first: float,
+    current_price: float,
+    anchor_price: float,
+) -> float:
+    """Anchor-reset cumulative PnL for one minute.
 
-    At the start of each bar, cumulative_pnl resets to bar["cumulative_pnl"] from
-    raw_json and prev_price resets to the price at execution_ts. Each minute then rolls:
-        cpnl = prev_cpnl + position * (current_price - prev_price) / prev_price
-    No cross-bar anchor chaining — the raw_json cumulative_pnl is always authoritative.
+    cpnl = cum_pnl_first + pos_first * (current_price - anchor_price) / anchor_price
+    Holds cum_pnl_first when anchor_price is 0 (no reference price available).
     """
-    by_strategy: Dict[str, List[dict]] = defaultdict(list)
-    for bar in bars:
-        by_strategy[bar["strategy_table_name"]].append(bar)
+    if anchor_price == 0.0:
+        return cum_pnl_first
+    return cum_pnl_first + pos_first * (current_price - anchor_price) / anchor_price
+
+
+def _resolve_anchor_price(
+    prices: Dict[str, float],
+    price_keys_sorted: List[str],
+    ts_str: str,
+) -> Optional[float]:
+    """Price at ts_str, else the most-recent price at-or-before ts_str, else None."""
+    exact = prices.get(ts_str)
+    if exact is not None:
+        return exact
+    i = bisect_right(price_keys_sorted, ts_str)
+    if i == 0:
+        return None
+    return prices[price_keys_sorted[i - 1]]
+
+
+def compute_bt_pnl(
+    anchors: List[BtAnchor],
+    prices: Dict[str, float],
+    benchmarks: Dict[Tuple[str, str], float],
+    window_start: str,
+    window_end: str,
+    price_keys: Optional[List[str]] = None,
+) -> List[list]:
+    """Expand cum-table anchors to 1-min rows over [window_start, window_end).
+
+    For each strategy the active anchor at minute m is the most-recent anchor with
+    ts <= m. Each minute is reset from that anchor (no minute-to-minute chaining):
+        cpnl(m) = anchor.cum_pnl_first
+                + anchor.pos_first * (price(m) - price(anchor.ts)) / price(anchor.ts)
+    position, weighting, and benchmark are constant across the bar window.
+    benchmarks maps (strategy_table_name, anchor.ts) -> benchmark (default 0.0).
+    price_keys: pre-sorted prices.keys() — pass to avoid re-sorting per call.
+    """
+    by_strategy: Dict[str, List[BtAnchor]] = defaultdict(list)
+    for a in anchors:
+        by_strategy[a.strategy_table_name].append(a)
 
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    end_dt = _parse_ts(window_end)
+    start_dt = _parse_ts(window_start)
+    keys = price_keys if price_keys is not None else sorted(prices.keys())
     output: List[list] = []
 
-    for stn, strategy_bars in by_strategy.items():
-        strategy_bars.sort(key=lambda b: b["execution_ts"])
+    for stn, strat_anchors in by_strategy.items():
+        strat_anchors.sort(key=lambda a: a.ts)
+        ts_list = [a.ts for a in strat_anchors]
+        strategy_id, strategy_name, underlying, siid = parse_strategy_table_name(stn)
 
-        for i, bar in enumerate(strategy_bars):
-            exec_ts = _parse_ts(bar["execution_ts"])
-            if i + 1 < len(strategy_bars):
-                next_exec_ts = _parse_ts(strategy_bars[i + 1]["execution_ts"])
-            else:
-                tf_minutes = TIMEFRAME_MAP.get(bar["config_timeframe"], 5)
-                next_exec_ts = exec_ts + timedelta(minutes=tf_minutes)
-
-            # Reset to this bar's raw_json cumulative_pnl; price anchors at execution_ts.
-            running_pnl: float = bar["cumulative_pnl"]
-            running_price: Optional[float] = prices.get(bar["execution_ts"])
-
-            ts_cur = exec_ts
-            while ts_cur < next_exec_ts:
-                ts_str = ts_cur.strftime("%Y-%m-%d %H:%M:%S")
-                live_price = (
-                    prices.get(ts_str, running_price)
-                    if running_price is not None
-                    else prices.get(ts_str)
-                )
-                if live_price is None:
-                    ts_cur += timedelta(minutes=1)
-                    continue
-                if running_price is None:
-                    # First price seen — anchor here, emit with no pnl change.
-                    running_price = live_price
-                    cpnl = running_pnl
-                else:
-                    cpnl = (
-                        running_pnl + bar["position"] * (live_price - running_price) / running_price
-                        if running_price != 0.0
-                        else running_pnl
-                    )
-                output.append([
-                    stn,
-                    bar["strategy_id"],
-                    bar["strategy_name"],
-                    bar["underlying"],
-                    bar["config_timeframe"],
-                    "backtest",
-                    "v2",
-                    ts_str,
-                    cpnl,
-                    bar["bar_benchmark"],
-                    bar["position"],
-                    live_price,
-                    bar["final_signal"],
-                    bar["weighting"],
-                    now_str,
-                    bar.get("strategy_instance_id", ""),
-                ])
-                running_pnl = cpnl
-                running_price = live_price
-                ts_cur += timedelta(minutes=1)
+        first_anchor_dt = _parse_ts(strat_anchors[0].ts)
+        m = max(start_dt, first_anchor_dt).replace(second=0, microsecond=0)
+        idx = 0
+        while m < end_dt:
+            m_str = m.strftime("%Y-%m-%d %H:%M:%S")
+            while idx + 1 < len(ts_list) and ts_list[idx + 1] <= m_str:
+                idx += 1
+            price_m = prices.get(m_str)
+            if price_m is None:
+                m += timedelta(minutes=1)
+                continue
+            anchor = strat_anchors[idx]
+            ref_price = _resolve_anchor_price(prices, keys, anchor.ts)
+            cpnl = compute_bt_live_cpnl(
+                anchor.cum_pnl_first,
+                anchor.pos_first,
+                price_m,
+                ref_price if ref_price is not None else 0.0,
+            )
+            output.append([
+                stn,
+                strategy_id,
+                strategy_name,
+                underlying,
+                anchor.config_timeframe,
+                "backtest",
+                "v2",
+                m_str,
+                cpnl,
+                benchmarks.get((stn, anchor.ts), 0.0),
+                anchor.pos_first,
+                price_m,
+                0.0,
+                anchor.weighting,
+                now_str,
+                siid,
+            ])
+            m += timedelta(minutes=1)
 
     return output
 

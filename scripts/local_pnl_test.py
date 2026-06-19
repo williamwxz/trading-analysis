@@ -17,7 +17,13 @@ from datetime import UTC, datetime, timedelta
 
 sys.path.insert(0, ".")
 
-from trading_dagster.utils.clickhouse_client import execute, get_client, insert_rows, query_dicts, query_rows
+from trading_dagster.utils.clickhouse_client import (
+    execute,
+    get_client,
+    insert_rows,
+    query_dicts,
+    query_rows,
+)
 from trading_dagster.utils.pnl_compute import (
     PROD_INSERT_COLUMNS,
     REAL_TRADE_INSERT_COLUMNS,
@@ -25,13 +31,15 @@ from trading_dagster.utils.pnl_compute import (
     compute_bt_pnl,
     compute_real_trade_pnl,
     fetch_anchors,
-    fetch_new_bars_bt,
+    fetch_bt_anchors,
+    fetch_bt_benchmarks,
     fetch_new_bars_real_trade,
     fetch_prices_multi,
     iter_compute_prod_pnl,
 )
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+
 
 def _parse_ts(s: str) -> datetime:
     return datetime.strptime(str(s)[:19], "%Y-%m-%d %H:%M:%S")
@@ -58,6 +66,7 @@ def _section(title):
 
 # ── verification queries ──────────────────────────────────────────────────────
 
+
 def verify_prod(client, date_str: str, underlying: str):
     _section(f"VERIFY PROD — {date_str} / {underlying}")
 
@@ -65,7 +74,7 @@ def verify_prod(client, date_str: str, underlying: str):
     rows = query_rows(
         f"SELECT count() FROM analytics.strategy_pnl_1min_prod_v2 "
         f"WHERE toDate(ts) = '{date_str}' AND underlying = '{underlying}' AND source='production'",
-        client
+        client,
     )
     print(f"  Rows inserted:  {rows[0][0]}")
 
@@ -75,7 +84,7 @@ def verify_prod(client, date_str: str, underlying: str):
         f"SELECT toString(min(ts)), toString(max(ts)) "
         f"FROM analytics.strategy_pnl_1min_prod_v2 "
         f"WHERE toDate(ts) = '{date_str}' AND underlying = '{underlying}' AND source='production'",
-        client
+        client,
     )
     print(f"  ts range:       {rows[0][0]}  →  {rows[0][1]}")
 
@@ -83,7 +92,7 @@ def verify_prod(client, date_str: str, underlying: str):
     strats = query_rows(
         f"SELECT DISTINCT strategy_table_name FROM analytics.strategy_pnl_1min_prod_v2 "
         f"WHERE toDate(ts) = '{date_str}' AND underlying = '{underlying}' AND source='production' LIMIT 1",
-        client
+        client,
     )
     if not strats:
         print("  No strategies found!")
@@ -94,12 +103,14 @@ def verify_prod(client, date_str: str, underlying: str):
         f"FROM analytics.strategy_pnl_1min_prod_v2 "
         f"WHERE strategy_table_name = '{stn}' AND toDate(ts) = '{date_str}' AND source='production' "
         f"ORDER BY ts LIMIT 3",
-        client
+        client,
     )
     print(f"  Strategy:       {stn}")
-    print(f"  First 3 rows:")
+    print("  First 3 rows:")
     for r in sample:
-        print(f"    ts={r['ts_str']}  cpnl={r['cumulative_pnl']:.6f}  price={r['price']:.2f}  pos={r['position']}")
+        print(
+            f"    ts={r['ts_str']}  cpnl={r['cumulative_pnl']:.6f}  price={r['price']:.2f}  pos={r['position']}"
+        )
 
     # 4. Check for large jumps (> 5% in a single minute) — sign of anchor corruption
     jump_rows = query_rows(
@@ -111,10 +122,13 @@ def verify_prod(client, date_str: str, underlying: str):
             WHERE toDate(ts) = '{date_str}' AND underlying = '{underlying}' AND source='production'
         ) WHERE abs(cumulative_pnl - prev_cpnl) > 0.05
         """,
-        client
+        client,
     )
     jumps = jump_rows[0][0]
-    print(f"  Large jumps (>5% single-min): {jumps}" + ("  ✓" if jumps == 0 else "  ✗ CHECK THIS"))
+    print(
+        f"  Large jumps (>5% single-min): {jumps}"
+        + ("  ✓" if jumps == 0 else "  ✗ CHECK THIS")
+    )
 
 
 def verify_real_trade(client, date_str: str, underlying: str):
@@ -123,7 +137,7 @@ def verify_real_trade(client, date_str: str, underlying: str):
     rows = query_rows(
         f"SELECT count() FROM analytics.strategy_pnl_1min_real_trade_v2 "
         f"WHERE toDate(ts) = '{date_str}' AND underlying = '{underlying}' AND source='real_trade'",
-        client
+        client,
     )
     print(f"  Rows inserted:  {rows[0][0]}")
 
@@ -131,14 +145,14 @@ def verify_real_trade(client, date_str: str, underlying: str):
         f"SELECT toString(min(ts)), toString(max(ts)) "
         f"FROM analytics.strategy_pnl_1min_real_trade_v2 "
         f"WHERE toDate(ts) = '{date_str}' AND underlying = '{underlying}' AND source='real_trade'",
-        client
+        client,
     )
     print(f"  ts range:       {rows[0][0]}  →  {rows[0][1]}")
 
     strats = query_rows(
         f"SELECT DISTINCT strategy_table_name FROM analytics.strategy_pnl_1min_real_trade_v2 "
         f"WHERE toDate(ts) = '{date_str}' AND underlying = '{underlying}' AND source='real_trade' LIMIT 1",
-        client
+        client,
     )
     if not strats:
         print("  No strategies found (real_trade may have no data for this date)")
@@ -149,12 +163,14 @@ def verify_real_trade(client, date_str: str, underlying: str):
         f"FROM analytics.strategy_pnl_1min_real_trade_v2 "
         f"WHERE strategy_table_name = '{stn}' AND toDate(ts) = '{date_str}' AND source='real_trade' "
         f"ORDER BY ts LIMIT 3",
-        client
+        client,
     )
     print(f"  Strategy:       {stn}")
-    print(f"  First 3 rows (ts=expanded minute, execution_ts=trade time):")
+    print("  First 3 rows (ts=expanded minute, execution_ts=trade time):")
     for r in sample:
-        print(f"    ts={r['ts_str']}  cpnl={r['cumulative_pnl']:.6f}  price={r['price']:.2f}  exec_ts={r['exec_ts_str']}")
+        print(
+            f"    ts={r['ts_str']}  cpnl={r['cumulative_pnl']:.6f}  price={r['price']:.2f}  exec_ts={r['exec_ts_str']}"
+        )
 
 
 def verify_bt(client, date_str: str, underlying: str):
@@ -163,7 +179,7 @@ def verify_bt(client, date_str: str, underlying: str):
     rows = query_rows(
         f"SELECT count() FROM analytics.strategy_pnl_1min_bt_v2 "
         f"WHERE toDate(ts) = '{date_str}' AND underlying = '{underlying}' AND source='backtest'",
-        client
+        client,
     )
     print(f"  Rows inserted:  {rows[0][0]}")
 
@@ -171,14 +187,14 @@ def verify_bt(client, date_str: str, underlying: str):
         f"SELECT toString(min(ts)), toString(max(ts)) "
         f"FROM analytics.strategy_pnl_1min_bt_v2 "
         f"WHERE toDate(ts) = '{date_str}' AND underlying = '{underlying}' AND source='backtest'",
-        client
+        client,
     )
     print(f"  ts range:       {rows[0][0]}  →  {rows[0][1]}")
 
     strats = query_rows(
         f"SELECT DISTINCT strategy_table_name FROM analytics.strategy_pnl_1min_bt_v2 "
         f"WHERE toDate(ts) = '{date_str}' AND underlying = '{underlying}' AND source='backtest' LIMIT 1",
-        client
+        client,
     )
     if not strats:
         print("  No strategies found!")
@@ -189,12 +205,14 @@ def verify_bt(client, date_str: str, underlying: str):
         f"FROM analytics.strategy_pnl_1min_bt_v2 "
         f"WHERE strategy_table_name = '{stn}' AND toDate(ts) = '{date_str}' AND source='backtest' "
         f"ORDER BY ts LIMIT 3",
-        client
+        client,
     )
     print(f"  Strategy:       {stn}")
-    print(f"  First 3 rows:")
+    print("  First 3 rows:")
     for r in sample:
-        print(f"    ts={r['ts_str']}  cpnl={r['cumulative_pnl']:.6f}  price={r['price']:.2f}  pos={r['position']}")
+        print(
+            f"    ts={r['ts_str']}  cpnl={r['cumulative_pnl']:.6f}  price={r['price']:.2f}  pos={r['position']}"
+        )
 
     # BT: check that ts values start at closing_ts (> bar ts)
     # For a 1h bar, ts in target should be >= bar_ts + 60min
@@ -207,18 +225,26 @@ def verify_bt(client, date_str: str, underlying: str):
             WHERE toDate(ts) = '{date_str}' AND underlying = '{underlying}' AND source='backtest'
         ) WHERE abs(cumulative_pnl - prev_cpnl) > 0.05
         """,
-        client
+        client,
     )
     jumps = jump_rows[0][0]
-    print(f"  Large jumps (>5% single-min): {jumps}" + ("  ✓" if jumps == 0 else "  ✗ CHECK THIS"))
+    print(
+        f"  Large jumps (>5% single-min): {jumps}"
+        + ("  ✓" if jumps == 0 else "  ✗ CHECK THIS")
+    )
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--date", default="2026-04-01", help="Partition date YYYY-MM-DD")
-    parser.add_argument("--underlying", default="BTC", help="Underlying (BTC, ETH, etc.)")
+    parser.add_argument(
+        "--date", default="2026-04-01", help="Partition date YYYY-MM-DD"
+    )
+    parser.add_argument(
+        "--underlying", default="BTC", help="Underlying (BTC, ETH, etc.)"
+    )
     args = parser.parse_args()
 
     date_str = args.date
@@ -241,7 +267,7 @@ def main():
         f"DELETE FROM analytics.{target_prod} "
         f"WHERE toDateTime(ts) >= toDateTime('{start_ts}') AND toDateTime(ts) < toDateTime('{end_ts}') "
         f"AND source='production' AND underlying='{underlying}'",
-        client
+        client,
     )
 
     sql_prod = f"""\
@@ -265,15 +291,21 @@ ORDER BY strategy_table_name, ts
     print(f"  Source bars fetched: {len(bars_prod)}")
 
     if bars_prod:
-        all_prices = fetch_prices_multi([underlying], start_ts, end_ts, client, extend_minutes=120)
+        all_prices = fetch_prices_multi(
+            [underlying], start_ts, end_ts, client, extend_minutes=120
+        )
         prices = all_prices.get(underlying, {})
         anchors_prod = fetch_anchors(target_prod, underlying)
         assert_anchors_present(anchors_prod, bars_prod, source_table=source_prod)
 
         total = 0
-        for stn, strategy_rows in iter_compute_prod_pnl(bars_prod, anchors_prod, prices, source_label="production"):
+        for stn, strategy_rows in iter_compute_prod_pnl(
+            bars_prod, anchors_prod, prices, source_label="production"
+        ):
             _prepare_rows(strategy_rows)
-            n = insert_rows(f"analytics.{target_prod}", PROD_INSERT_COLUMNS, strategy_rows, client)
+            n = insert_rows(
+                f"analytics.{target_prod}", PROD_INSERT_COLUMNS, strategy_rows, client
+            )
             total += n
         print(f"  Inserted: {total} rows")
     else:
@@ -289,22 +321,29 @@ ORDER BY strategy_table_name, ts
         f"DELETE FROM analytics.{target_rt} "
         f"WHERE toDateTime(ts) >= toDateTime('{start_ts}') AND toDateTime(ts) < toDateTime('{end_ts}') "
         f"AND source='real_trade' AND underlying='{underlying}'",
-        client
+        client,
     )
 
-    bars_rt = fetch_new_bars_real_trade(source_prod, underlying, start_ts, ts_end=end_ts)
+    bars_rt = fetch_new_bars_real_trade(
+        source_prod, underlying, start_ts, ts_end=end_ts
+    )
     print(f"  Source revisions fetched: {len(bars_rt)}")
 
     if bars_rt:
         ts_min = min(b["ts"] for b in bars_rt)
         ts_max = max(b["ts"] for b in bars_rt)
         from trading_dagster.utils.pnl_compute import fetch_prices
+
         prices_rt = fetch_prices(underlying, ts_min, ts_max, client)
         anchors_rt = fetch_anchors(target_rt, underlying)
-        assert_anchors_present(anchors_rt, bars_rt, source_table=source_prod, bar_ts_key="execution_ts")
+        assert_anchors_present(
+            anchors_rt, bars_rt, source_table=source_prod, bar_ts_key="execution_ts"
+        )
         rows_rt = compute_real_trade_pnl(bars_rt, anchors_rt, prices_rt)
         _prepare_rows(rows_rt)
-        n = insert_rows(f"analytics.{target_rt}", REAL_TRADE_INSERT_COLUMNS, rows_rt, client)
+        n = insert_rows(
+            f"analytics.{target_rt}", REAL_TRADE_INSERT_COLUMNS, rows_rt, client
+        )
         print(f"  Inserted: {n} rows")
     else:
         print("  No revisions for this date/underlying — skipping insert")
@@ -313,30 +352,45 @@ ORDER BY strategy_table_name, ts
 
     # ── BT ────────────────────────────────────────────────────────────────────
     _section(f"RUNNING BT — {date_str} / {underlying}")
-    source_bt = "strategy_output_history_bt_v2"
     target_bt = "strategy_pnl_1min_bt_v2"
 
     execute(
         f"DELETE FROM analytics.{target_bt} "
         f"WHERE toDateTime(ts) >= toDateTime('{start_ts}') AND toDateTime(ts) < toDateTime('{end_ts}') "
         f"AND source='backtest' AND underlying='{underlying}'",
-        client
+        client,
     )
 
-    bars_bt = fetch_new_bars_bt(source_bt, underlying, start_ts, ts_end=end_ts)
-    print(f"  Source bars fetched: {len(bars_bt)}")
+    anchors_bt = fetch_bt_anchors(underlying, start_ts, end_ts, client)
+    print(f"  Strategies with anchors: {len(anchors_bt)}")
 
-    if bars_bt:
-        all_prices_bt = fetch_prices_multi([underlying], start_ts, end_ts, client, extend_minutes=120, price_column="close")
+    if anchors_bt:
+        benchmarks_bt = fetch_bt_benchmarks(underlying, start_ts, end_ts, client)
+        price_lo = (
+            datetime.strptime(start_ts[:19], "%Y-%m-%d %H:%M:%S") - timedelta(days=1)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        all_prices_bt = fetch_prices_multi(
+            [underlying], price_lo, end_ts, client, extend_minutes=0
+        )
         prices_bt = all_prices_bt.get(underlying, {})
-        anchors_bt = fetch_anchors(target_bt, underlying)
-        assert_anchors_present(anchors_bt, bars_bt, source_table=source_bt, bar_ts_key="execution_ts")
-        rows_bt = compute_bt_pnl(bars_bt, prices_bt, anchors=anchors_bt)
+        price_keys_bt = sorted(prices_bt)
+        rows_bt: list[list] = []
+        for stn, anchs in anchors_bt.items():
+            rows_bt.extend(
+                compute_bt_pnl(
+                    anchs,
+                    prices_bt,
+                    benchmarks_bt,
+                    start_ts,
+                    end_ts,
+                    price_keys=price_keys_bt,
+                )
+            )
         _prepare_rows(rows_bt)
         n = insert_rows(f"analytics.{target_bt}", PROD_INSERT_COLUMNS, rows_bt, client)
         print(f"  Inserted: {n} rows")
     else:
-        print("  No bars for this date/underlying — skipping insert")
+        print("  No strategies with anchors for this date/underlying — skipping insert")
 
     verify_bt(client, date_str, underlying)
 

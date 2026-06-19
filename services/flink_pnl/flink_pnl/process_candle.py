@@ -1,8 +1,8 @@
 """Pure per-candle PnL computation for the Flink streaming path.
 
-process_candle() is intentionally free of I/O side effects beyond the three
-fetch_* calls — all state mutation happens on the in-memory StateMap dicts
-passed in by the caller.
+process_candle() is intentionally free of I/O side effects beyond the fetch_*
+calls — all state mutation happens on the in-memory StateMap dicts passed in
+by the caller (prod and real_trade only; BT is now stateless).
 
 Output format: each element is a dict with a ``_sink`` key that routes the
 row to the appropriate ClickHouse table:
@@ -17,21 +17,24 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from streaming.models import CandleEvent
+
+from flink_pnl.sink_config import SinkConfig
+from flink_pnl.state import StateMap
 from libs.computation.anchor_state import AnchorRecord
 from libs.computation.candle_lookup import (
+    BtLiveAnchor,
     StrategyBar,
     StrategyRevision,
-    fetch_bt_strategies_for_candle,
+    fetch_bt_anchors_for_candle,
     fetch_real_trade_for_candle,
     fetch_strategies_for_candle,
 )
 from libs.computation.pnl_formula import (
     build_carry_forward_row,
     build_pnl_row,
+    compute_bt_live_cpnl,
 )
-from flink_pnl.sink_config import SinkConfig
-from flink_pnl.state import StateMap
-from streaming.models import CandleEvent
 
 
 def _bar_to_dict(bar: StrategyBar) -> dict[str, Any]:
@@ -64,6 +67,32 @@ def _revision_to_dict(rev: StrategyRevision) -> dict[str, Any]:
     }
 
 
+def _build_bt_live_row(a: BtLiveAnchor, candle: CandleEvent, now: datetime) -> list:
+    """Stateless BT row from a resolved cum-table anchor (no StateMap)."""
+    cpnl = compute_bt_live_cpnl(
+        a.cum_pnl_first, a.pos_first, candle.open, a.anchor_price
+    )
+    return build_pnl_row(
+        a.strategy_table_name,
+        {
+            "strategy_id": a.strategy_id,
+            "strategy_name": a.strategy_name,
+            "underlying": a.underlying,
+            "config_timeframe": a.config_timeframe,
+            "weighting": a.weighting,
+            "strategy_instance_id": a.strategy_instance_id,
+            "final_signal": 0.0,
+            "bar_benchmark": a.benchmark,
+            "position": a.pos_first,
+        },
+        candle.open,
+        cpnl,
+        "backtest",
+        candle.ts,
+        now,
+    )
+
+
 def _advance_anchor(
     state_map: StateMap,
     underlying: str,
@@ -82,7 +111,9 @@ def _advance_anchor(
     if underlying not in state_map:
         state_map[underlying] = {}
 
-    rec = state_map[underlying].get(stn, AnchorRecord(pnl=0.0, price=candle_open, position=0.0))
+    rec = state_map[underlying].get(
+        stn, AnchorRecord(pnl=0.0, price=candle_open, position=0.0)
+    )
 
     if rec.price == 0.0:
         new_pnl = rec.pnl
@@ -137,7 +168,10 @@ def _process_mode(
 
             # Revision guard: apply only if (bar_ts, revision_ts) > anchor's pair.
             existing_rec = (state_map.get(underlying) or {}).get(stn, AnchorRecord())
-            should_apply = (rev.bar_ts, rev.revision_ts) > (existing_rec.bar_ts, existing_rec.revision_ts)
+            should_apply = (rev.bar_ts, rev.revision_ts) > (
+                existing_rec.bar_ts,
+                existing_rec.revision_ts,
+            )
 
             if should_apply:
                 # Apply the new revision.
@@ -152,9 +186,13 @@ def _process_mode(
                     benchmark=rev.benchmark,
                 )
                 new_pnl, updated_rec = _advance_anchor(
-                    state_map, underlying, stn,
-                    candle.open, rev.position,
-                    rev.bar_ts, rev.revision_ts,
+                    state_map,
+                    underlying,
+                    stn,
+                    candle.open,
+                    rev.position,
+                    rev.bar_ts,
+                    rev.revision_ts,
                     meta,
                 )
                 row = build_pnl_row(
@@ -180,9 +218,13 @@ def _process_mode(
                     benchmark=rec.benchmark,
                 )
                 new_pnl, updated_rec = _advance_anchor(
-                    state_map, underlying, stn,
-                    candle.open, rec.position,
-                    rec.bar_ts, rec.revision_ts,
+                    state_map,
+                    underlying,
+                    stn,
+                    candle.open,
+                    rec.position,
+                    rec.bar_ts,
+                    rec.revision_ts,
                     meta,
                 )
                 row = build_carry_forward_row(
@@ -210,9 +252,13 @@ def _process_mode(
 
             _epoch = _dt.min
             new_pnl, _ = _advance_anchor(
-                state_map, underlying, stn,
-                candle.open, bar.position,
-                _epoch, _epoch,
+                state_map,
+                underlying,
+                stn,
+                candle.open,
+                bar.position,
+                _epoch,
+                _epoch,
                 meta,
             )
             row = build_pnl_row(
@@ -247,9 +293,13 @@ def _process_mode(
             benchmark=rec.benchmark,
         )
         new_pnl, updated_rec = _advance_anchor(
-            state_map, underlying, stn,
-            candle.open, rec.position,
-            rec.bar_ts, rec.revision_ts,
+            state_map,
+            underlying,
+            stn,
+            candle.open,
+            rec.position,
+            rec.bar_ts,
+            rec.revision_ts,
             meta,
         )
         row = build_carry_forward_row(
@@ -269,7 +319,6 @@ def _process_mode(
 def process_candle(
     candle: CandleEvent,
     state_prod: StateMap,
-    state_bt: StateMap,
     state_rt: StateMap,
     cfg: SinkConfig,
 ) -> tuple[list[dict[str, Any]], int, int, int]:
@@ -278,6 +327,9 @@ def process_candle(
     Returns (rows, prod_fetched, bt_fetched, real_trade_fetched) where the
     fetched counts are the number of strategy instances returned by each
     candle lookup query — used by the caller to validate flush completeness.
+
+    BT is stateless: no StateMap is required; anchors are fetched fresh from
+    strategy_cum_pnl_bt_v2 on every candle.
     """
     if not (cfg.prod or cfg.bt or cfg.real_trade):
         return [], 0, 0, 0
@@ -294,38 +346,46 @@ def process_candle(
         bars = fetch_strategies_for_candle(candle.instrument, candle.ts)
         prod_fetched = len(bars)
         bars_by_stn: dict[str, StrategyBar] = {b.strategy_table_name: b for b in bars}
-        output.extend(_process_mode(
-            candle, underlying, state_prod, bars_by_stn,
-            sink_key="pnl_prod",
-            source_label="production",
-            now=now,
-            is_real_trade=False,
-        ))
+        output.extend(
+            _process_mode(
+                candle,
+                underlying,
+                state_prod,
+                bars_by_stn,
+                sink_key="pnl_prod",
+                source_label="production",
+                now=now,
+                is_real_trade=False,
+            )
+        )
 
-    # --- Backtest sink ---
+    # --- Backtest sink (stateless cum-pnl anchors) ---
     if cfg.bt:
-        bt_bars = fetch_bt_strategies_for_candle(candle.instrument, candle.ts)
-        bt_fetched = len(bt_bars)
-        bt_by_stn: dict[str, StrategyBar] = {b.strategy_table_name: b for b in bt_bars}
-        output.extend(_process_mode(
-            candle, underlying, state_bt, bt_by_stn,
-            sink_key="pnl_bt",
-            source_label="backtest",
-            now=now,
-            is_real_trade=False,
-        ))
+        bt_anchors = fetch_bt_anchors_for_candle(candle.instrument, candle.ts)
+        bt_fetched = len(bt_anchors)
+        for a in bt_anchors:
+            output.append(
+                {"_sink": "pnl_bt", "_row": _build_bt_live_row(a, candle, now)}
+            )
 
     # --- Real-trade sink ---
     if cfg.real_trade:
         revisions = fetch_real_trade_for_candle(candle.instrument, candle.ts)
         rt_fetched = len(revisions)
-        revs_by_stn: dict[str, StrategyRevision] = {r.strategy_table_name: r for r in revisions}
-        output.extend(_process_mode(
-            candle, underlying, state_rt, revs_by_stn,
-            sink_key="pnl_real_trade",
-            source_label="real_trade",
-            now=now,
-            is_real_trade=True,
-        ))
+        revs_by_stn: dict[str, StrategyRevision] = {
+            r.strategy_table_name: r for r in revisions
+        }
+        output.extend(
+            _process_mode(
+                candle,
+                underlying,
+                state_rt,
+                revs_by_stn,
+                sink_key="pnl_real_trade",
+                source_label="real_trade",
+                now=now,
+                is_real_trade=True,
+            )
+        )
 
     return output, prod_fetched, bt_fetched, rt_fetched

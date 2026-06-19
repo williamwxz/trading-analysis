@@ -10,11 +10,10 @@ from unittest.mock import patch
 
 from libs.computation import (
     compute_prod_pnl,
-    compute_bt_pnl,
     compute_real_trade_pnl,
     TIMEFRAME_MAP,
 )
-from libs.computation.fetch_bars import fetch_new_bars_bt, fetch_new_bars_real_trade
+from libs.computation.fetch_bars import fetch_new_bars_real_trade
 from libs.computation.fetch_prices import fetch_prices_multi
 
 PROD_REAL_TRADE_START_DATE = "2026-02-27"
@@ -317,33 +316,6 @@ class TestTimeframeMap:
         assert TIMEFRAME_MAP == expected
 
 
-class TestFetchNewBarsBtSQL:
-    """Test that fetch_new_bars_bt generates correct SQL for daily partition path."""
-
-    def _capture_sql(self, monkeypatch, **kwargs) -> str:
-        captured = {}
-
-        def fake_query_dicts(sql, client=None):
-            captured["sql"] = sql
-            return []
-
-        monkeypatch.setattr("libs.computation.fetch_bars.query_dicts", fake_query_dicts)
-        fetch_new_bars_bt(**kwargs)
-        return captured["sql"]
-
-    def test_daily_path_uses_ts_range_filter(self, monkeypatch):
-        """When ts_start and ts_end are provided, SQL must filter on ts range."""
-        sql = self._capture_sql(
-            monkeypatch,
-            source_table="strategy_output_history_bt_v2",
-            underlying="btc",
-            ts_start="2024-01-01 00:00:00",
-            ts_end="2024-01-02 00:00:00",
-        )
-        assert "toDateTime(ts) >= toDateTime('2024-01-01 00:00:00')" in sql
-        assert "toDateTime(ts) < toDateTime('2024-01-02 00:00:00')" in sql
-
-
 class TestFetchPricesMultiCloseColumn:
     """Test that fetch_prices_multi can fetch close prices."""
 
@@ -379,85 +351,3 @@ class TestFetchPricesMultiCloseColumn:
         )
         assert "close" in sql
         assert "open" not in sql
-
-
-class TestComputeBtPnl:
-    """Test compute_bt_pnl expands bars correctly using execution_ts."""
-
-    def _make_bar(self, ts, execution_ts, position, bar_price, cumulative_pnl, tf="5m"):
-        return {
-            "strategy_table_name": "test_bt",
-            "strategy_instance_id": "test_bt__1",
-            "strategy_id": 1,
-            "strategy_name": "BT Test",
-            "underlying": "btc",
-            "config_timeframe": tf,
-            "weighting": 1.0,
-            "ts": ts,
-            "execution_ts": execution_ts,
-            "position": position,
-            "final_signal": 1.0,
-            "bar_benchmark": 100.0,
-            "cumulative_pnl": cumulative_pnl,
-        }
-
-    def test_single_5m_bar_expands_to_5_rows(self):
-        """A 5m bar should produce 5 1-minute rows starting at execution_ts."""
-        bar = self._make_bar("2024-01-01 00:00:00", "2024-01-01 00:05:00", 1.0, 100.0, 0.0)
-        prices = {
-            "2024-01-01 00:05:00": 101.0,
-            "2024-01-01 00:06:00": 102.0,
-            "2024-01-01 00:07:00": 103.0,
-            "2024-01-01 00:08:00": 104.0,
-            "2024-01-01 00:09:00": 105.0,
-        }
-
-        rows = compute_bt_pnl([bar], prices)
-
-        assert len(rows) == 5
-        # First row ts is execution_ts, not bar ts
-        assert rows[0][7] == "2024-01-01 00:05:00"
-        # source label is "backtest"
-        assert rows[0][5] == "backtest"
-
-    def test_two_consecutive_bars_each_reset_to_own_cumulative_pnl(self):
-        """Each bar resets to its own raw_json cumulative_pnl — no cross-bar chaining."""
-        bars = [
-            self._make_bar("2024-01-01 00:00:00", "2024-01-01 00:05:00", 1.0, 100.0, 0.0),
-            self._make_bar("2024-01-01 00:05:00", "2024-01-01 00:10:00", -1.0, 105.0, 0.05),
-        ]
-        # Flat prices covering both bars' expansion windows (00:05–00:14)
-        prices = {
-            **{f"2024-01-01 00:0{i}:00": 100.0 for i in range(5, 10)},
-            **{f"2024-01-01 00:1{i}:00": 100.0 for i in range(5)},
-        }
-
-        rows = compute_bt_pnl(bars, prices)
-
-        assert len(rows) == 10
-        # First 5 rows: base = 0.0, flat prices → all ~0.0
-        for row in rows[:5]:
-            assert abs(row[8]) < 1e-6, f"Expected ~0.0 but got {row[8]}"
-        # Second 5 rows: base resets to 0.05, flat prices → all ~0.05
-        for row in rows[5:]:
-            assert abs(row[8] - 0.05) < 1e-6, f"Expected ~0.05 but got {row[8]}"
-
-    def test_anchors_parameter_ignored_bar_cumulative_pnl_always_wins(self):
-        """anchors parameter is accepted but ignored — bar's cumulative_pnl is authoritative."""
-        bar = self._make_bar("2024-01-02 00:00:00", "2024-01-02 00:05:00", 1.0, 100.0, 0.07)
-        prices = {"2024-01-02 00:05:00": 100.0}
-        anchors = {"test_bt": (0.05, 100.0, 1.0)}
-
-        rows = compute_bt_pnl([bar], prices, anchors=anchors)
-
-        assert len(rows) == 5
-        # bar's cumulative_pnl=0.07 wins over anchor=0.05
-        assert abs(rows[0][8] - 0.07) < 1e-6, f"Expected 0.07 but got {rows[0][8]}"
-
-    def test_output_row_has_correct_column_count(self):
-        """Output row must have exactly 16 columns matching INSERT_COLUMNS."""
-        bar = self._make_bar("2024-01-01 00:00:00", "2024-01-01 00:05:00", 1.0, 100.0, 0.0)
-        prices = {f"2024-01-01 00:0{5+i}:00": 100.0 for i in range(5)}
-        rows = compute_bt_pnl([bar], prices)
-        assert len(rows) == 5
-        assert len(rows[0]) == 16
