@@ -20,6 +20,31 @@ _BT_STREAM_LOOKBACK = "3 DAY"
 # pick the latest bar, so widening only grows the candidate set — safe for all tf.
 _LOOKBACK = "2 DAY"
 
+# Per-query memory controls for the two heaviest live-loop aggregations, applied via
+# an inline SETTINGS clause that overrides the 3 GB / 1.5 GB session default
+# (libs/clickhouse_client.py). Capping each query keeps a single consumer from
+# monopolizing Cloud server memory and competing with background merges.
+#
+# A bare max_memory_usage cap is NOT enough on its own: the peak here is reading the
+# wide row_json column, not the GROUP BY state (which is tiny, so external_group_by
+# cannot spill it). The real consumers, in order of impact:
+#   1. allow_prefetched_read_pool_for_remote_filesystem=0 — the S3 prefetch read pool
+#      buffered >300 MB of row_json; disabling it is the single biggest win (and is
+#      no slower for these small bounded scans — prefetch wasn't hiding much latency).
+#   2. max_threads=1 — one read stream instead of N parallel row_json buffers.
+#   3. max_block_size=4096 + small max_read_buffer_size — smaller per-read buffers.
+# Splitting the ts list does NOT help: per-query read-pool cost is fixed regardless of
+# row count (measured — see memory note). Verified against live Cloud (2026-06-21),
+# results byte-identical to an uncapped run: Q1 ~36 MB peak, Q2 ~50 MB peak (a bare
+# cap alone fails with code 241). Caps stay at the agreed 110/148 MB budgets as a
+# generous ceiling; external_group_by stays below each cap as a secondary guard.
+_BT_BENCH_MAX_MEMORY = 110_000_000  # bt benchmark argMin lookup — 110 MB cap
+_BT_BENCH_EXTERNAL_GROUP_BY = 55_000_000
+_RT_CANDLE_MAX_MEMORY = 148_000_000  # real_trade argMax(row_json) lookup — 148 MB cap
+_RT_CANDLE_EXTERNAL_GROUP_BY = 74_000_000
+_LOOKUP_MAX_BLOCK_SIZE = 4096  # smaller read blocks → lower row_json read peak
+_LOOKUP_READ_BUFFER = 65536  # 64 KB per-stream read buffer (default 1 MB)
+
 _TF_MINUTES_EXPR_NO_ALIAS = """\
 multiIf(
         config_timeframe = '1m',  1,
@@ -225,6 +250,12 @@ FROM analytics.strategy_output_history_bt_v2
 WHERE underlying = '{underlying}'
   AND ts IN ({ts_in})
 GROUP BY strategy_table_name, ts
+SETTINGS max_memory_usage = {_BT_BENCH_MAX_MEMORY},
+         max_bytes_before_external_group_by = {_BT_BENCH_EXTERNAL_GROUP_BY},
+         max_threads = 1,
+         max_block_size = {_LOOKUP_MAX_BLOCK_SIZE},
+         max_read_buffer_size = {_LOOKUP_READ_BUFFER},
+         allow_prefetched_read_pool_for_remote_filesystem = 0
 """
     bench_map = {
         (r["strategy_table_name"], str(r["ts"])): float(r["benchmark"])
@@ -293,5 +324,11 @@ WHERE ts >= '{ts_str}'::DateTime - INTERVAL {_LOOKBACK}
 GROUP BY
     strategy_table_name, strategy_instance_id, strategy_id, strategy_name,
     underlying, config_timeframe, weighting
+SETTINGS max_memory_usage = {_RT_CANDLE_MAX_MEMORY},
+         max_bytes_before_external_group_by = {_RT_CANDLE_EXTERNAL_GROUP_BY},
+         max_threads = 1,
+         max_block_size = {_LOOKUP_MAX_BLOCK_SIZE},
+         max_read_buffer_size = {_LOOKUP_READ_BUFFER},
+         allow_prefetched_read_pool_for_remote_filesystem = 0
 """
     return [_parse_revision(r) for r in query_dicts(sql)]
