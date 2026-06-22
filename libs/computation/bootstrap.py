@@ -197,14 +197,22 @@ def fetch_bootstrap_seeds(
     Args:
         pnl_table:     e.g. 'analytics.strategy_pnl_1min_prod_v2'
         history_table: e.g. 'analytics.strategy_output_history_v2'
-        start_ts:      reference_ts - 48h
+        start_ts:      reference_ts (anchors/positions resolved as of this instant)
         real_trade:    True to use revision_ts-based position resolution
     """
     start_str = start_ts.strftime("%Y-%m-%d %H:%M:%S")
-    # 1-day lookback: covers the longest bar timeframe (1d), so the previous bar for
-    # any active strategy always falls within this window. Retired strategies have no
-    # active anchor regardless of window size.
-    seed_window_start = start_ts - timedelta(days=1)
+    # Lookback must cover the most-recent ARRIVED daily (1d) bar. A daily bar's ts is at
+    # exact midnight, it closes 24h later, and its data only lands ~30 min after that
+    # close. So at a reference shortly past midnight (the typical restart case, e.g.
+    # ref=00:01) the newest arrived 1d bar can be ~2 days old by ts. A flat 1-day window
+    # (start_ts - 1 day) floors one minute past that bar and silently drops every 1d
+    # strategy from the seeds — the 2026-06-22 incident (seeds came back 616 vs 695).
+    # Go back 2 days and floor to midnight so the prior arrived daily bar is always
+    # inside the window regardless of the sub-day offset of start_ts. Widening the
+    # window only adds (cheap) retired strategies, which have no active bar anyway.
+    seed_window_start = (start_ts - timedelta(days=2)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
     seed_window_start_str = seed_window_start.strftime("%Y-%m-%d %H:%M:%S")
 
     strategy_table_names = _fetch_active_strategy_table_names(
