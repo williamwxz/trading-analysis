@@ -1312,3 +1312,81 @@ def test_fetch_last_pnl_anchors_bounded_sql_aliases_max_ts_safely():
     assert "AS last_ts" in bounded_sql
     # the aggregate must NOT be aliased back to the filtered column name `ts`
     assert "AS ts" not in bounded_sql
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1d-bar lookback regression: a daily bar's ts is at exact midnight, but the
+# reference candle on restart is typically a minute or two past midnight, and the
+# day's new daily bar only arrives ~30 min after its midnight close. So at a
+# post-midnight reference the most-recent ARRIVED daily bar can be ~2 days old by
+# ts. A lookback window of exactly 1 day (start_ts - 1 day) lands one minute past
+# that bar and silently drops every 1d strategy from the seed/lookup — the
+# 2026-06-22 incident where prod/real_trade seeds came back 616 instead of 695.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_fetch_bootstrap_seeds_window_covers_prior_midnight_for_post_midnight_ref():
+    """Seed window for a reference just after midnight must reach back far enough to
+    include the most-recent arrived daily bar (ts at a prior midnight), not stop one
+    minute short of it. ref=2026-06-22 00:01 → window must include 2026-06-20 00:00."""
+    stn_rows = [{"strategy_table_name": "BTC_hodl_1d"}]
+    captured: list[str] = []
+
+    def capture(sql):
+        captured.append(sql)
+        if "DISTINCT strategy_table_name" in sql:
+            return stn_rows
+        if "count(DISTINCT strategy_instance_id)" in sql:
+            return [{"cnt": 0}]
+        return []
+
+    with patch("libs.computation.bootstrap.query_dicts", side_effect=capture):
+        fetch_bootstrap_seeds(
+            pnl_table="analytics.strategy_pnl_1min_prod_v2",
+            history_table="analytics.strategy_output_history_v2",
+            start_ts=datetime(2026, 6, 22, 0, 1, 0),
+            real_trade=False,
+        )
+    # The discovery/seed SQL window floor must be at or before the prior-day midnight
+    # bar (2026-06-20 00:00:00). A 1-day window would floor at 2026-06-21 00:01:00.
+    assert any("'2026-06-20 00:00:00'" in sql for sql in captured), (
+        "seed window must reach back to include the prior arrived daily bar; "
+        f"captured windows: {[s for s in captured if '>=' in s][:2]}"
+    )
+    assert not any(
+        "'2026-06-21 00:01:00'" in sql for sql in captured
+    ), "1-day window floor drops 1d strategies on a post-midnight restart"
+
+
+@pytest.mark.unit
+def test_fetch_strategies_for_candle_lookback_covers_prior_day_daily_bar():
+    """Live prod lookup must look back 2 days so a 1d strategy's active bar (ts at the
+    prior midnight, arriving ~30 min late) is still found at a post-midnight candle."""
+    captured: list[str] = []
+
+    def capture(sql):
+        captured.append(sql)
+        return []
+
+    with patch("libs.computation.candle_lookup.query_dicts", side_effect=capture):
+        fetch_strategies_for_candle("BTCUSDT", datetime(2026, 6, 22, 0, 1, 0))
+
+    assert "INTERVAL 2 DAY" in captured[0], "1d bars need a 2-day live lookback"
+    assert "INTERVAL 1 DAY" not in captured[0]
+
+
+@pytest.mark.unit
+def test_fetch_real_trade_for_candle_lookback_covers_prior_day_daily_bar():
+    """Same 2-day lookback requirement for the real_trade live lookup."""
+    captured: list[str] = []
+
+    def capture(sql):
+        captured.append(sql)
+        return []
+
+    with patch("libs.computation.candle_lookup.query_dicts", side_effect=capture):
+        fetch_real_trade_for_candle("BTCUSDT", datetime(2026, 6, 22, 0, 1, 0))
+
+    assert "INTERVAL 2 DAY" in captured[0], "1d bars need a 2-day live lookback"
+    assert "INTERVAL 1 DAY" not in captured[0]
