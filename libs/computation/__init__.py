@@ -71,15 +71,15 @@ __all__ = [
     "fetch_bt_anchors_for_candle",
     "fetch_real_trade_for_candle",
     "fetch_strategies_for_candle",
-    # fetch_bars (Dagster batch)
+    # fetch_bars (batch recompute)
     "fetch_anchors",
     "fetch_bt_anchors",
     "fetch_bt_benchmarks",
     "fetch_new_bars_prod",
     "fetch_new_bars_real_trade",
-    # fetch_prices (Dagster batch)
+    # fetch_prices (batch recompute)
     "fetch_prices_multi",
-    # minute_loop (Dagster per-minute recompute)
+    # minute_loop (batch per-minute recompute)
     "ProdBarEntry",
     "ProdLookup",
     "RtLookup",

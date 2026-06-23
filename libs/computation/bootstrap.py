@@ -8,7 +8,7 @@ Provides the data needed to seed AnchorState before the live streaming loop star
 Supports all three modes (prod, bt, real_trade) via the pnl_table / history_table parameters.
 
 Walk rows use price AND position from the stored pnl table columns — this ensures the
-verification chain uses the exact values that Dagster/consumer used when writing the rows.
+verification chain uses the exact values that the batch recompute/consumer used when writing the rows.
 Re-deriving position from history would diverge if a new revision arrives between when
 a row was stored and when bootstrap runs.
 
@@ -376,7 +376,7 @@ def fetch_walk_rows(
         pnl = prev_pnl + position * (price - prev_price) / prev_price
 
     Price comes from the stored price column in the pnl table — same price used when the
-    row was written — so verification uses an identical chain to what Dagster/consumer computed.
+    row was written — so verification uses an identical chain to what the batch recompute/consumer computed.
     reference_ts is EXCLUDED — the consumer will process that candle live from Kafka.
 
     Position comes from the stored position column in the pnl table (same writer as price

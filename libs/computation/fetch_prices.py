@@ -1,6 +1,6 @@
 """Price fetchers from analytics.futures_price_1min (ClickHouse).
 
-Used by Dagster's batch PnL assets. The pnl_consumer gets price directly from
+Used by the batch PnL recompute (scripts/audit_pnl.py). The pnl_consumer gets price directly from
 the Redpanda candle's open field — it does not use these functions.
 """
 

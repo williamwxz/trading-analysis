@@ -1,4 +1,4 @@
-"""History bar and anchor fetchers from ClickHouse — used by Dagster's batch assets.
+"""History bar and anchor fetchers from ClickHouse — used by the batch PnL recompute (scripts/audit_pnl.py).
 
 The pnl_consumer does not use these. It calls libs.computation.candle_lookup
 for per-candle re-queries and libs.computation.bootstrap for cold-start.

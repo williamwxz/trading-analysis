@@ -17,17 +17,16 @@ from datetime import UTC, datetime, timedelta
 
 sys.path.insert(0, ".")
 
-from trading_dagster.utils.clickhouse_client import (
+from libs.clickhouse_client import (
     execute,
     get_client,
     insert_rows,
     query_dicts,
     query_rows,
 )
-from trading_dagster.utils.pnl_compute import (
+from libs.computation import (
     PROD_INSERT_COLUMNS,
     REAL_TRADE_INSERT_COLUMNS,
-    assert_anchors_present,
     compute_bt_pnl,
     compute_real_trade_pnl,
     fetch_anchors,
@@ -39,6 +38,16 @@ from trading_dagster.utils.pnl_compute import (
 )
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+
+
+def assert_anchors_present(anchors, bars, *, source_table: str = "") -> None:
+    """Assert every bar's strategy_table_name has a seeded anchor."""
+    missing = {b["strategy_table_name"] for b in bars} - set(anchors)
+    if missing:
+        raise AssertionError(
+            f"{len(missing)} strategies from {source_table} have no anchor: "
+            f"{sorted(missing)[:5]}"
+        )
 
 
 def _parse_ts(s: str) -> datetime:
@@ -332,7 +341,7 @@ ORDER BY strategy_table_name, ts
     if bars_rt:
         ts_min = min(b["ts"] for b in bars_rt)
         ts_max = max(b["ts"] for b in bars_rt)
-        from trading_dagster.utils.pnl_compute import fetch_prices
+        from libs.computation import fetch_prices
 
         prices_rt = fetch_prices(underlying, ts_min, ts_max, client)
         anchors_rt = fetch_anchors(target_rt, underlying)

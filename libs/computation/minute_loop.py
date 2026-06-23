@@ -1,4 +1,4 @@
-"""Per-minute active-bar resolution for Dagster batch PnL recompute.
+"""Per-minute active-bar resolution for batch PnL recompute.
 
 Provides the same semantics as pnl_consumer's candle_lookup queries, but
 resolved in Python from a pre-fetched bar/revision dataset — avoiding
