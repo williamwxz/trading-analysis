@@ -239,7 +239,8 @@ resource "aws_ecs_cluster_capacity_providers" "main" {
 # aws_ecr_repository.dagster, aws_cloudwatch_log_group.dagster, the NAT SG
 # ingress :3000, the DNAT iptables script in the NAT instance user_data, the
 # ecs_tasks SG ingress :3000, and the `dagster_url` / `ecr_repository_url`
-# outputs. The services/dagster/ source remains in-tree for now.
+# outputs. The services/dagster/ source and trading_dagster module have since
+# also been removed from the repo.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Security Groups
@@ -574,68 +575,9 @@ resource "aws_iam_role_policy" "ecs_execution_secrets" {
   })
 }
 
-resource "aws_iam_role" "ecs_task" {
-  name = "${local.name_prefix}-ecs-task"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "ecs-tasks.amazonaws.com"
-        }
-      }
-    ]
-  })
-
-  tags = local.common_tags
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-resource "aws_iam_role_policy" "ecs_task_policy" {
-  name = "task-access"
-  role = aws_iam_role.ecs_task.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        # EcsRunLauncher: introspect task definition and launch/monitor/stop run tasks
-        Effect = "Allow"
-        Action = [
-          "ecs:DescribeTaskDefinition",
-          "ecs:RunTask",
-          "ecs:StopTask",
-          "ecs:DescribeTasks",
-          "ecs:ListTasks",
-          "ecs:DescribeServices",
-          "ecs:UpdateService",
-        ]
-        Resource = "*"
-      },
-      {
-        # EcsRunLauncher: pass execution + task roles to new run tasks
-        Effect = "Allow"
-        Action = ["iam:PassRole"]
-        Resource = [
-          aws_iam_role.ecs_execution.arn,
-          aws_iam_role.ecs_task.arn,
-        ]
-      },
-      {
-        # Dagster EcsRunLauncher: discover secrets to inject into run tasks
-        Effect   = "Allow"
-        Action   = ["secretsmanager:ListSecrets"]
-        Resource = "*"
-      },
-    ]
-  })
-}
+# The `ecs_task` IAM role + `ecs_task_policy` (Dagster EcsRunLauncher: ecs:RunTask,
+# iam:PassRole, secretsmanager:ListSecrets) were removed with Dagster — the live
+# services use `aws_iam_role.pnl_consumer_task` as their task role instead.
 
 
 # ─────────────────────────────────────────────────────────────────────────────

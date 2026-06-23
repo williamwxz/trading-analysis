@@ -1,4 +1,4 @@
-"""ClickHouse Cloud client for libs — no Dagster dependency.
+"""ClickHouse Cloud client for libs — no orchestration-framework dependency.
 
 Uses clickhouse-connect (native HTTP/HTTPS) for ClickHouse Cloud.
 Required env vars: CLICKHOUSE_HOST, CLICKHOUSE_PORT (8443),

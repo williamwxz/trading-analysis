@@ -1,6 +1,6 @@
 """Unit tests for libs.computation.minute_loop.
 
-Tests the per-strategy active-bar resolution logic used by Dagster's per-minute
+Tests the per-strategy active-bar resolution logic used by the batch recompute's per-minute
 recompute loop. No I/O — all functions are pure Python.
 """
 from datetime import datetime, timedelta

@@ -141,7 +141,7 @@ def test_insert_columns_length():
 
 @pytest.mark.unit
 def test_insert_columns_key_indices():
-    """ts=7, updated_at=14, strategy_instance_id=15 — used by Dagster prepare step."""
+    """ts=7, updated_at=14, strategy_instance_id=15 — used by the batch recompute prepare step."""
     assert INSERT_COLUMNS[7] == "ts"
     assert INSERT_COLUMNS[14] == "updated_at"
     assert INSERT_COLUMNS[15] == "strategy_instance_id"

@@ -2,63 +2,6 @@
 # Usage: docker compose up -d
 
 services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: dagster
-      POSTGRES_PASSWORD: dagster
-      POSTGRES_DB: dagster
-    ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-
-  dagster-webserver:
-    build:
-      context: .
-      dockerfile: services/dagster/Dockerfile
-    command: dagster-webserver -h 0.0.0.0 -p 3000
-    ports:
-      - "3000:3000"
-    environment:
-      DAGSTER_HOME: /app
-      DAGSTER_PG_HOST: postgres
-      DAGSTER_PG_PORT: "5432"
-      DAGSTER_PG_USER: dagster
-      DAGSTER_PG_PASSWORD: dagster
-      DAGSTER_PG_DB: dagster
-      CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-localhost}
-      CLICKHOUSE_PORT: ${CLICKHOUSE_PORT:-8443}
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
-      CLICKHOUSE_SECURE: ${CLICKHOUSE_SECURE:-true}
-    volumes:
-      - ./dagster.local.yaml:/app/dagster.yaml:ro
-    depends_on:
-      - postgres
-
-  dagster-daemon:
-    build:
-      context: .
-      dockerfile: services/dagster/Dockerfile
-    command: dagster-daemon run
-    environment:
-      DAGSTER_HOME: /app
-      DAGSTER_PG_HOST: postgres
-      DAGSTER_PG_PORT: "5432"
-      DAGSTER_PG_USER: dagster
-      DAGSTER_PG_PASSWORD: dagster
-      DAGSTER_PG_DB: dagster
-      CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-localhost}
-      CLICKHOUSE_PORT: ${CLICKHOUSE_PORT:-8443}
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
-      CLICKHOUSE_SECURE: ${CLICKHOUSE_SECURE:-true}
-    volumes:
-      - ./dagster.local.yaml:/app/dagster.yaml:ro
-    depends_on:
-      - postgres
-
   grafana:
     image: grafana/grafana:11.0.0
     ports:
@@ -72,5 +15,4 @@ services:
       - grafana_data:/var/lib/grafana
 
 volumes:
-  pgdata:
   grafana_data:

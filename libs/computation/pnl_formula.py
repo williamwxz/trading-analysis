@@ -1,7 +1,7 @@
 """PnL computation: anchor-chained 1-min expansion for prod, bt, and real_trade.
 
 No I/O — takes pre-fetched bars and prices dicts. Both pnl_consumer (price from
-Redpanda candle.open) and Dagster (price from futures_price_1min via ClickHouse)
+Redpanda candle.open) and the batch recompute (price from futures_price_1min via ClickHouse)
 pass prices into these functions; the source of price is the only difference
 between the two callers.
 
@@ -33,7 +33,7 @@ TIMEFRAME_MAP: Dict[str, int] = {
 }
 
 # Column order for INSERT into strategy_pnl_1min_{prod,bt,real_trade}_v2.
-# Indices: ts=7, updated_at=14 — used by _prepare_rows_for_clickhouse in Dagster.
+# Indices: ts=7, updated_at=14 — used by _prepare_rows_for_clickhouse in the batch recompute.
 INSERT_COLUMNS = [
     "strategy_table_name",   # 0
     "strategy_id",           # 1
@@ -112,7 +112,7 @@ def build_pnl_row(
     bar must have: strategy_id, strategy_name, underlying, config_timeframe,
     weighting, strategy_instance_id, final_signal, bar_benchmark, position.
     ts and now accept str or datetime — the insert path for each caller handles
-    the required type (Dagster: _prepare_rows_for_clickhouse converts str→datetime;
+    the required type (batch recompute: _prepare_rows_for_clickhouse converts str→datetime;
     pnl_consumer: passes datetime objects directly).
     """
     return [
@@ -457,7 +457,7 @@ def compute_real_trade_pnl(
 def extract_row_anchor(row: list) -> Tuple[float, float, float]:
     """Extract (cumulative_pnl, price, position) from a completed INSERT_COLUMNS row.
 
-    Used by Dagster's chunk loop to seed the next chunk's anchor from the last row
+    Used by the batch recompute's chunk loop to seed the next chunk's anchor from the last row
     of the previous chunk. Indices: cumulative_pnl=8, price=11, position=10.
     """
     return (float(row[8]), float(row[11]), float(row[10]))

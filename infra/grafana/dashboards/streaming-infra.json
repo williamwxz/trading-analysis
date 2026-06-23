@@ -452,23 +452,6 @@
       },
       "targets": [
         {
-          "alias": "dagster",
-          "datasource": {
-            "type": "cloudwatch",
-            "uid": "cloudwatch"
-          },
-          "dimensions": {
-            "ClusterName": "trading-analysis",
-            "ServiceName": "trading-analysis-dagster"
-          },
-          "metricName": "CpuUtilized",
-          "namespace": "ECS/ContainerInsights",
-          "period": "60",
-          "refId": "A",
-          "region": "ap-northeast-1",
-          "statistic": "Average"
-        },
-        {
           "alias": "redpanda",
           "datasource": {
             "type": "cloudwatch",
@@ -615,23 +598,6 @@
       },
       "targets": [
         {
-          "alias": "dagster",
-          "datasource": {
-            "type": "cloudwatch",
-            "uid": "cloudwatch"
-          },
-          "dimensions": {
-            "ClusterName": "trading-analysis",
-            "ServiceName": "trading-analysis-dagster"
-          },
-          "metricName": "MemoryUtilized",
-          "namespace": "ECS/ContainerInsights",
-          "period": "60",
-          "refId": "A",
-          "region": "ap-northeast-1",
-          "statistic": "Average"
-        },
-        {
           "alias": "redpanda",
           "datasource": {
             "type": "cloudwatch",
@@ -777,23 +743,6 @@
         }
       },
       "targets": [
-        {
-          "alias": "dagster",
-          "datasource": {
-            "type": "cloudwatch",
-            "uid": "cloudwatch"
-          },
-          "dimensions": {
-            "ClusterName": "trading-analysis",
-            "ServiceName": "trading-analysis-dagster"
-          },
-          "metricName": "RunningTaskCount",
-          "namespace": "ECS/ContainerInsights",
-          "period": "60",
-          "refId": "A",
-          "region": "ap-northeast-1",
-          "statistic": "Average"
-        },
         {
           "alias": "redpanda",
           "datasource": {
@@ -1005,23 +954,6 @@
           "namespace": "ECS/ContainerInsights",
           "period": "60",
           "refId": "D",
-          "region": "ap-northeast-1",
-          "statistic": "Sum"
-        },
-        {
-          "alias": "dagster",
-          "datasource": {
-            "type": "cloudwatch",
-            "uid": "cloudwatch"
-          },
-          "dimensions": {
-            "ClusterName": "trading-analysis",
-            "ServiceName": "trading-analysis-dagster"
-          },
-          "metricName": "StoppedTaskCount",
-          "namespace": "ECS/ContainerInsights",
-          "period": "60",
-          "refId": "E",
           "region": "ap-northeast-1",
           "statistic": "Sum"
         },
