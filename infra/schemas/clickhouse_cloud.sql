@@ -52,6 +52,32 @@ ENGINE = MergeTree()
 PARTITION BY toYYYYMM(ts)
 ORDER BY (strategy_table_name, config_timeframe, ts, revision_ts);
 
+-- Backtest cumulative PnL, authoritative per native-timeframe bar (published
+-- externally; read-only in this repo). Anchor source for BT PnL: cum_pnl_first /
+-- pos_first are consumed by libs/computation (fetch_bt_anchors,
+-- fetch_bt_anchors_for_candle); pnl_first, pnl_latest, pos_latest, and
+-- cum_pnl_latest are published but not yet consumed. No `underlying` column —
+-- it is encoded in the `u=` token of strategy_table_name.
+-- Live engine is SharedReplacingMergeTree(computed_at); written here as plain
+-- ReplacingMergeTree (Cloud substitutes the Shared* variant on apply).
+CREATE TABLE IF NOT EXISTS analytics.strategy_cum_pnl_bt_v2
+(
+    strategy_table_name  String,
+    config_timeframe     String,
+    ts                   DateTime,
+    pnl_first            Float64,
+    pnl_latest           Float64,
+    pos_first            Float64,
+    pos_latest           Float64,
+    cum_pnl_first        Float64,
+    cum_pnl_latest       Float64,
+    computed_at          DateTime,
+    weighting            Float64
+)
+ENGINE = ReplacingMergeTree(computed_at)
+PARTITION BY toYYYYMM(ts)
+ORDER BY (strategy_table_name, config_timeframe, ts);
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 2. Market Data
 --    Real-time: pnl_consumer (Kafka → ClickHouse, via ws_consumer WebSocket feed)
