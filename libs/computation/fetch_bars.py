@@ -186,6 +186,11 @@ def fetch_bt_benchmarks(
 ) -> Dict[Tuple[str, str], float]:
     """Per-bar first-revision benchmark from history, keyed by (strategy_table_name, ts).
 
+    Sole remaining use of strategy_output_history_bt_v2 in the BT path: PnL and
+    position come from strategy_cum_pnl_bt_v2 (see fetch_bt_anchors); only the
+    per-strategy `benchmark` series is read here. That series is strategy-specific
+    (not the underlying buy-and-hold), lives nowhere else, and cannot be price-derived,
+    which is why the table is retained.
     Joined onto anchors by anchor.ts (cum-table ts aligns exactly with history bar ts).
     Same lookback as fetch_bt_anchors so straddling anchors resolve a benchmark.
     """

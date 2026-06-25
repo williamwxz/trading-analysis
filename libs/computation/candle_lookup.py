@@ -206,8 +206,10 @@ def fetch_bt_anchors_for_candle(
 ) -> list[BtLiveAnchor]:
     """Latest cum-table anchor per strategy with ts <= candle_ts, fully resolved.
 
-    Resolves anchor_price from futures_price_1min at anchor_ts and benchmark from
-    strategy_output_history_bt_v2 at anchor_ts. Stateless: the consumer computes
+    PnL/position come from strategy_cum_pnl_bt_v2 (cum_pnl_first, pos_first) and
+    anchor_price from futures_price_1min at anchor_ts. The benchmark is the ONLY value
+    still read from strategy_output_history_bt_v2 in the BT path — it is
+    strategy-specific and not price-derivable. Stateless: the consumer computes
     cpnl = compute_bt_live_cpnl(cum_pnl_first, pos_first, candle.open, anchor_price).
     """
     underlying = instrument.removesuffix("USDT")
@@ -243,6 +245,9 @@ WHERE exchange = 'binance' AND instrument = '{instrument}'
 """
     price_map = {r["ts"]: float(r["open"]) for r in query_dicts(price_sql)}
 
+    # Benchmark — the only remaining read of strategy_output_history_bt_v2 in BT.
+    # Per-strategy series from row_json (NOT the underlying buy-and-hold), used by
+    # the Grafana L1-L4 panels. Not in the cum table and not price-derivable.
     bench_sql = f"""\
 SELECT strategy_table_name, toString(ts) AS ts,
        argMin(JSONExtractFloat(row_json, 'benchmark'), revision_ts) AS benchmark

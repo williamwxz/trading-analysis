@@ -94,18 +94,15 @@ PRICE_COLUMNS = [
     "volume",
 ]
 
-# Table config per mode.
+# Bootstrap config for the stateful modes (prod, real_trade) — read only by
+# _bootstrap_state. BT is intentionally absent: its live path is stateless
+# (fetch_bt_anchors_for_candle) and hardcodes its own pnl table / source label,
+# so it needs no entry here. Do not re-add "bt".
 _MODE_CONFIG = {
     "prod": {
         "pnl_table": "analytics.strategy_pnl_1min_prod_v2",
         "history_table": "analytics.strategy_output_history_v2",
         "source_label": "production",
-        "real_trade": False,
-    },
-    "bt": {
-        "pnl_table": "analytics.strategy_pnl_1min_bt_v2",
-        "history_table": "analytics.strategy_output_history_bt_v2",
-        "source_label": "backtest",
         "real_trade": False,
     },
     "real_trade": {
@@ -267,7 +264,6 @@ def _bootstrap_state(
 ) -> AnchorState:
     """Seed AnchorState for prod/real_trade modes."""
     cfg = _MODE_CONFIG[mode]
-    is_bt = False
     now = datetime.now(UTC).replace(tzinfo=None)
     ref_ts = reference_ts if reference_ts is not None else now
     pnl_table = str(cfg["pnl_table"])
@@ -386,12 +382,7 @@ def _bootstrap_state(
         # Use previous price as fallback when current price is missing (0.0 from coalesce).
         effective_price = wr.price if wr.price != 0.0 else pp
 
-        if (
-            not is_bt
-            and pp != 0.0
-            and effective_price != 0.0
-            and wr.cumulative_pnl != 0.0
-        ):
+        if pp != 0.0 and effective_price != 0.0 and wr.cumulative_pnl != 0.0:
             recomputed = pp_pnl + wr.position * (effective_price - pp) / pp
             deviation = abs(recomputed - wr.cumulative_pnl)
             action = _walk_deviation_action(deviation)
