@@ -967,7 +967,6 @@ def _fix_bt_underlying(
         [underlying], price_lo, ts_end, client, extend_minutes=0
     )
     prices = prices_map.pop(underlying, {})
-    price_keys = sorted(prices)
 
     all_rows: list[list] = []
     for f in fixes:
@@ -984,6 +983,14 @@ def _fix_bt_underlying(
             )
             continue
 
+        # Warm-start seed: last target row strictly before the window (survives the
+        # DELETE below, which only removes ts >= window_start). Absent / price==0 ⇒
+        # compute_bt_pnl cold-starts from the first bar's cum_pnl_first.
+        seed = fetch_seed_anchor("bt", f.strategy_table_name, window_start, client)
+        seed_anchors: dict[str, tuple[float, float]] = {}
+        if seed["price"] != 0.0:
+            seed_anchors[f.strategy_table_name] = (seed["pnl"], seed["price"])
+
         if not dry_run:
             client.command(
                 f"DELETE FROM analytics.{tgt} "
@@ -992,9 +999,7 @@ def _fix_bt_underlying(
                 f"  AND ts <  toDateTime('{we_str}')"
             )
 
-        rows = compute_bt_pnl(
-            anchors, prices, benchmarks, ws_str, we_str, price_keys=price_keys
-        )
+        rows = compute_bt_pnl(anchors, seed_anchors, prices, benchmarks, ws_str, we_str)
         f.rows_written = len(rows)
         f.fix_applied = not dry_run
         all_rows.extend(rows)
