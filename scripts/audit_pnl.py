@@ -52,6 +52,7 @@ from libs.computation import (  # noqa: E402
     fetch_prices_multi,
     first_active_minute,
     last_active_minute,
+    parse_strategy_table_name,
 )
 from libs.computation.fetch_bars import _TF_EXPR  # noqa: E402
 
@@ -1024,6 +1025,101 @@ def _fix_bt_underlying(
     refresh_hour_table("bt", earliest, client, dry_run=dry_run, underlying=underlying)
 
 
+def _month_chunks(
+    start: datetime, end: datetime
+) -> list[tuple[datetime, datetime]]:
+    """Half-open [start, end) split on calendar-month boundaries (oldest first)."""
+    chunks: list[tuple[datetime, datetime]] = []
+    cur = start
+    while cur < end:
+        # first of next month, midnight
+        if cur.month == 12:
+            nxt = datetime(cur.year + 1, 1, 1)
+        else:
+            nxt = datetime(cur.year, cur.month + 1, 1)
+        chunks.append((cur, min(nxt, end)))
+        cur = nxt
+    return chunks
+
+
+def _bt_rebuild_fixes(
+    chunk_start: datetime, chunk_end: datetime, client, underlying: str | None
+) -> list[StrategyFix]:
+    """One StrategyFix per strategy with a cum-table bar in [chunk_start, chunk_end).
+
+    window_end is the inclusive last minute of the chunk (chunk_end - 1 min) so
+    fix_bt_strategies recomputes exactly [chunk_start, chunk_end). Underlying is
+    parsed from the strategy_table_name u= token (the cum table has no underlying
+    column).
+    """
+    like = f"%|u={underlying}|%" if underlying else "%"
+    sql = f"""
+    SELECT DISTINCT strategy_table_name
+    FROM analytics.strategy_cum_pnl_bt_v2
+    WHERE ts >= toDateTime('{chunk_start:%Y-%m-%d %H:%M:%S}')
+      AND ts <  toDateTime('{chunk_end:%Y-%m-%d %H:%M:%S}')
+      AND strategy_table_name LIKE '{like}'
+    """
+    window_end = chunk_end - timedelta(minutes=1)
+    fixes: list[StrategyFix] = []
+    for (stn,) in client.query(sql).result_rows:
+        _, _, u, _ = parse_strategy_table_name(str(stn))
+        if not u:
+            continue
+        fixes.append(
+            StrategyFix(
+                type="bt",
+                underlying=u,
+                strategy_table_name=str(stn),
+                failure_ts=chunk_start,
+                window_end=window_end,
+                categories=["rebuild"],
+            )
+        )
+    return fixes
+
+
+def rebuild_bt(
+    client,
+    *,
+    dry_run: bool,
+    now_ts: datetime,
+    start_ts: datetime,
+    underlying: str | None,
+) -> None:
+    """Full bt 1-min rebuild over [start_ts, now_ts), monthly chunks oldest→newest.
+
+    Each chunk DELETE+recomputes via fix_bt_strategies; forward-seeding across
+    chunk seams is automatic — a chunk's fetch_seed_anchor reads the prior chunk's
+    last written row. Killable/resumable at chunk boundaries (idempotent
+    DELETE+recompute). Pause the live bt consumer first (see the rebuild runbook).
+    """
+    chunks = _month_chunks(start_ts, now_ts)
+    log.info(
+        "[rebuild-bt] %d monthly chunks over [%s, %s) underlying=%s dry_run=%s",
+        len(chunks),
+        start_ts,
+        now_ts,
+        underlying or "ALL",
+        dry_run,
+    )
+    for i, (cs, ce) in enumerate(chunks, 1):
+        fixes = _bt_rebuild_fixes(cs, ce, client, underlying)
+        log.info(
+            "[rebuild-bt] chunk %d/%d [%s, %s): %d strategies",
+            i,
+            len(chunks),
+            cs,
+            ce,
+            len(fixes),
+        )
+        if not fixes:
+            continue
+        fix_bt_strategies(fixes, client, dry_run=dry_run, now_ts=now_ts)
+        refresh_day_table("bt", cs, client, dry_run=dry_run)
+        log.info("[rebuild-bt] chunk %d/%d done", i, len(chunks))
+
+
 def refresh_hour_table(
     type_: Mode,
     earliest_ts: datetime,
@@ -1382,6 +1478,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Detect and compute fixes but do not write",
     )
+    p.add_argument(
+        "--rebuild-bt",
+        action="store_true",
+        help="Full bt 1-min rebuild [GLOBAL_START_TS, now) in monthly chunks "
+        "(minute-chaining). Pause the live bt consumer first. Ignores --type.",
+    )
+    p.add_argument(
+        "--rebuild-start",
+        metavar="TS",
+        help="Override --rebuild-bt start (default GLOBAL_START_TS); use to resume.",
+    )
     return p
 
 
@@ -1498,10 +1605,31 @@ def main() -> int:
     if args.fix_window and args.type == "all":
         log.error("--fix-window requires --type {prod|bt|real_trade}")
         return 2
+    if args.rebuild_bt and (args.fix or args.fix_window):
+        log.error("--rebuild-bt cannot combine with --fix / --fix-window")
+        return 2
 
     types = _resolve_types(args.type)
     client = get_client()
     now_ts = _utcnow_naive()
+
+    # --rebuild-bt: standalone full bt rebuild, short-circuits the audit/report
+    # machinery. Runs its own per-chunk DELETE+recompute; pause the live bt
+    # consumer first (runbook). Resumable via --rebuild-start.
+    if args.rebuild_bt:
+        start_ts = (
+            _parse_ts(args.rebuild_start)
+            if args.rebuild_start
+            else _parse_ts(GLOBAL_START_TS)
+        )
+        rebuild_bt(
+            client,
+            dry_run=args.dry_run,
+            now_ts=now_ts,
+            start_ts=start_ts,
+            underlying=_validate_underlying(args.underlying),
+        )
+        return 0
 
     # Show delta against the last run if state file exists.
     prior = read_recent_runs(state_path, n=1)
