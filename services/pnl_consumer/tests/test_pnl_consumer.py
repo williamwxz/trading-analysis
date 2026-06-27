@@ -404,36 +404,48 @@ def test_process_candle_real_trade_lazy_seeds_new_strategy():
 # ─────────────────────────────────────────────────────────────────────────────
 
 @pytest.mark.unit
-def test_process_candle_bt_computes_pnl():
-    """Stateless BT: cpnl = cum_pnl_first + pos * (price - anchor_price) / anchor_price.
+def test_process_candle_bt_chains_from_state():
+    """Stateful BT: cpnl chains minute-to-minute via state_bt.
 
-    anchor_price == candle.open → price-return term is zero → cpnl == cum_pnl_first.
-    No AnchorState involved; row computed purely from BtLiveAnchor.
+    A brand-new strategy lazy-seeds cum_pnl_first with price=0, so candle 1 holds
+    cum_pnl_first; candle 2 chains: cpnl = cum_pnl_first + pos*(open2-open1)/open1.
     """
-    candle = _candle(open=93200.0)
-    anchor = BtLiveAnchor(
-        strategy_table_name="strat_bt_1",
-        strategy_instance_id="inst_bt_001",
-        strategy_id=2,
-        strategy_name="bt_mom",
-        underlying="BTC",
-        config_timeframe="5m",
-        weighting=1.0,
-        cum_pnl_first=0.30,
-        pos_first=1.0,
-        anchor_ts=_CANDLE_TS.strftime("%Y-%m-%d %H:%M:%S"),
-        anchor_price=93200.0,  # same as candle.open → zero price-return term
-        benchmark=0.0,
-    )
+
+    def _bt_anchor():
+        return BtLiveAnchor(
+            strategy_table_name="strat_bt_1",
+            strategy_instance_id="inst_bt_001",
+            strategy_id=2,
+            strategy_name="bt_mom",
+            underlying="BTC",
+            config_timeframe="5m",
+            weighting=1.0,
+            cum_pnl_first=0.30,
+            pos_first=2.0,
+            anchor_ts=_CANDLE_TS.strftime("%Y-%m-%d %H:%M:%S"),
+            anchor_price=0.0,  # unused by the stateful path
+            benchmark=0.0,
+        )
+
     cfg = SinkConfig(price=False, prod=False, real_trade=False, bt=True)
+    state_bt = AnchorState()
 
-    with patch(f"{_MOD}.fetch_bt_anchors_for_candle", return_value=[anchor]):
-        rows, _, _, _ = process_candle(candle, AnchorState(), AnchorState(),
-                              cfg)
+    with patch(f"{_MOD}.fetch_bt_anchors_for_candle", return_value=[_bt_anchor()]):
+        rows1, _, _, _ = process_candle(
+            _candle(open=100.0), AnchorState(), AnchorState(), cfg, state_bt
+        )
+    with patch(f"{_MOD}.fetch_bt_anchors_for_candle", return_value=[_bt_anchor()]):
+        rows2, _, _, _ = process_candle(
+            _candle(open=110.0), AnchorState(), AnchorState(), cfg, state_bt
+        )
 
-    bt_rows = [r for r in rows if r["_sink"] == "pnl_bt"]
-    assert len(bt_rows) == 1
-    assert bt_rows[0]["_row"][8] == pytest.approx(0.30)
+    r1 = [r for r in rows1 if r["_sink"] == "pnl_bt"][0]["_row"]
+    r2 = [r for r in rows2 if r["_sink"] == "pnl_bt"][0]["_row"]
+    # candle 1 lazy-seeds and holds cum_pnl_first
+    assert r1[8] == pytest.approx(0.30)
+    # candle 2 chains: 0.30 + 2.0*(110-100)/100 = 0.50
+    assert r2[8] == pytest.approx(0.30 + 2.0 * (110 - 100) / 100)
+    assert r2[10] == 2.0  # position = pos_first
 
 
 # ─────────────────────────────────────────────────────────────────────────────

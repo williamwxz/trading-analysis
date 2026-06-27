@@ -40,7 +40,6 @@ from libs.computation import (
     WalkRow,
     build_carry_forward_row,
     build_pnl_row,
-    compute_bt_live_cpnl,
     fetch_bootstrap_seeds,
     fetch_bt_anchors_for_candle,
     fetch_last_pnl_anchors,
@@ -94,10 +93,11 @@ PRICE_COLUMNS = [
     "volume",
 ]
 
-# Bootstrap config for the stateful modes (prod, real_trade) — read only by
-# _bootstrap_state. BT is intentionally absent: its live path is stateless
-# (fetch_bt_anchors_for_candle) and hardcodes its own pnl table / source label,
-# so it needs no entry here. Do not re-add "bt".
+# Bootstrap config for the prod/real_trade modes (seed position + revision guard
+# from the history table) — read only by _bootstrap_state. BT is absent BY DESIGN
+# even though its live path is now stateful (minute-chaining): bt seeds only
+# (pnl, price) from its own pnl table via _bootstrap_bt_state and gets position
+# per-candle from the cum table, so it needs no history-shaped entry here.
 _MODE_CONFIG = {
     "prod": {
         "pnl_table": "analytics.strategy_pnl_1min_prod_v2",
@@ -409,6 +409,30 @@ def _bootstrap_state(
     return state
 
 
+_BT_PNL_TABLE = "analytics.strategy_pnl_1min_bt_v2"
+
+
+def _bootstrap_bt_state(reference_ts: "datetime | None") -> AnchorState:
+    """Seed bt AnchorState from the last stored 1-min row per strategy.
+
+    Continuous seeding: each strategy's last (cumulative_pnl, price) becomes the
+    chain anchor so the first post-restart candle chains exactly from the stored
+    value. Position is NOT seeded here — the live loop passes the active cum bar's
+    pos_first into compute_pnl each candle. Brand-new strategies (no stored row)
+    lazy-seed from cum_pnl_first on first appearance. Metadata (instance_id,
+    underlying, ...) is populated on the first live candle. No history-shaped seeds
+    and no walk-verify (bt's source is the authoritative cum table).
+    """
+    now = datetime.now(UTC).replace(tzinfo=None)
+    ref_ts = reference_ts if reference_ts is not None else now
+    anchors = fetch_last_pnl_anchors(_BT_PNL_TABLE, ref_ts)
+    state = AnchorState()
+    for stn, anchor in anchors.items():
+        state.set(stn, AnchorRecord(pnl=anchor.pnl, price=anchor.price, position=0.0))
+    logger.info("Bootstrap [bt]: ref_ts=%s anchored=%d", ref_ts, len(anchors))
+    return state
+
+
 def _compute_pnl_row(
     state: AnchorState,
     strategy_table_name: str,
@@ -473,11 +497,28 @@ def _compute_pnl_row(
     )
 
 
-def _build_bt_live_row(a: BtLiveAnchor, candle: CandleEvent, now: datetime) -> list:
-    """Stateless BT row from a resolved cum-table anchor (no AnchorState)."""
-    cpnl = compute_bt_live_cpnl(
-        a.cum_pnl_first, a.pos_first, candle.open, a.anchor_price
+def _build_bt_live_row(
+    state: AnchorState, a: BtLiveAnchor, candle: CandleEvent, now: datetime
+) -> list:
+    """Stateful BT row: chain cpnl via AnchorState; position is the active cum
+    bar's pos_first. A brand-new strategy lazy-seeds cum_pnl_first with price=0,
+    so its first minute holds cum_pnl_first and establishes the price reference."""
+    if not state.has(a.strategy_table_name):
+        state.set(
+            a.strategy_table_name,
+            AnchorRecord(pnl=a.cum_pnl_first, price=0.0, position=a.pos_first),
+        )
+    meta = AnchorRecord(
+        strategy_id=a.strategy_id,
+        strategy_name=a.strategy_name,
+        underlying=a.underlying,
+        config_timeframe=a.config_timeframe,
+        weighting=a.weighting,
+        strategy_instance_id=a.strategy_instance_id,
+        final_signal=0.0,
+        benchmark=a.benchmark,
     )
+    cpnl = state.compute_pnl(a.strategy_table_name, candle.open, a.pos_first, meta=meta)
     return build_pnl_row(
         a.strategy_table_name,
         {
@@ -540,6 +581,7 @@ def process_candle(
     state_prod: AnchorState,
     state_real_trade: AnchorState,
     cfg: SinkConfig,
+    state_bt: "AnchorState | None" = None,
 ) -> tuple[list[dict], int, int, int]:
     """Compute all output rows for one candle.
 
@@ -554,11 +596,13 @@ def process_candle(
     Strategies in state that weren't returned by the candle query also get
     carry-forward rows (for their matching underlying).
 
-    BT is stateless: per candle, fetch_bt_anchors_for_candle returns resolved
-    anchors (cum_pnl_first, pos_first, anchor_price) and each row is computed
-    directly — no AnchorState chaining, no bootstrap, no carry-forward for BT.
+    BT chains minute-to-minute via state_bt: fetch_bt_anchors_for_candle supplies
+    the active cum bar's pos_first, the cpnl chains from the prior minute, and
+    strategies absent from the lookup carry forward — same shape as prod.
     """
     now = datetime.now(UTC).replace(tzinfo=None)
+    if state_bt is None:  # only used when cfg.bt; fresh state is fine for tests
+        state_bt = AnchorState()
     rows: list[dict] = []
     prod_fetched = bt_fetched = real_trade_fetched = 0
     candle_underlying = candle.instrument.removesuffix("USDT")
@@ -612,8 +656,25 @@ def process_candle(
     if cfg.bt:
         bt_anchors = fetch_bt_anchors_for_candle(candle.instrument, candle.ts)
         bt_fetched = len(bt_anchors)
+        fetched_bt_stns: set[str] = set()
         for a in bt_anchors:
-            rows.append({"_sink": "pnl_bt", "_row": _build_bt_live_row(a, candle, now)})
+            fetched_bt_stns.add(a.strategy_table_name)
+            rows.append(
+                {
+                    "_sink": "pnl_bt",
+                    "_row": _build_bt_live_row(state_bt, a, candle, now),
+                }
+            )
+        # Carry-forward bt strategies in state but absent from this candle's lookup
+        # (retired / no cum bar in lookback), matching this candle's underlying.
+        for stn in list(state_bt.keys()):
+            if (
+                stn not in fetched_bt_stns
+                and state_bt.get(stn).underlying == candle_underlying
+            ):
+                row = _carry_forward_row(state_bt, stn, candle, "backtest", now)
+                if row is not None:
+                    rows.append({"_sink": "pnl_bt", "_row": row})
 
     if cfg.real_trade:
         rt_revs = fetch_real_trade_for_candle(candle.instrument, candle.ts)
@@ -812,12 +873,15 @@ def run() -> None:
 
     state_prod = AnchorState()
     state_real_trade = AnchorState()
+    state_bt = AnchorState()
 
     try:
         if sink_cfg.prod:
             state_prod = _bootstrap_state("prod", reference_ts)
         if sink_cfg.real_trade:
             state_real_trade = _bootstrap_state("real_trade", reference_ts)
+        if sink_cfg.bt:
+            state_bt = _bootstrap_bt_state(reference_ts)
     except Exception:
         logger.exception("Fatal error during bootstrap — exiting")
         sys.exit(1)
@@ -888,6 +952,7 @@ def run() -> None:
                 state_prod,
                 state_real_trade,
                 sink_cfg,
+                state_bt,
             )
 
             price_row: list | None = None
