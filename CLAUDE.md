@@ -31,6 +31,8 @@ docker compose up -d
 python scripts/audit_pnl.py --type prod --fix-window "START" "END"
 # Plain audit (no --fix): coverage/position/hour-sync checks
 python scripts/audit_pnl.py --type prod
+# Full bt 1-min rebuild [GLOBAL_START_TS, now), monthly chunks (pause live bt consumer first)
+caffeinate -dims python scripts/audit_pnl.py --rebuild-bt   # resumable via --rebuild-start
 ```
 
 ## Architecture
@@ -89,6 +91,7 @@ The live `pnl_consumer` services write the 1min PnL tables continuously; `audit_
 
 - `--type {prod|real_trade|bt}` selects the mode.
 - `--fix-window "START" "END"` does an idempotent delete + recompute of `[START, END)`.
+- `--rebuild-bt` rebuilds the entire bt 1-min table over `[GLOBAL_START_TS, now)` in calendar-month chunks (oldest→newest), forward-seeding each chunk from the prior chunk's tail; resumable via `--rebuild-start TS`. Pause the live bt consumer first (it does not auto-pause). Run under `caffeinate`.
 - Without `--fix`, it runs read-only audit checks (coverage / position / hour-sync).
 
 ### PnL Recompute Algorithm (`--fix-window`)
@@ -133,10 +136,11 @@ All three modes share the same formula and anchor-chaining loop. Differences are
 - Anchor seed: always from previous day's tail in `strategy_pnl_1min_prod_v2` via `fetch_anchors()`. Cold-start (zero anchor) only on a strategy's very first bar.
 - Output columns: `INSERT_COLUMNS` (16 cols, ts at index 7, updated_at at index 14, strategy_instance_id at index 15).
 
-**Backtest** (`source_label="backtest"`, `compute_bt_pnl` / `compute_bt_live_cpnl`):
-- PnL/position source: `strategy_cum_pnl_bt_v2` (anchor-reset). Per native-timeframe bar `cum_pnl_first` / `pos_first` are authoritative; each minute is recomputed fresh from the most-recent cum-table row with `ts <= minute` — no minute-to-minute chaining: `cpnl(m) = cum_pnl_first + pos_first * (price(m) - price(anchor.ts)) / price(anchor.ts)`. Batch fetch: `fetch_bt_anchors`; live: `fetch_bt_anchors_for_candle`.
+**Backtest** (`source_label="backtest"`, `compute_bt_pnl`):
+- PnL chains minute-to-minute exactly like prod: `cpnl(m) = cpnl(m-1) + pos(m) * (price(m) - price(m-1)) / price(m-1)`. Position source: `strategy_cum_pnl_bt_v2` — `pos_first` of the most-recent cum-table bar with `ts <= minute`, held flat across the bar. Batch fetch: `fetch_bt_anchors`; live: `fetch_bt_anchors_for_candle`.
+- Anchor seed: the previous minute's row in `strategy_pnl_1min_bt_v2` (batch: `fetch_seed_anchor("bt", …)`; live: `_bootstrap_bt_state` reads the table tail). `cum_pnl_first` from the cum table seeds cpnl **only** on a strategy's first-ever minute (cold start, via a `price=0` hold) — never re-anchored after, so bar boundaries do **not** snap back to `cum_pnl_first`.
 - Benchmark source: `strategy_output_history_bt_v2` (`argMin(row_json,'benchmark')` per bar) — the **only** remaining use of that table for BT. Batch: `fetch_bt_benchmarks`; live: the `bench_sql` lookup in `fetch_bt_anchors_for_candle`. The benchmark is strategy-specific (not the underlying buy-and-hold) and is not price-derivable.
-- `final_signal` is `0.0` for BT (not sourced). Output columns: same `INSERT_COLUMNS` (16 cols).
+- `final_signal` is `0.0` for BT (not sourced). Output columns: same `INSERT_COLUMNS` (16 cols). Full historical rebuild: `audit_pnl.py --rebuild-bt` (monthly chunks, forward-seeded).
 
 **Real-trade** (`source_label="real_trade"`, `compute_real_trade_pnl`):
 - Source: `strategy_output_history_v2`, ALL revisions per bar fetched and filtered.
@@ -150,7 +154,7 @@ All three modes share the same formula and anchor-chaining loop. Differences are
 
 **Critical invariants:**
 - `price` in all PnL output tables is always a 1-min open price — never the `price` field from `row_json`/`strategy_output_history_*`. **`scripts/audit_pnl.py`** reads price from `analytics.futures_price_1min`; **pnl_consumer and flink_pnl** read `candle.open` from the Redpanda `binance.price.ticks` topic directly (no ClickHouse lookup in the live loop)
-- `cumulative_pnl`: prod and real_trade recompute it from scratch via the anchor chain (the `cumulative_pnl` field in `row_json` is never used); BT instead sources authoritative per-bar `cum_pnl_first` from `strategy_cum_pnl_bt_v2` and resets to it each minute (no chaining, no `row_json` read)
+- `cumulative_pnl` is always recomputed from scratch via the anchor chain (the `cumulative_pnl` field in `row_json` is never used). For BT, the cum table's `cum_pnl_first` is consulted **only** as the cold-start seed for a strategy's first-ever minute — every subsequent minute chains from the previous `strategy_pnl_1min_bt_v2` row, not from the cum table
 - `traded` column in `strategy_pnl_1min_real_trade_v2` is always `False` — it was intended for future use and is never set; do not use it for any logic or reporting
 - `pnl_refresh_watermarks` table does not exist — the live refresh path is not active; no watermark table or watermark logic should be referenced
 
@@ -168,22 +172,28 @@ Each bar's position is held from its `closing_ts` (= `ts + tf_minutes`) until th
 
 `execution_ts` in `strategy_pnl_1min_real_trade_v2` is `toStartOfMinute(revision_ts + 59s)` — the minute the position took effect. It is NOT the bar's closing time. `closing_ts` is the bar closing time.
 
-Prod uses `argMin(row_json, revision_ts)` (first revision only) with `iter_compute_prod_pnl`. BT sources PnL/position from `strategy_cum_pnl_bt_v2` (`compute_bt_pnl` / `compute_bt_live_cpnl`, anchor-reset) and reads only the per-bar benchmark from `strategy_output_history_bt_v2` (`argMin(row_json,'benchmark')`).
+Prod uses `argMin(row_json, revision_ts)` (first revision only) with `iter_compute_prod_pnl`. BT minute-chains via `compute_bt_pnl` (batch) / `AnchorState` (live), sourcing per-bar `pos_first` + cold-start `cum_pnl_first` from `strategy_cum_pnl_bt_v2` and reading only the per-bar benchmark from `strategy_output_history_bt_v2` (`argMin(row_json,'benchmark')`).
 
 ### Streaming PnL Consumer Logic (pnl_consumer/)
 
 Full detail in `docs/pnl_consumer_logic.md`. Shared query library in `libs/computation/`. Key points:
 
-**Cold-start bootstrap (all three modes):**
+**Cold-start bootstrap (prod / real_trade):**
 1. `peek_reference_ts()` reads the Kafka committed offset → `reference_ts`
 2. `start_ts = reference_ts - 3 days`
 3. **Seed anchor**: per `strategy_instance_id`, load `(cumulative_pnl)` from the pnl table at latest minute `< start_ts`, `price` from `futures_price_1min` at that same minute, `position` from `strategy_output_history_*`
 4. **Walk `[start_ts, reference_ts)`**: replay stored rows, recomputing PnL to verify consistency; crash if deviation `> 0.2%`; seed `AnchorState` from final walked values
 
-**Live loop — prod and bt:**
-- Re-query `strategy_output_history_v2` / `_bt_v2` every candle; latest bar whose `closing_ts <= candle_ts`, first revision only (`argMin`)
+**Cold-start bootstrap (bt)** — `_bootstrap_bt_state`, simpler: seed `(cumulative_pnl, price)` per strategy from the `strategy_pnl_1min_bt_v2` tail before `reference_ts`. No history-shaped position seed and no walk-verify (the cum table is authoritative); position is supplied per-candle from the cum table. Brand-new strategies lazy-seed `cum_pnl_first` (price=0 hold) on first appearance.
+
+**Live loop — prod:**
+- Re-query `strategy_output_history_v2` every candle; latest bar whose `closing_ts <= candle_ts`, first revision only (`argMin`)
 - Dedup: `(strategy_instance_id, bar_ts)` seen-set populated during walk, persists into live loop
 - Lazy-seed: brand-new strategies seeded on first appearance
+
+**Live loop — bt:**
+- Re-query `strategy_cum_pnl_bt_v2` every candle (`fetch_bt_anchors_for_candle`); active bar = most-recent cum row with `ts <= candle_ts`. Chain `cpnl` via `AnchorState` using that bar's `pos_first`; benchmark from `strategy_output_history_bt_v2`; `final_signal = 0.0`.
+- Lazy-seed: brand-new strategies seeded from `cum_pnl_first` (price=0 hold) on first appearance. Strategies absent from a candle's lookup carry forward at the last position.
 
 **Live loop — real_trade:**
 - Re-query `strategy_output_history_v2` every candle; latest revision whose `revision_ts <= candle_ts` per `strategy_instance_id` (no `closing_ts` gate)
@@ -192,7 +202,7 @@ Full detail in `docs/pnl_consumer_logic.md`. Shared query library in `libs/compu
 - Bootstrap walk resolves position as "latest revision with `revision_ts <= row.ts`" (same guard logic)
 
 **Critical data-source rules:**
-- `position` always from `strategy_output_history_*` — never from the PnL table
+- `position` for prod/real_trade always from `strategy_output_history_*` — never from the PnL table. **BT is the exception**: its position (`pos_first`) comes from `strategy_cum_pnl_bt_v2`, also never from the PnL table.
 - `price` always from `futures_price_1min` (bootstrap/walk) or Redpanda candle `open` (live) — never from the PnL table's `price` column
 - All bars arrive late — queries use `ts <= cutoff`, not `revision_ts <= cutoff`
 

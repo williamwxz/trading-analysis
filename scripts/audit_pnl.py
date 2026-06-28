@@ -3,9 +3,10 @@
 Audits the three pnl_1min / pnl_1hour table families for missing strategies,
 coverage gaps, position errors, and 1h↔1min drift; optionally repairs them.
 
-Prod / real_trade: fix forward from each strategy's failure_ts (cumulative_pnl
-chains forward, so any earlier error poisons the tail). BT: fix window-local
-(cumulative_pnl comes from row_json, not from a chained anchor).
+All three modes chain cumulative_pnl forward, so any earlier error poisons the
+tail. Prod / real_trade fix forward from each strategy's failure_ts. BT seeds the
+chain from the target row before the window (pos_first from strategy_cum_pnl_bt_v2,
+cold-start cum_pnl_first); --rebuild-bt does a full monthly-chunked rebuild.
 
 Persists one JSONL record per run to ./audit_reports/history.jsonl so a later
 run can summarize prior state via --show-history.
