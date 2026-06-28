@@ -971,46 +971,73 @@ def _fix_bt_underlying(
     prices = prices_map.pop(underlying, {})
 
     all_rows: list[list] = []
+
+    # Group strategies by their recompute window. The rebuild / --fix-window path
+    # collapses to a single window per underlying, so the previous per-strategy
+    # DELETE + seed-fetch (hundreds of mutations / queries against a billion-row
+    # table — the dominant cost) become ONE batched DELETE + ONE bulk seed query
+    # per window. Detection fixes with differing windows still group correctly.
+    by_window: dict[tuple[str, str], list[StrategyFix]] = {}
     for f in fixes:
-        window_start = f.failure_ts
-        window_end = f.window_end if f.window_end is not None else now_ts
-        ws_str = window_start.strftime("%Y-%m-%d %H:%M:%S")
-        we_str = (window_end + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
-        anchors = anchors_by_stn.get(f.strategy_table_name, [])
-        if not anchors:
+        if not anchors_by_stn.get(f.strategy_table_name):
             log.warning(
                 "[bt/%s] %s: no cum-pnl anchors in window — skipping",
                 underlying,
                 f.strategy_table_name,
             )
             continue
+        window_end = f.window_end if f.window_end is not None else now_ts
+        ws_str = f.failure_ts.strftime("%Y-%m-%d %H:%M:%S")
+        we_str = (window_end + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+        by_window.setdefault((ws_str, we_str), []).append(f)
 
-        # Warm-start seed: last target row strictly before the window (survives the
-        # DELETE below, which only removes ts >= window_start). Absent / price==0 ⇒
-        # compute_bt_pnl cold-starts from the first bar's cum_pnl_first.
-        seed = fetch_seed_anchor("bt", f.strategy_table_name, window_start, client)
+    for (ws_str, we_str), group in by_window.items():
+        in_list = ", ".join(f"'{_q(f.strategy_table_name)}'" for f in group)
+
+        # Bulk warm-start seeds: latest target row strictly before the window per
+        # strategy (survives the DELETE, which only removes ts >= ws). Strategies
+        # absent here / with price==0 cold-start from cum_pnl_first in compute_bt_pnl.
         seed_anchors: dict[str, tuple[float, float]] = {}
-        if seed["price"] != 0.0:
-            seed_anchors[f.strategy_table_name] = (seed["pnl"], seed["price"])
+        seed_sql = (
+            f"SELECT strategy_table_name, "
+            f"argMax(cumulative_pnl, (ts, updated_at)), "
+            f"argMax(price, (ts, updated_at)) "
+            f"FROM analytics.{tgt} "
+            f"WHERE strategy_table_name IN ({in_list}) "
+            f"  AND ts <  toDateTime('{ws_str}') "
+            f"  AND ts >= toDateTime('{ws_str}') - INTERVAL 7 DAY "
+            f"GROUP BY strategy_table_name"
+        )
+        for stn, pnl, price in client.query(seed_sql).result_rows:
+            price = float(price or 0.0)
+            if price != 0.0:
+                seed_anchors[str(stn)] = (float(pnl or 0.0), price)
 
+        # One batched DELETE covering every strategy that shares this window —
+        # the strategy_table_name IN (...) prunes on the (strategy_table_name, ts)
+        # primary key, so it is one mutation instead of len(group) of them.
         if not dry_run:
             client.command(
                 f"DELETE FROM analytics.{tgt} "
-                f"WHERE strategy_table_name = '{_q(f.strategy_table_name)}' "
+                f"WHERE strategy_table_name IN ({in_list}) "
                 f"  AND ts >= toDateTime('{ws_str}') "
                 f"  AND ts <  toDateTime('{we_str}')"
             )
 
-        rows = compute_bt_pnl(anchors, seed_anchors, prices, benchmarks, ws_str, we_str)
-        f.rows_written = len(rows)
-        f.fix_applied = not dry_run
-        all_rows.extend(rows)
-        log.info(
-            "[bt/%s] %s: %d rows",
-            underlying,
-            f.strategy_table_name,
-            f.rows_written,
-        )
+        for f in group:
+            anchors = anchors_by_stn.get(f.strategy_table_name, [])
+            rows = compute_bt_pnl(
+                anchors, seed_anchors, prices, benchmarks, ws_str, we_str
+            )
+            f.rows_written = len(rows)
+            f.fix_applied = not dry_run
+            all_rows.extend(rows)
+            log.info(
+                "[bt/%s] %s: %d rows",
+                underlying,
+                f.strategy_table_name,
+                f.rows_written,
+            )
 
     if not dry_run and all_rows:
         _prepare_rows_for_insert(all_rows)
