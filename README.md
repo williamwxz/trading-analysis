@@ -22,7 +22,7 @@ A simplified, automated trading analytics pipeline: **Binance API → streaming 
 - `services/streaming/`: Binance WebSocket → Kafka/Redpanda producer.
 - `services/pnl_consumer/`: Kafka consumer → real-time PnL → ClickHouse (per-mode ECS services).
 - `services/backfill_prices/`: Daily Lambda for `futures_price_1min` historical gap-fill.
-- `libs/computation/`: Shared PnL computation library (imported by consumer, flink_pnl, and audit_pnl.py).
+- `libs/computation/`: Shared PnL computation library (imported by the consumer and audit_pnl.py).
 - `scripts/audit_pnl.py`: Batch PnL recompute/repair and audit.
 - `infra/`: Terraform modules and Grafana provisioning.
 - `infra/schemas/`: Optimized ClickHouse Cloud schema.

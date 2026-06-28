@@ -54,13 +54,11 @@ testpaths = [
     "libs/tests",
     "services/streaming/tests",
     "services/pnl_consumer/tests",
-    "services/flink_pnl/tests",
 ]
 pythonpath = [
     ".",
     "services/streaming",
     "services/pnl_consumer",
-    "services/flink_pnl",
 ]
 markers = [
     "unit: Unit tests (fast, no external dependencies)",

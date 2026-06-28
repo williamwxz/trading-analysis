@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 
 from libs.computation.pnl_formula import (
     INSERT_COLUMNS,
+    BtAnchor,
+    compute_bt_pnl,
     compute_prod_pnl,
     compute_real_trade_pnl,
     extract_row_anchor,
@@ -931,3 +933,102 @@ class TestExtractRowAnchor:
         rows2 = compute_prod_pnl([bar2], {"S1": (pnl, price, pos)}, prices2)
         for row in rows2:
             assert row[_CPNL] == pytest.approx(pnl)
+
+
+@pytest.mark.unit
+class TestBtPnlChaining:
+    STN = "sid=1|sno=1|u=SOL|name=mom|inst=i1"
+
+    def _anchor(self, ts, cum_pnl_first, pos_first, tf="5m", w=1.0):
+        return BtAnchor(
+            strategy_table_name=self.STN,
+            config_timeframe=tf,
+            ts=ts,
+            cum_pnl_first=cum_pnl_first,
+            pos_first=pos_first,
+            weighting=w,
+        )
+
+    def test_cold_start_first_minute_holds_cum_pnl_first(self):
+        anchors = [self._anchor("2026-03-01 00:00:00", cum_pnl_first=0.30, pos_first=2.0)]
+        prices = {"2026-03-01 00:00:00": 100.0, "2026-03-01 00:01:00": 101.0}
+        rows = compute_bt_pnl(
+            anchors, {}, prices, {}, "2026-03-01 00:00:00", "2026-03-01 00:02:00"
+        )
+        assert [r[_TS] for r in rows] == ["2026-03-01 00:00:00", "2026-03-01 00:01:00"]
+        # m0 holds cum_pnl_first (price reference established this minute)
+        assert rows[0][_CPNL] == pytest.approx(0.30)
+        assert rows[0][_POS] == 2.0 and rows[0][_PRC] == 100.0
+        # m1 chains: 0.30 + 2.0*(101-100)/100 = 0.32
+        assert rows[1][_CPNL] == pytest.approx(0.32)
+
+    def test_warm_start_chains_from_seed_ignoring_cum_pnl_first(self):
+        # cum_pnl_first=999 must be ignored when a seed anchor exists
+        anchors = [self._anchor("2026-03-01 00:00:00", cum_pnl_first=999.0, pos_first=2.0)]
+        prices = {"2026-03-01 00:00:00": 100.0, "2026-03-01 00:01:00": 101.0}
+        seed = {self.STN: (0.50, 100.0)}  # (cpnl_prev, price_prev)
+        rows = compute_bt_pnl(
+            anchors, seed, prices, {}, "2026-03-01 00:00:00", "2026-03-01 00:02:00"
+        )
+        # m0: 0.50 + 2.0*(100-100)/100 = 0.50
+        assert rows[0][_CPNL] == pytest.approx(0.50)
+        # m1: 0.50 + 2.0*(101-100)/100 = 0.52
+        assert rows[1][_CPNL] == pytest.approx(0.52)
+
+    def test_position_switches_at_bar_boundary(self):
+        anchors = [
+            self._anchor("2026-03-01 00:00:00", cum_pnl_first=0.0, pos_first=1.0),
+            self._anchor("2026-03-01 00:02:00", cum_pnl_first=777.0, pos_first=3.0),
+        ]
+        prices = {
+            "2026-03-01 00:00:00": 100.0,
+            "2026-03-01 00:01:00": 110.0,
+            "2026-03-01 00:02:00": 110.0,
+            "2026-03-01 00:03:00": 121.0,
+        }
+        rows = compute_bt_pnl(
+            anchors, {}, prices, {}, "2026-03-01 00:00:00", "2026-03-01 00:04:00"
+        )
+        # m0 cold-start hold = 0.0 ; m1: 0 + 1*(110-100)/100 = 0.10
+        assert rows[1][_CPNL] == pytest.approx(0.10)
+        # m2 uses bar2 pos=3 (cum_pnl_first 777 ignored — chaining): 0.10 + 3*(110-110)/110
+        assert rows[2][_CPNL] == pytest.approx(0.10) and rows[2][_POS] == 3.0
+        # m3: 0.10 + 3*(121-110)/110 = 0.40
+        assert rows[3][_CPNL] == pytest.approx(0.40)
+
+    def test_missing_price_holds_and_emits_carried_price(self):
+        anchors = [self._anchor("2026-03-01 00:00:00", cum_pnl_first=0.0, pos_first=1.0)]
+        prices = {"2026-03-01 00:00:00": 100.0, "2026-03-01 00:02:00": 105.0}
+        rows = compute_bt_pnl(
+            anchors, {}, prices, {}, "2026-03-01 00:00:00", "2026-03-01 00:03:00"
+        )
+        # 00:01 emitted with carried price 100, cpnl unchanged 0.0
+        assert rows[1][_TS] == "2026-03-01 00:01:00"
+        assert rows[1][_PRC] == 100.0 and rows[1][_CPNL] == pytest.approx(0.0)
+        # 00:02: 0 + 1*(105-100)/100 = 0.05
+        assert rows[2][_CPNL] == pytest.approx(0.05)
+
+    def test_idempotent_recompute(self):
+        anchors = [self._anchor("2026-03-01 00:00:00", cum_pnl_first=0.10, pos_first=2.0)]
+        prices = {f"2026-03-01 00:0{i}:00": 100.0 + i for i in range(4)}
+        args = (anchors, {}, prices, {}, "2026-03-01 00:00:00", "2026-03-01 00:04:00")
+        first = compute_bt_pnl(*args)
+        second = compute_bt_pnl(*args)
+
+        def _strip(rows):  # drop updated_at (index 14, wall-clock) before compare
+            return [r[:14] + r[15:] for r in rows]
+
+        assert _strip(first) == _strip(second)
+
+    def test_benchmark_and_identity_columns(self):
+        anchors = [self._anchor("2026-03-01 00:00:00", cum_pnl_first=0.0, pos_first=1.0)]
+        prices = {"2026-03-01 00:00:00": 100.0}
+        benchmarks = {(self.STN, "2026-03-01 00:00:00"): 0.07}
+        rows = compute_bt_pnl(
+            anchors, {}, prices, benchmarks, "2026-03-01 00:00:00", "2026-03-01 00:01:00"
+        )
+        r = rows[0]
+        assert r[_STN] == self.STN and r[_SID] == 1 and r[_SNAME] == "mom"
+        assert r[_UND] == "SOL" and r[_TF] == "5m" and r[_SRC] == "backtest"
+        assert r[_VER] == "v2" and r[_BENCH] == pytest.approx(0.07)
+        assert r[_SIG] == 0.0 and r[_SIID] == "i1"

@@ -67,7 +67,7 @@ jobs:
 
       - name: Run tests
         run: |
-          pytest libs/tests/ services/streaming/tests/ services/pnl_consumer/tests/ services/flink_pnl/tests/ -v --tb=short -m "not integration and not streaming_integration"
+          pytest libs/tests/ services/streaming/tests/ services/pnl_consumer/tests/ -v --tb=short -m "not integration and not streaming_integration"
 
   integration-test:
     runs-on: ubuntu-latest

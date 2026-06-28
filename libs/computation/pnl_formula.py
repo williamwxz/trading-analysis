@@ -11,11 +11,10 @@ Formula:
 
 from __future__ import annotations
 
-from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Dict, Generator, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, Generator, List, Tuple, Union
 
 if TYPE_CHECKING:
     from libs.computation.anchor_state import AnchorRecord
@@ -262,69 +261,47 @@ def compute_prod_pnl(
     return result
 
 
-def compute_bt_live_cpnl(
-    cum_pnl_first: float,
-    pos_first: float,
-    current_price: float,
-    anchor_price: float,
-) -> float:
-    """Anchor-reset cumulative PnL for one minute.
-
-    cpnl = cum_pnl_first + pos_first * (current_price - anchor_price) / anchor_price
-    Holds cum_pnl_first when anchor_price is 0 (no reference price available).
-    """
-    if anchor_price == 0.0:
-        return cum_pnl_first
-    return cum_pnl_first + pos_first * (current_price - anchor_price) / anchor_price
-
-
-def _resolve_anchor_price(
-    prices: Dict[str, float],
-    price_keys_sorted: List[str],
-    ts_str: str,
-) -> Optional[float]:
-    """Price at ts_str, else the most-recent price at-or-before ts_str, else None."""
-    exact = prices.get(ts_str)
-    if exact is not None:
-        return exact
-    i = bisect_right(price_keys_sorted, ts_str)
-    if i == 0:
-        return None
-    return prices[price_keys_sorted[i - 1]]
-
-
 def compute_bt_pnl(
     anchors: List[BtAnchor],
+    seed_anchors: Dict[str, Tuple[float, float]],
     prices: Dict[str, float],
     benchmarks: Dict[Tuple[str, str], float],
     window_start: str,
     window_end: str,
-    price_keys: Optional[List[str]] = None,
 ) -> List[list]:
-    """Expand cum-table anchors to 1-min rows over [window_start, window_end).
+    """Minute-chain cum-table bars to 1-min rows over [window_start, window_end).
 
-    For each strategy the active anchor at minute m is the most-recent anchor with
-    ts <= m. Each minute is reset from that anchor (no minute-to-minute chaining):
-        cpnl(m) = anchor.cum_pnl_first
-                + anchor.pos_first * (price(m) - price(anchor.ts)) / price(anchor.ts)
-    position, weighting, and benchmark are constant across the bar window.
-    benchmarks maps (strategy_table_name, anchor.ts) -> benchmark (default 0.0).
-    price_keys: pre-sorted prices.keys() — pass to avoid re-sorting per call.
+    The active bar at minute m is the most-recent BtAnchor with ts <= m; its
+    pos_first is the position held that minute. PnL chains minute to minute:
+        cpnl(m) = cpnl(m-1) + pos(m) * (price(m) - price(m-1)) / price(m-1)
+
+    seed_anchors[stn] = (cpnl_prev, price_prev) is the target-table row just before
+    window_start (warm start). A strategy absent from seed_anchors (or with
+    price_prev == 0) cold-starts: cpnl seeds from the first active bar's
+    cum_pnl_first and the first emitted minute holds that value, establishing the
+    price reference. Missing price at minute m reuses the carried price (cpnl
+    unchanged) — identical to iter_compute_prod_pnl.
     """
     by_strategy: Dict[str, List[BtAnchor]] = defaultdict(list)
     for a in anchors:
         by_strategy[a.strategy_table_name].append(a)
 
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    end_dt = _parse_ts(window_end)
     start_dt = _parse_ts(window_start)
-    keys = price_keys if price_keys is not None else sorted(prices.keys())
+    end_dt = _parse_ts(window_end)
     output: List[list] = []
 
     for stn, strat_anchors in by_strategy.items():
         strat_anchors.sort(key=lambda a: a.ts)
         ts_list = [a.ts for a in strat_anchors]
         strategy_id, strategy_name, underlying, siid = parse_strategy_table_name(stn)
+
+        seed = seed_anchors.get(stn)
+        if seed is not None and seed[1] != 0.0:
+            anchor_pnl, anchor_price = seed
+        else:
+            anchor_pnl = strat_anchors[0].cum_pnl_first
+            anchor_price = 0.0
 
         first_anchor_dt = _parse_ts(strat_anchors[0].ts)
         m = max(start_dt, first_anchor_dt).replace(second=0, microsecond=0)
@@ -333,17 +310,22 @@ def compute_bt_pnl(
             m_str = m.strftime("%Y-%m-%d %H:%M:%S")
             while idx + 1 < len(ts_list) and ts_list[idx + 1] <= m_str:
                 idx += 1
-            price_m = prices.get(m_str)
-            if price_m is None:
+            live_price = (
+                prices.get(m_str, anchor_price)
+                if anchor_price != 0.0
+                else prices.get(m_str)
+            )
+            if live_price is None:
                 m += timedelta(minutes=1)
                 continue
+            if anchor_price == 0.0:
+                anchor_price = live_price
             anchor = strat_anchors[idx]
-            ref_price = _resolve_anchor_price(prices, keys, anchor.ts)
-            cpnl = compute_bt_live_cpnl(
-                anchor.cum_pnl_first,
-                anchor.pos_first,
-                price_m,
-                ref_price if ref_price is not None else 0.0,
+            position = anchor.pos_first
+            cpnl = (
+                anchor_pnl + position * (live_price - anchor_price) / anchor_price
+                if anchor_price != 0.0
+                else anchor_pnl
             )
             output.append([
                 stn,
@@ -356,13 +338,15 @@ def compute_bt_pnl(
                 m_str,
                 cpnl,
                 benchmarks.get((stn, anchor.ts), 0.0),
-                anchor.pos_first,
-                price_m,
+                position,
+                live_price,
                 0.0,
                 anchor.weighting,
                 now_str,
                 siid,
             ])
+            anchor_pnl = cpnl
+            anchor_price = live_price
             m += timedelta(minutes=1)
 
     return output
