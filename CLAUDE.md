@@ -46,8 +46,6 @@ Independent ECS Fargate services, each with its own Dockerfile:
 | `trading-analysis-ws-consumer` | `services/streaming/` | Binance WebSocket → Kafka/Redpanda topic `binance.price.ticks` |
 | `trading-analysis-pnl-consumer-{prod,bt,real-trade,price}` | `services/pnl_consumer/` | Kafka consumer → real-time PnL → ClickHouse (one ECS service per mode; the `price` sink writes `futures_price_1min` from `candle.open`) |
 
-A `services/flink_pnl/` service also exists in-tree (shares `libs/computation/`).
-
 Batch PnL recompute/repair is the standalone script `scripts/audit_pnl.py` (not a service). Market-data historical gap-fill (`futures_price_1min`) is `services/backfill_prices/` — a daily AWS Lambda using ccxt.
 
 Adding new instruments requires updating `INSTRUMENTS` in `services/streaming/streaming/binance_ws_consumer.py` and in the `backfill_prices` Lambda.
@@ -113,7 +111,7 @@ PnL formula: `cumulative_pnl = anchor_pnl + position * (live_price - anchor_pric
 
 ### Shared Computation Library (`libs/computation/`)
 
-All PnL logic lives here — `pnl_consumer` (streaming), `flink_pnl`, and `scripts/audit_pnl.py` (batch) all import from this library. No service contains computation code directly.
+All PnL logic lives here — `pnl_consumer` (streaming) and `scripts/audit_pnl.py` (batch) both import from this library. No service contains computation code directly.
 
 | Module | Purpose |
 |--------|---------|
@@ -153,7 +151,7 @@ All three modes share the same formula and anchor-chaining loop. Differences are
 **Price fallback** (all modes): if `prices[ts_str]` is missing and an anchor price exists, the last known anchor price is reused. If no anchor price exists yet, the minute is skipped until the first price arrives.
 
 **Critical invariants:**
-- `price` in all PnL output tables is always a 1-min open price — never the `price` field from `row_json`/`strategy_output_history_*`. **`scripts/audit_pnl.py`** reads price from `analytics.futures_price_1min`; **pnl_consumer and flink_pnl** read `candle.open` from the Redpanda `binance.price.ticks` topic directly (no ClickHouse lookup in the live loop)
+- `price` in all PnL output tables is always a 1-min open price — never the `price` field from `row_json`/`strategy_output_history_*`. **`scripts/audit_pnl.py`** reads price from `analytics.futures_price_1min`; **pnl_consumer** reads `candle.open` from the Redpanda `binance.price.ticks` topic directly (no ClickHouse lookup in the live loop)
 - `cumulative_pnl` is always recomputed from scratch via the anchor chain (the `cumulative_pnl` field in `row_json` is never used). For BT, the cum table's `cum_pnl_first` is consulted **only** as the cold-start seed for a strategy's first-ever minute — every subsequent minute chains from the previous `strategy_pnl_1min_bt_v2` row, not from the cum table
 - `traded` column in `strategy_pnl_1min_real_trade_v2` is always `False` — it was intended for future use and is never set; do not use it for any logic or reporting
 - `pnl_refresh_watermarks` table does not exist — the live refresh path is not active; no watermark table or watermark logic should be referenced
