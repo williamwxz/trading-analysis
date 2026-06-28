@@ -41,6 +41,7 @@ def _make_fn(sink_label: str = "bt") -> PnlProcessFunction:
     fn._cfg = MagicMock()
     fn._state_prod = {}
     fn._state_rt = {}
+    fn._state_bt = {}
     fn._sink = MagicMock()
     fn._sink_label = sink_label
     return fn
@@ -87,6 +88,7 @@ def test_process_element_calls_process_candle():
             fn._state_prod,
             fn._state_rt,
             fn._cfg,
+            fn._state_bt,
         )
 
 

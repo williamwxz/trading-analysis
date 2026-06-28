@@ -48,12 +48,17 @@ class PnlProcessFunction(ProcessFunction):
         else:
             self._state_rt = {}
 
+        # BT chains via state_bt. It is NOT warm-started from the pnl-table tail
+        # (build_state_from_bootstrap drops the metadata-less bt seeds); strategies
+        # lazy-seed from cum_pnl_first on first appearance instead.
+        self._state_bt: StateMap = {}
+
         self._sink = ClickHouseSinkFunction(cfg)
 
     def process_element(self, value: str, ctx: ProcessFunction.Context) -> None:
         candle = CandleEvent.from_dict(json.loads(value))
         rows, prod_fetched, bt_fetched, rt_fetched = process_candle(
-            candle, self._state_prod, self._state_rt, self._cfg
+            candle, self._state_prod, self._state_rt, self._cfg, self._state_bt
         )
         for row in rows:
             self._sink.invoke(row)

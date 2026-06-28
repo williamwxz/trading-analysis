@@ -2,7 +2,7 @@
 
 process_candle() is intentionally free of I/O side effects beyond the fetch_*
 calls — all state mutation happens on the in-memory StateMap dicts passed in
-by the caller (prod and real_trade only; BT is now stateless).
+by the caller (prod, real_trade, and bt; bt chains via state_bt).
 
 Output format: each element is a dict with a ``_sink`` key that routes the
 row to the appropriate ClickHouse table:
@@ -33,7 +33,6 @@ from libs.computation.candle_lookup import (
 from libs.computation.pnl_formula import (
     build_carry_forward_row,
     build_pnl_row,
-    compute_bt_live_cpnl,
 )
 
 
@@ -67,30 +66,90 @@ def _revision_to_dict(rev: StrategyRevision) -> dict[str, Any]:
     }
 
 
-def _build_bt_live_row(a: BtLiveAnchor, candle: CandleEvent, now: datetime) -> list:
-    """Stateless BT row from a resolved cum-table anchor (no StateMap)."""
-    cpnl = compute_bt_live_cpnl(
-        a.cum_pnl_first, a.pos_first, candle.open, a.anchor_price
-    )
-    return build_pnl_row(
-        a.strategy_table_name,
-        {
-            "strategy_id": a.strategy_id,
-            "strategy_name": a.strategy_name,
-            "underlying": a.underlying,
-            "config_timeframe": a.config_timeframe,
-            "weighting": a.weighting,
-            "strategy_instance_id": a.strategy_instance_id,
-            "final_signal": 0.0,
-            "bar_benchmark": a.benchmark,
-            "position": a.pos_first,
-        },
-        candle.open,
-        cpnl,
-        "backtest",
-        candle.ts,
-        now,
-    )
+def _bt_anchor_to_dict(a: BtLiveAnchor) -> dict[str, Any]:
+    """Convert a BtLiveAnchor to the dict shape expected by build_pnl_row."""
+    return {
+        "strategy_id": a.strategy_id,
+        "strategy_name": a.strategy_name,
+        "underlying": a.underlying,
+        "config_timeframe": a.config_timeframe,
+        "weighting": a.weighting,
+        "strategy_instance_id": a.strategy_instance_id,
+        "final_signal": 0.0,
+        "bar_benchmark": a.benchmark,
+        "position": a.pos_first,
+    }
+
+
+def _process_bt(
+    candle: CandleEvent,
+    underlying: str,
+    state_bt: StateMap,
+    anchors_by_stn: dict[str, BtLiveAnchor],
+    now: datetime,
+) -> list[dict[str, Any]]:
+    """Emit BT rows with minute-chaining via state_bt (mirrors _process_mode).
+
+    Position each minute is the active cum bar's pos_first. A brand-new strategy
+    lazy-seeds cum_pnl_first with price=0, so its first minute holds cum_pnl_first
+    and establishes the price reference; thereafter cpnl chains. Strategies in
+    state with no anchor this candle carry forward at the last position.
+    """
+    output: list[dict[str, Any]] = []
+    seen_stns: set[str] = set()
+    if underlying not in state_bt:
+        state_bt[underlying] = {}
+
+    for stn, a in anchors_by_stn.items():
+        seen_stns.add(stn)
+        if stn not in state_bt[underlying]:
+            # cold-start: seed cum_pnl_first with price=0 (first minute holds it)
+            state_bt[underlying][stn] = AnchorRecord(
+                pnl=a.cum_pnl_first, price=0.0, position=a.pos_first
+            )
+        meta = AnchorRecord(
+            strategy_id=a.strategy_id,
+            strategy_name=a.strategy_name,
+            underlying=a.underlying,
+            config_timeframe=a.config_timeframe,
+            weighting=a.weighting,
+            strategy_instance_id=a.strategy_instance_id,
+            final_signal=0.0,
+            benchmark=a.benchmark,
+        )
+        new_pnl, _ = _advance_anchor(
+            state_bt, underlying, stn, candle.open, a.pos_first,
+            datetime.min, datetime.min, meta,
+        )
+        row = build_pnl_row(
+            stn, _bt_anchor_to_dict(a), candle.open, new_pnl, "backtest", candle.ts, now
+        )
+        output.append({"_sink": "pnl_bt", "_row": row})
+
+    # Carry-forward: bt strategies in state with no anchor this candle.
+    for stn, rec in state_bt.get(underlying, {}).items():
+        if stn in seen_stns or not rec.strategy_instance_id:
+            continue
+        meta = AnchorRecord(
+            strategy_id=rec.strategy_id,
+            strategy_name=rec.strategy_name,
+            underlying=rec.underlying,
+            config_timeframe=rec.config_timeframe,
+            weighting=rec.weighting,
+            strategy_instance_id=rec.strategy_instance_id,
+            final_signal=rec.final_signal,
+            benchmark=rec.benchmark,
+        )
+        new_pnl, updated_rec = _advance_anchor(
+            state_bt, underlying, stn, candle.open, rec.position, rec.bar_ts,
+            rec.revision_ts, meta,
+        )
+        row = build_carry_forward_row(
+            stn, updated_rec, candle.open, new_pnl, "backtest", candle.ts, now
+        )
+        output.append({"_sink": "pnl_bt", "_row": row})
+
+    return output
 
 
 def _advance_anchor(
@@ -321,6 +380,7 @@ def process_candle(
     state_prod: StateMap,
     state_rt: StateMap,
     cfg: SinkConfig,
+    state_bt: StateMap | None = None,
 ) -> tuple[list[dict[str, Any]], int, int, int]:
     """Process one closed candle and return all rows to be sunk.
 
@@ -328,9 +388,12 @@ def process_candle(
     fetched counts are the number of strategy instances returned by each
     candle lookup query — used by the caller to validate flush completeness.
 
-    BT is stateless: no StateMap is required; anchors are fetched fresh from
-    strategy_cum_pnl_bt_v2 on every candle.
+    BT chains minute-to-minute via state_bt (optional trailing arg; a fresh map
+    is used if omitted): position comes from the active strategy_cum_pnl_bt_v2
+    bar's pos_first and cpnl chains from the prior minute.
     """
+    if state_bt is None:
+        state_bt = {}
     if not (cfg.prod or cfg.bt or cfg.real_trade):
         return [], 0, 0, 0
 
@@ -359,14 +422,16 @@ def process_candle(
             )
         )
 
-    # --- Backtest sink (stateless cum-pnl anchors) ---
+    # --- Backtest sink (minute-chaining via state_bt) ---
     if cfg.bt:
         bt_anchors = fetch_bt_anchors_for_candle(candle.instrument, candle.ts)
         bt_fetched = len(bt_anchors)
-        for a in bt_anchors:
-            output.append(
-                {"_sink": "pnl_bt", "_row": _build_bt_live_row(a, candle, now)}
-            )
+        anchors_by_stn: dict[str, BtLiveAnchor] = {
+            a.strategy_table_name: a for a in bt_anchors
+        }
+        output.extend(
+            _process_bt(candle, underlying, state_bt, anchors_by_stn, now)
+        )
 
     # --- Real-trade sink ---
     if cfg.real_trade:

@@ -247,21 +247,26 @@ def test_bt_fetched_count_matches_anchors_returned():
 
 
 @pytest.mark.unit
-def test_bt_stateless_cpnl_when_anchor_price_equals_candle_open():
-    """When anchor_price == candle.open, cpnl == cum_pnl_first (zero price move)."""
+def test_bt_chains_across_candles():
+    """Stateful BT: candle 1 lazy-seeds and holds cum_pnl_first; candle 2 chains."""
     cfg = SinkConfig(price=False, prod=False, bt=True, real_trade=False)
-    candle = _candle(open_price=50000.0)
-    anchor = _bt_anchor(cum_pnl_first=0.05, pos_first=1.0, anchor_price=50000.0)
+    state_bt: dict = {}
+    anchor = _bt_anchor(cum_pnl_first=0.05, pos_first=2.0)
 
     with patch(
         "flink_pnl.process_candle.fetch_bt_anchors_for_candle", return_value=[anchor]
     ):
-        rows, _, bt_f, _ = process_candle(candle, {}, {}, cfg)
+        rows1, _, _, _ = process_candle(
+            _candle(open_price=100.0), {}, {}, cfg, state_bt
+        )
+        rows2, _, _, _ = process_candle(
+            _candle(open_price=110.0), {}, {}, cfg, state_bt
+        )
 
-    assert bt_f == 1
-    pnl_rows = [r for r in rows if r["_sink"] == "pnl_bt"]
-    assert len(pnl_rows) == 1
-    row_data = pnl_rows[0]["_row"]
-    # cpnl = cum_pnl_first + pos * (50000 - 50000) / 50000 == cum_pnl_first
-    assert abs(row_data[8] - 0.05) < 1e-9  # cumulative_pnl at index 8
-    assert row_data[11] == 50000.0  # price at index 11
+    r1 = [r for r in rows1 if r["_sink"] == "pnl_bt"][0]["_row"]
+    r2 = [r for r in rows2 if r["_sink"] == "pnl_bt"][0]["_row"]
+    # candle 1 holds cum_pnl_first (cold-start, price reference established)
+    assert r1[8] == pytest.approx(0.05)
+    # candle 2 chains: 0.05 + 2.0*(110-100)/100 = 0.25
+    assert r2[8] == pytest.approx(0.05 + 2.0 * (110 - 100) / 100)
+    assert r2[10] == 2.0  # position = pos_first
