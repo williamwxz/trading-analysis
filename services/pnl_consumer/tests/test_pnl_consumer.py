@@ -423,7 +423,6 @@ def test_process_candle_bt_chains_from_state():
             cum_pnl_first=0.30,
             pos_first=2.0,
             anchor_ts=_CANDLE_TS.strftime("%Y-%m-%d %H:%M:%S"),
-            anchor_price=0.0,  # unused by the stateful path
             benchmark=0.0,
         )
 

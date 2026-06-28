@@ -184,7 +184,12 @@ GROUP BY
 
 @dataclass
 class BtLiveAnchor:
-    """Resolved BT anchor for one strategy at a live candle (stateless compute)."""
+    """Resolved BT anchor for one strategy at a live candle.
+
+    The consumer chains cpnl via AnchorState using pos_first (price comes from the
+    live candle.open, not from here), so no anchor price is resolved. cum_pnl_first
+    is the cold-start seed for a brand-new strategy's first minute.
+    """
 
     strategy_table_name: str
     strategy_instance_id: str
@@ -196,7 +201,6 @@ class BtLiveAnchor:
     cum_pnl_first: float
     pos_first: float
     anchor_ts: str
-    anchor_price: float
     benchmark: float
 
 
@@ -204,13 +208,12 @@ def fetch_bt_anchors_for_candle(
     instrument: str,
     candle_ts: datetime,
 ) -> list[BtLiveAnchor]:
-    """Latest cum-table anchor per strategy with ts <= candle_ts, fully resolved.
+    """Latest cum-table anchor per strategy with ts <= candle_ts.
 
-    PnL/position come from strategy_cum_pnl_bt_v2 (cum_pnl_first, pos_first) and
-    anchor_price from futures_price_1min at anchor_ts. The benchmark is the ONLY value
-    still read from strategy_output_history_bt_v2 in the BT path — it is
-    strategy-specific and not price-derivable. Stateless: the consumer computes
-    cpnl = compute_bt_live_cpnl(cum_pnl_first, pos_first, candle.open, anchor_price).
+    pos_first / cum_pnl_first come from strategy_cum_pnl_bt_v2; the consumer chains
+    cpnl via AnchorState using candle.open (no anchor price is resolved here). The
+    benchmark is the ONLY value still read from strategy_output_history_bt_v2 in the
+    BT path — strategy-specific and not price-derivable.
     """
     underlying = instrument.removesuffix("USDT")
     ts_str = candle_ts.strftime("%Y-%m-%d %H:%M:%S")
@@ -236,14 +239,6 @@ LIMIT 1 BY strategy_table_name
 
     anchor_ts_set = {str(r["anchor_ts"]) for r in anchor_rows}
     ts_in = ", ".join(f"'{t}'" for t in sorted(anchor_ts_set))
-
-    price_sql = f"""\
-SELECT toString(ts) AS ts, open
-FROM analytics.futures_price_1min
-WHERE exchange = 'binance' AND instrument = '{instrument}'
-  AND ts IN ({ts_in})
-"""
-    price_map = {r["ts"]: float(r["open"]) for r in query_dicts(price_sql)}
 
     # Benchmark — the only remaining read of strategy_output_history_bt_v2 in BT.
     # Per-strategy series from row_json (NOT the underlying buy-and-hold), used by
@@ -284,7 +279,6 @@ SETTINGS max_memory_usage = {_BT_BENCH_MAX_MEMORY},
                 cum_pnl_first=float(r["cum_pnl_first"]),
                 pos_first=float(r["pos_first"]),
                 anchor_ts=anchor_ts,
-                anchor_price=price_map.get(anchor_ts, 0.0),
                 benchmark=bench_map.get((stn, anchor_ts), 0.0),
             )
         )

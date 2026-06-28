@@ -261,22 +261,6 @@ def compute_prod_pnl(
     return result
 
 
-def compute_bt_live_cpnl(
-    cum_pnl_first: float,
-    pos_first: float,
-    current_price: float,
-    anchor_price: float,
-) -> float:
-    """Anchor-reset cumulative PnL for one minute.
-
-    cpnl = cum_pnl_first + pos_first * (current_price - anchor_price) / anchor_price
-    Holds cum_pnl_first when anchor_price is 0 (no reference price available).
-    """
-    if anchor_price == 0.0:
-        return cum_pnl_first
-    return cum_pnl_first + pos_first * (current_price - anchor_price) / anchor_price
-
-
 def compute_bt_pnl(
     anchors: List[BtAnchor],
     seed_anchors: Dict[str, Tuple[float, float]],

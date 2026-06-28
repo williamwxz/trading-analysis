@@ -61,7 +61,6 @@ def _bt_anchor(
     stn: str = "strat_btc_5m",
     cum_pnl_first: float = 0.1,
     pos_first: float = 1.0,
-    anchor_price: float = 49000.0,
 ) -> BtLiveAnchor:
     return BtLiveAnchor(
         strategy_table_name=stn,
@@ -74,7 +73,6 @@ def _bt_anchor(
         cum_pnl_first=cum_pnl_first,
         pos_first=pos_first,
         anchor_ts="2026-05-15 09:55:00",
-        anchor_price=anchor_price,
         benchmark=0.0,
     )
 

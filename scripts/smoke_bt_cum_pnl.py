@@ -47,10 +47,10 @@ def main() -> int:
     print(f"fetch_bt_anchors_for_candle: {len(live)} strategies")
     assert live, "no live anchors"
     a = live[0]
-    assert a.anchor_price > 0, "anchor_price not resolved"
+    assert a.pos_first is not None, "pos_first not resolved"
     print(
         f"  sample: sid={a.strategy_id} u={a.underlying} anchor_ts={a.anchor_ts} "
-        f"price={a.anchor_price} bench={a.benchmark}"
+        f"pos_first={a.pos_first} cum_pnl_first={a.cum_pnl_first} bench={a.benchmark}"
     )
     print("SMOKE OK")
     return 0
