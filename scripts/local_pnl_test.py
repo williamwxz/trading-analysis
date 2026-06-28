@@ -382,17 +382,28 @@ ORDER BY strategy_table_name, ts
             [underlying], price_lo, end_ts, client, extend_minutes=0
         )
         prices_bt = all_prices_bt.get(underlying, {})
-        price_keys_bt = sorted(prices_bt)
         rows_bt: list[list] = []
         for stn, anchs in anchors_bt.items():
+            # Warm-start seed from the target row just before the window so a local
+            # run chains exactly like production; absent/price==0 ⇒ cold-start.
+            seed_row = client.query(
+                "SELECT argMax(cumulative_pnl, (ts, updated_at)), "
+                "       argMax(price, (ts, updated_at)) "
+                f"FROM analytics.{target_bt} "
+                f"WHERE strategy_table_name = '{stn}' "
+                f"  AND ts <  toDateTime('{start_ts}') "
+                f"  AND ts >= toDateTime('{start_ts}') - INTERVAL 7 DAY"
+            ).result_rows
+            seed_bt: dict[str, tuple[float, float]] = {}
+            if (
+                seed_row
+                and seed_row[0][0] is not None
+                and float(seed_row[0][1] or 0.0) != 0.0
+            ):
+                seed_bt[stn] = (float(seed_row[0][0]), float(seed_row[0][1]))
             rows_bt.extend(
                 compute_bt_pnl(
-                    anchs,
-                    prices_bt,
-                    benchmarks_bt,
-                    start_ts,
-                    end_ts,
-                    price_keys=price_keys_bt,
+                    anchs, seed_bt, prices_bt, benchmarks_bt, start_ts, end_ts
                 )
             )
         _prepare_rows(rows_bt)

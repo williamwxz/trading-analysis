@@ -37,9 +37,8 @@ def main() -> int:
     assert prices, "no prices returned"
 
     stn = next(iter(anchors))
-    rows = compute_bt_pnl(
-        anchors[stn], prices, benchmarks, start_ts, end_ts, price_keys=sorted(prices)
-    )
+    # {} seed → cold-start from cum_pnl_first (fine for a smoke check).
+    rows = compute_bt_pnl(anchors[stn], {}, prices, benchmarks, start_ts, end_ts)
     print(f"compute_bt_pnl({stn[:40]}...): {len(rows)} rows")
     assert rows and len(rows[0]) == 16, "bad row shape"
     from libs.computation.candle_lookup import fetch_bt_anchors_for_candle
