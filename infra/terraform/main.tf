@@ -774,6 +774,11 @@ resource "aws_ecs_task_definition" "ws_consumer" {
   cpu                      = 256
   memory                   = 512
   execution_role_arn       = aws_iam_role.ecs_execution.arn
+  # Task role so the app's boto3 CloudWatch client (MessagesPublished metric in
+  # _emit_published) can obtain credentials. Reuses pnl_consumer_task, which is
+  # assumable by ecs-tasks and already grants cloudwatch:PutMetricData. Without
+  # this the task had no role → boto3 NoCredentialsError on every published candle.
+  task_role_arn = aws_iam_role.pnl_consumer_task.arn
 
   container_definitions = jsonencode([{
     name      = "ws-consumer"
