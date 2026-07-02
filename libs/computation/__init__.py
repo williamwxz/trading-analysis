@@ -4,8 +4,10 @@ from libs.computation.bootstrap import (
     LastPnlAnchor,
     WalkRow,
     fetch_bootstrap_seeds,
+    fetch_last_pnl_anchor_for_strategy,
     fetch_last_pnl_anchors,
     fetch_walk_rows,
+    pnl_table_is_empty,
 )
 from libs.computation.candle_lookup import (
     BtLiveAnchor,
@@ -61,7 +63,9 @@ __all__ = [
     "LastPnlAnchor",
     "WalkRow",
     "fetch_bootstrap_seeds",
+    "fetch_last_pnl_anchor_for_strategy",
     "fetch_last_pnl_anchors",
+    "pnl_table_is_empty",
     "fetch_walk_rows",
     # candle_lookup (pnl_consumer live loop)
     "BtLiveAnchor",

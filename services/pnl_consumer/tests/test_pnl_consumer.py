@@ -429,11 +429,13 @@ def test_process_candle_bt_chains_from_state():
     cfg = SinkConfig(price=False, prod=False, real_trade=False, bt=True)
     state_bt = AnchorState()
 
-    with patch(f"{_MOD}.fetch_bt_anchors_for_candle", return_value=[_bt_anchor()]):
+    with (
+        patch(f"{_MOD}.fetch_bt_anchors_for_candle", return_value=[_bt_anchor()]),
+        patch(f"{_MOD}.fetch_last_pnl_anchor_for_strategy", return_value=None),
+    ):
         rows1, _, _, _ = process_candle(
             _candle(open=100.0), AnchorState(), AnchorState(), cfg, state_bt
         )
-    with patch(f"{_MOD}.fetch_bt_anchors_for_candle", return_value=[_bt_anchor()]):
         rows2, _, _, _ = process_candle(
             _candle(open=110.0), AnchorState(), AnchorState(), cfg, state_bt
         )
@@ -445,6 +447,120 @@ def test_process_candle_bt_chains_from_state():
     # candle 2 chains: 0.30 + 2.0*(110-100)/100 = 0.50
     assert r2[8] == pytest.approx(0.30 + 2.0 * (110 - 100) / 100)
     assert r2[10] == 2.0  # position = pos_first
+
+
+def _bt_anchor_n(i: int) -> BtLiveAnchor:
+    """Distinct BtLiveAnchor per index for mass-seed tests."""
+    return BtLiveAnchor(
+        strategy_table_name=f"strat_bt_{i}",
+        strategy_instance_id=f"inst_bt_{i:03d}",
+        strategy_id=2,
+        strategy_name="bt_mom",
+        underlying="BTC",
+        config_timeframe="5m",
+        weighting=1.0,
+        cum_pnl_first=0.30,
+        pos_first=2.0,
+        anchor_ts=_CANDLE_TS.strftime("%Y-%m-%d %H:%M:%S"),
+        benchmark=0.0,
+    )
+
+
+@pytest.mark.unit
+def test_process_candle_bt_seeds_from_stored_tail_not_cum():
+    """A strategy missing from state but with stored 1min history must seed its
+    chain from the stored tail row (pnl, price) — NOT re-anchor to cum_pnl_first.
+
+    This is the incident-2 guard: a restart whose bootstrap came up empty used to
+    snap 682 strategies to cum_pnl_first. With the tail fallback, the first candle
+    chains from the last stored row: cpnl = tail.pnl + pos*(open - tail.price)/tail.price.
+    """
+    tail = LastPnlAnchor(
+        strategy_table_name="strat_bt_0",
+        pnl=9.0,
+        price=100.0,
+        ts=datetime(2026, 4, 26, 2, 5, 0),
+    )
+    cfg = SinkConfig(price=False, prod=False, real_trade=False, bt=True)
+    state_bt = AnchorState()
+
+    with (
+        patch(f"{_MOD}.fetch_bt_anchors_for_candle", return_value=[_bt_anchor_n(0)]),
+        patch(f"{_MOD}.fetch_last_pnl_anchor_for_strategy", return_value=tail),
+    ):
+        rows, _, _, _ = process_candle(
+            _candle(open=110.0), AnchorState(), AnchorState(), cfg, state_bt
+        )
+
+    r = [x for x in rows if x["_sink"] == "pnl_bt"][0]["_row"]
+    # chains from the stored tail: 9.0 + 2.0*(110-100)/100 = 9.2 — NOT 0.30
+    assert r[8] == pytest.approx(9.0 + 2.0 * (110 - 100) / 100)
+
+
+@pytest.mark.unit
+def test_process_candle_bt_cum_seed_only_when_no_stored_rows():
+    """cum_pnl_first cold-start applies only when the strategy has NO stored rows."""
+    cfg = SinkConfig(price=False, prod=False, real_trade=False, bt=True)
+    state_bt = AnchorState()
+
+    with (
+        patch(f"{_MOD}.fetch_bt_anchors_for_candle", return_value=[_bt_anchor_n(0)]),
+        patch(f"{_MOD}.fetch_last_pnl_anchor_for_strategy", return_value=None),
+    ):
+        rows, _, _, _ = process_candle(
+            _candle(open=110.0), AnchorState(), AnchorState(), cfg, state_bt
+        )
+
+    r = [x for x in rows if x["_sink"] == "pnl_bt"][0]["_row"]
+    assert r[8] == pytest.approx(0.30)  # holds cum_pnl_first (price=0 seed)
+
+
+@pytest.mark.unit
+def test_process_candle_bt_mass_cum_seed_guard():
+    """More than _MAX_BT_CUM_SEEDS_PER_CANDLE cold-starts in one candle means the
+    state/bootstrap is broken — refuse to write (raise) instead of snapping the
+    stored series to cum_pnl_first en masse."""
+    from pnl_consumer.pnl_consumer import _MAX_BT_CUM_SEEDS_PER_CANDLE
+
+    n = _MAX_BT_CUM_SEEDS_PER_CANDLE + 1
+    anchors = [_bt_anchor_n(i) for i in range(n)]
+    cfg = SinkConfig(price=False, prod=False, real_trade=False, bt=True)
+
+    with (
+        patch(f"{_MOD}.fetch_bt_anchors_for_candle", return_value=anchors),
+        patch(f"{_MOD}.fetch_last_pnl_anchor_for_strategy", return_value=None),
+    ):
+        with pytest.raises(RuntimeError, match="cum_pnl_first"):
+            process_candle(
+                _candle(open=110.0), AnchorState(), AnchorState(), cfg, AnchorState()
+            )
+
+
+@pytest.mark.unit
+def test_bootstrap_bt_state_raises_on_empty_anchors_nonempty_table():
+    """anchored=0 while the pnl table has rows = systemic seed failure — exit
+    fail-fast rather than letting every strategy lazy-seed (incident 2)."""
+    from pnl_consumer.pnl_consumer import _bootstrap_bt_state
+
+    with (
+        patch(f"{_MOD}.fetch_last_pnl_anchors", return_value={}),
+        patch(f"{_MOD}.pnl_table_is_empty", return_value=False),
+    ):
+        with pytest.raises(RuntimeError, match="anchored=0"):
+            _bootstrap_bt_state(datetime(2026, 6, 28, 19, 47, 0))
+
+
+@pytest.mark.unit
+def test_bootstrap_bt_state_allows_empty_on_empty_table():
+    """A genuinely empty pnl table (true fresh deploy) may bootstrap empty."""
+    from pnl_consumer.pnl_consumer import _bootstrap_bt_state
+
+    with (
+        patch(f"{_MOD}.fetch_last_pnl_anchors", return_value={}),
+        patch(f"{_MOD}.pnl_table_is_empty", return_value=True),
+    ):
+        state = _bootstrap_bt_state(datetime(2026, 6, 28, 19, 47, 0))
+    assert len(state) == 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
