@@ -42,10 +42,12 @@ from libs.computation import (
     build_pnl_row,
     fetch_bootstrap_seeds,
     fetch_bt_anchors_for_candle,
+    fetch_last_pnl_anchor_for_strategy,
     fetch_last_pnl_anchors,
     fetch_real_trade_for_candle,
     fetch_strategies_for_candle,
     fetch_walk_rows,
+    pnl_table_is_empty,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,6 +59,10 @@ _DEFAULT_GROUP_ID = "flink-pnl-consumer"
 _WALK_HOURS = (
     2  # walk [ref_ts - 2h, ref_ts) to advance anchor price/position to present
 )
+# More cold-starts than this in one candle = broken state/bootstrap, not new
+# strategies. Genuinely-new strategies arrive a few at a time; 682 at once was
+# incident 2026-06-28 (post-restart empty state mass re-anchored to cum_pnl_first).
+_MAX_BT_CUM_SEEDS_PER_CANDLE = 50
 _PNL_WARN_TOLERANCE = 1e-6
 # Abort the cold-start bootstrap only on a GROSS cumulative_pnl deviation that
 # signals real corruption. Was 2e-3 (0.2%), which crash-looped every restart:
@@ -426,6 +432,15 @@ def _bootstrap_bt_state(reference_ts: "datetime | None") -> AnchorState:
     now = datetime.now(UTC).replace(tzinfo=None)
     ref_ts = reference_ts if reference_ts is not None else now
     anchors = fetch_last_pnl_anchors(_BT_PNL_TABLE, ref_ts)
+    if not anchors and not pnl_table_is_empty(_BT_PNL_TABLE):
+        # Incident 2026-06-28 19:48: a restart whose seed came up empty let every
+        # strategy lazy-seed from cum_pnl_first, snapping the stored chain to the
+        # cum level. Fail fast instead — a crash-loop is visible and harmless;
+        # silently rewriting history is neither.
+        raise RuntimeError(
+            f"Bootstrap [bt]: anchored=0 at ref_ts={ref_ts} but {_BT_PNL_TABLE} "
+            "is non-empty — refusing to start (would mass re-anchor to cum_pnl_first)"
+        )
     state = AnchorState()
     for stn, anchor in anchors.items():
         state.set(stn, AnchorRecord(pnl=anchor.pnl, price=anchor.price, position=0.0))
@@ -657,8 +672,39 @@ def process_candle(
         bt_anchors = fetch_bt_anchors_for_candle(candle.instrument, candle.ts)
         bt_fetched = len(bt_anchors)
         fetched_bt_stns: set[str] = set()
+        bt_cum_seeds = 0
         for a in bt_anchors:
             fetched_bt_stns.add(a.strategy_table_name)
+            if not state_bt.has(a.strategy_table_name):
+                # Missing from state: seed from the strategy's stored tail row so
+                # the chain continues; cum_pnl_first is ONLY for strategies with
+                # no stored history at all (true cold start). Guard against mass
+                # cold-starts — that means the state/bootstrap is broken and
+                # writing would snap the stored series to the cum level
+                # (incident 2026-06-28 19:48).
+                tail = fetch_last_pnl_anchor_for_strategy(
+                    _BT_PNL_TABLE, a.strategy_table_name
+                )
+                if tail is not None:
+                    state_bt.set(
+                        a.strategy_table_name,
+                        AnchorRecord(
+                            pnl=tail.pnl, price=tail.price, position=a.pos_first
+                        ),
+                    )
+                else:
+                    bt_cum_seeds += 1
+                    if bt_cum_seeds > _MAX_BT_CUM_SEEDS_PER_CANDLE:
+                        raise RuntimeError(
+                            f"BT: >{_MAX_BT_CUM_SEEDS_PER_CANDLE} strategies would "
+                            f"cold-start from cum_pnl_first in one candle "
+                            f"({candle.ts}) — state/bootstrap failure, refusing "
+                            "to mass re-anchor"
+                        )
+                    logger.warning(
+                        "BT cold-start from cum_pnl_first: '%s' (no stored rows)",
+                        a.strategy_table_name,
+                    )
             rows.append(
                 {
                     "_sink": "pnl_bt",

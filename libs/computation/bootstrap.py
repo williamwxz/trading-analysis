@@ -161,6 +161,42 @@ LIMIT 1
     return anchors
 
 
+def fetch_last_pnl_anchor_for_strategy(
+    pnl_table: str,
+    strategy_table_name: str,
+) -> "LastPnlAnchor | None":
+    """Return one strategy's last stored pnl/price row, or None if it has none.
+
+    Unbounded lookback — cheap via the (strategy_table_name, ts) sort key. Used by
+    the live bt loop as the lazy-seed fallback: a strategy missing from AnchorState
+    but present in the pnl table must chain from its stored tail, never re-anchor
+    to cum_pnl_first (incident 2026-06-28: an empty post-restart state mass-seeded
+    682 strategies from cum_pnl_first, snapping the stored chain to the cum level).
+    """
+    sql = f"""\
+SELECT cumulative_pnl, price, ts
+FROM {pnl_table}
+WHERE strategy_table_name = '{strategy_table_name}'
+ORDER BY ts DESC, updated_at DESC
+LIMIT 1
+"""
+    rows = query_dicts(sql)
+    if not rows:
+        return None
+    r = rows[0]
+    return LastPnlAnchor(
+        strategy_table_name=strategy_table_name,
+        pnl=float(r["cumulative_pnl"] or 0.0),
+        price=float(r["price"]),
+        ts=r["ts"],
+    )
+
+
+def pnl_table_is_empty(pnl_table: str) -> bool:
+    """True iff the pnl table has no rows at all (true fresh deploy)."""
+    return not query_dicts(f"SELECT 1 FROM {pnl_table} LIMIT 1")
+
+
 def _fetch_active_strategy_table_names(
     history_table: str,
     window_start_str: str,
