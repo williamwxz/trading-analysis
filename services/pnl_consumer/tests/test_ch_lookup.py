@@ -6,6 +6,7 @@ import pytest
 
 from libs.computation.candle_lookup import (
     StrategyRevision,
+    fetch_bt_anchors_for_candle,
     fetch_real_trade_for_candle,
     fetch_strategies_for_candle,
 )
@@ -249,3 +250,98 @@ def test_prod_lookup_picks_latest_bar_first_revision_not_oldest_in_window(
     # and not the latest bar's later revision (0.5)
     assert bar.position == 1.0
     assert bar.final_signal == 1.0
+
+
+# ---------------------------------------------------------------------------
+# BT lookup closing_ts gate — executes the real SQL against embedded ClickHouse.
+# BT must match prod: a cum-table bar's pos_first takes effect at
+# closing_ts (= ts + tf_minutes), not at the bar-open ts.
+# ---------------------------------------------------------------------------
+
+_BT_STN = "sid=9|sno=9|u=XRP|name=btstrat|inst=ib1"
+
+
+@pytest.fixture
+def bt_session():
+    session = chs.Session()
+    session.query("CREATE DATABASE IF NOT EXISTS analytics")
+    session.query("""
+        CREATE TABLE analytics.strategy_cum_pnl_bt_v2 (
+            strategy_table_name String,
+            config_timeframe String,
+            ts DateTime,
+            pnl_first Float64,
+            pnl_latest Float64,
+            pos_first Float64,
+            pos_latest Float64,
+            cum_pnl_first Float64,
+            cum_pnl_latest Float64,
+            computed_at DateTime,
+            weighting Float64
+        ) ENGINE = ReplacingMergeTree(computed_at)
+        ORDER BY (strategy_table_name, config_timeframe, ts)
+        """)
+    session.query("""
+        CREATE TABLE analytics.strategy_output_history_bt_v2 (
+            strategy_table_name String,
+            config_timeframe String,
+            ts DateTime,
+            revision_ts DateTime,
+            strategy_id Int32,
+            strategy_instance_id String,
+            strategy_name String,
+            underlying String,
+            weighting Float64,
+            row_json String
+        ) ENGINE = MergeTree ORDER BY (strategy_instance_id, ts, revision_ts)
+        """)
+    session.query(f"""INSERT INTO analytics.strategy_cum_pnl_bt_v2 VALUES
+        ('{_BT_STN}','1h','2026-05-27 17:00:00',0,0, 1.0,1.0, 0.10,0.10,
+         '2026-05-27 18:05:00',0.5),
+        ('{_BT_STN}','1h','2026-05-27 18:00:00',0,0,-1.0,-1.0, 0.20,0.20,
+         '2026-05-27 19:05:00',0.5)
+        """)
+    session.query(f"""INSERT INTO analytics.strategy_output_history_bt_v2 VALUES
+        ('{_BT_STN}','1h','2026-05-27 17:00:00','2026-05-27 18:05:00',9,'ib1','btstrat',
+         'XRP',0.5,'{{"position":1.0,"final_signal":0.0,"benchmark":0.07}}'),
+        ('{_BT_STN}','1h','2026-05-27 18:00:00','2026-05-27 19:05:00',9,'ib1','btstrat',
+         'XRP',0.5,'{{"position":-1.0,"final_signal":0.0,"benchmark":0.09}}')
+        """)
+    yield session
+    session.close()
+
+
+@pytest.mark.unit
+def test_bt_lookup_activates_bar_at_closing_ts(bt_session):
+    """Mid-bar (18:30) the 18:00 bar has not closed — 17:00's position holds."""
+    with patch(
+        "libs.computation.candle_lookup.query_dicts",
+        side_effect=_make_query_dicts(bt_session),
+    ):
+        anchors = fetch_bt_anchors_for_candle(
+            instrument="XRPUSDT",
+            candle_ts=datetime(2026, 5, 27, 18, 30, 0),
+        )
+    assert len(anchors) == 1
+    a = anchors[0]
+    assert a.anchor_ts == "2026-05-27 17:00:00"
+    assert a.pos_first == 1.0
+    assert a.benchmark == 0.07
+
+
+@pytest.mark.unit
+def test_bt_lookup_switches_bar_once_it_closes(bt_session):
+    """At 19:00 the 18:00 bar closes (ts + 60m) and its position takes over."""
+    with patch(
+        "libs.computation.candle_lookup.query_dicts",
+        side_effect=_make_query_dicts(bt_session),
+    ):
+        anchors = fetch_bt_anchors_for_candle(
+            instrument="XRPUSDT",
+            candle_ts=datetime(2026, 5, 27, 19, 0, 0),
+        )
+    assert len(anchors) == 1
+    a = anchors[0]
+    assert a.anchor_ts == "2026-05-27 18:00:00"
+    assert a.pos_first == -1.0
+    assert a.benchmark == 0.09

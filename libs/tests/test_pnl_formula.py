@@ -949,83 +949,125 @@ class TestBtPnlChaining:
             weighting=w,
         )
 
-    def test_cold_start_first_minute_holds_cum_pnl_first(self):
-        anchors = [self._anchor("2026-03-01 00:00:00", cum_pnl_first=0.30, pos_first=2.0)]
-        prices = {"2026-03-01 00:00:00": 100.0, "2026-03-01 00:01:00": 101.0}
+    def test_bar_activates_at_closing_ts_not_open(self):
+        # prod semantics: a bar's position takes effect at ts + tf_minutes,
+        # so a 5m bar at 00:00 emits nothing before 00:05
+        anchors = [self._anchor("2026-03-01 00:00:00", cum_pnl_first=0.0, pos_first=1.0)]
+        prices = {f"2026-03-01 00:0{i}:00": 100.0 for i in range(8)}
         rows = compute_bt_pnl(
-            anchors, {}, prices, {}, "2026-03-01 00:00:00", "2026-03-01 00:02:00"
+            anchors, {}, prices, {}, "2026-03-01 00:00:00", "2026-03-01 00:07:00"
         )
-        assert [r[_TS] for r in rows] == ["2026-03-01 00:00:00", "2026-03-01 00:01:00"]
-        # m0 holds cum_pnl_first (price reference established this minute)
+        assert [r[_TS] for r in rows] == [
+            "2026-03-01 00:05:00",
+            "2026-03-01 00:06:00",
+        ]
+
+    def test_position_series_matches_prod(self):
+        # The bt-matches-prod invariant: identical bars through compute_prod_pnl
+        # and compute_bt_pnl must produce identical (ts, position, price, cpnl).
+        bars = [
+            _prod_bar(stn=self.STN, siid="i1", ts="2026-03-01 00:00:00",
+                      position=1.0, tf="5m", underlying="SOL",
+                      final_signal=0.0, bar_benchmark=0.0),
+            _prod_bar(stn=self.STN, siid="i1", ts="2026-03-01 00:05:00",
+                      position=-2.0, tf="5m", underlying="SOL",
+                      final_signal=0.0, bar_benchmark=0.0),
+        ]
+        anchors = [
+            self._anchor("2026-03-01 00:00:00", cum_pnl_first=0.0, pos_first=1.0),
+            self._anchor("2026-03-01 00:05:00", cum_pnl_first=777.0, pos_first=-2.0),
+        ]
+        prices = _prices("2026-03-01 00:00:00", 16, base=100.0, step=1.0)
+        prod_rows = compute_prod_pnl(bars, {}, prices)
+        bt_rows = compute_bt_pnl(
+            anchors, {}, prices, {}, "2026-03-01 00:00:00", "2026-03-01 00:15:00"
+        )
+        prod_series = [(r[_TS], r[_POS], r[_PRC], r[_CPNL]) for r in prod_rows]
+        bt_series = [(r[_TS], r[_POS], r[_PRC], r[_CPNL]) for r in bt_rows]
+        assert bt_series == prod_series
+
+    def test_cold_start_first_minute_holds_cum_pnl_first(self):
+        # 5m bar at 00:00 activates 00:05; that first active minute holds
+        # cum_pnl_first and establishes the price reference
+        anchors = [self._anchor("2026-03-01 00:00:00", cum_pnl_first=0.30, pos_first=2.0)]
+        prices = {"2026-03-01 00:05:00": 100.0, "2026-03-01 00:06:00": 101.0}
+        rows = compute_bt_pnl(
+            anchors, {}, prices, {}, "2026-03-01 00:00:00", "2026-03-01 00:07:00"
+        )
+        assert [r[_TS] for r in rows] == ["2026-03-01 00:05:00", "2026-03-01 00:06:00"]
         assert rows[0][_CPNL] == pytest.approx(0.30)
         assert rows[0][_POS] == 2.0 and rows[0][_PRC] == 100.0
-        # m1 chains: 0.30 + 2.0*(101-100)/100 = 0.32
+        # next minute chains: 0.30 + 2.0*(101-100)/100 = 0.32
         assert rows[1][_CPNL] == pytest.approx(0.32)
 
     def test_warm_start_chains_from_seed_ignoring_cum_pnl_first(self):
         # cum_pnl_first=999 must be ignored when a seed anchor exists
         anchors = [self._anchor("2026-03-01 00:00:00", cum_pnl_first=999.0, pos_first=2.0)]
-        prices = {"2026-03-01 00:00:00": 100.0, "2026-03-01 00:01:00": 101.0}
+        prices = {"2026-03-01 00:05:00": 100.0, "2026-03-01 00:06:00": 101.0}
         seed = {self.STN: (0.50, 100.0)}  # (cpnl_prev, price_prev)
         rows = compute_bt_pnl(
-            anchors, seed, prices, {}, "2026-03-01 00:00:00", "2026-03-01 00:02:00"
+            anchors, seed, prices, {}, "2026-03-01 00:05:00", "2026-03-01 00:07:00"
         )
-        # m0: 0.50 + 2.0*(100-100)/100 = 0.50
+        # first active minute: 0.50 + 2.0*(100-100)/100 = 0.50
         assert rows[0][_CPNL] == pytest.approx(0.50)
-        # m1: 0.50 + 2.0*(101-100)/100 = 0.52
+        # next: 0.50 + 2.0*(101-100)/100 = 0.52
         assert rows[1][_CPNL] == pytest.approx(0.52)
 
-    def test_position_switches_at_bar_boundary(self):
+    def test_position_switches_at_next_bar_closing_ts(self):
+        # bars at 00:00 and 00:02 (5m tf) activate at 00:05 and 00:07
         anchors = [
             self._anchor("2026-03-01 00:00:00", cum_pnl_first=0.0, pos_first=1.0),
             self._anchor("2026-03-01 00:02:00", cum_pnl_first=777.0, pos_first=3.0),
         ]
         prices = {
-            "2026-03-01 00:00:00": 100.0,
-            "2026-03-01 00:01:00": 110.0,
-            "2026-03-01 00:02:00": 110.0,
-            "2026-03-01 00:03:00": 121.0,
+            "2026-03-01 00:05:00": 100.0,
+            "2026-03-01 00:06:00": 110.0,
+            "2026-03-01 00:07:00": 110.0,
+            "2026-03-01 00:08:00": 121.0,
         }
         rows = compute_bt_pnl(
-            anchors, {}, prices, {}, "2026-03-01 00:00:00", "2026-03-01 00:04:00"
+            anchors, {}, prices, {}, "2026-03-01 00:05:00", "2026-03-01 00:09:00"
         )
-        # m0 cold-start hold = 0.0 ; m1: 0 + 1*(110-100)/100 = 0.10
-        assert rows[1][_CPNL] == pytest.approx(0.10)
-        # m2 uses bar2 pos=3 (cum_pnl_first 777 ignored — chaining): 0.10 + 3*(110-110)/110
+        assert rows[0][_POS] == 1.0
+        # 00:06: 0 + 1*(110-100)/100 = 0.10, still bar1
+        assert rows[1][_CPNL] == pytest.approx(0.10) and rows[1][_POS] == 1.0
+        # 00:07: bar2 activates (cum_pnl_first 777 ignored — chaining)
         assert rows[2][_CPNL] == pytest.approx(0.10) and rows[2][_POS] == 3.0
-        # m3: 0.10 + 3*(121-110)/110 = 0.40
+        # 00:08: 0.10 + 3*(121-110)/110 = 0.40
         assert rows[3][_CPNL] == pytest.approx(0.40)
 
     def test_missing_price_holds_and_emits_carried_price(self):
         anchors = [self._anchor("2026-03-01 00:00:00", cum_pnl_first=0.0, pos_first=1.0)]
-        prices = {"2026-03-01 00:00:00": 100.0, "2026-03-01 00:02:00": 105.0}
+        prices = {"2026-03-01 00:05:00": 100.0, "2026-03-01 00:07:00": 105.0}
         rows = compute_bt_pnl(
-            anchors, {}, prices, {}, "2026-03-01 00:00:00", "2026-03-01 00:03:00"
+            anchors, {}, prices, {}, "2026-03-01 00:05:00", "2026-03-01 00:08:00"
         )
-        # 00:01 emitted with carried price 100, cpnl unchanged 0.0
-        assert rows[1][_TS] == "2026-03-01 00:01:00"
+        # 00:06 emitted with carried price 100, cpnl unchanged 0.0
+        assert rows[1][_TS] == "2026-03-01 00:06:00"
         assert rows[1][_PRC] == 100.0 and rows[1][_CPNL] == pytest.approx(0.0)
-        # 00:02: 0 + 1*(105-100)/100 = 0.05
+        # 00:07: 0 + 1*(105-100)/100 = 0.05
         assert rows[2][_CPNL] == pytest.approx(0.05)
 
     def test_idempotent_recompute(self):
         anchors = [self._anchor("2026-03-01 00:00:00", cum_pnl_first=0.10, pos_first=2.0)]
-        prices = {f"2026-03-01 00:0{i}:00": 100.0 + i for i in range(4)}
-        args = (anchors, {}, prices, {}, "2026-03-01 00:00:00", "2026-03-01 00:04:00")
+        prices = {f"2026-03-01 00:0{i}:00": 100.0 + i for i in range(5, 9)}
+        args = (anchors, {}, prices, {}, "2026-03-01 00:05:00", "2026-03-01 00:09:00")
         first = compute_bt_pnl(*args)
         second = compute_bt_pnl(*args)
 
         def _strip(rows):  # drop updated_at (index 14, wall-clock) before compare
             return [r[:14] + r[15:] for r in rows]
 
+        assert len(first) == 4
         assert _strip(first) == _strip(second)
 
     def test_benchmark_and_identity_columns(self):
         anchors = [self._anchor("2026-03-01 00:00:00", cum_pnl_first=0.0, pos_first=1.0)]
-        prices = {"2026-03-01 00:00:00": 100.0}
+        prices = {"2026-03-01 00:05:00": 100.0}
+        # benchmarks stay keyed by the bar's OPEN ts even though activation is at close
         benchmarks = {(self.STN, "2026-03-01 00:00:00"): 0.07}
         rows = compute_bt_pnl(
-            anchors, {}, prices, benchmarks, "2026-03-01 00:00:00", "2026-03-01 00:01:00"
+            anchors, {}, prices, benchmarks, "2026-03-01 00:05:00", "2026-03-01 00:06:00"
         )
         r = rows[0]
         assert r[_STN] == self.STN and r[_SID] == 1 and r[_SNAME] == "mom"

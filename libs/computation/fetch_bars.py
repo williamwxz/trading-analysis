@@ -127,7 +127,11 @@ LIMIT 1 BY strategy_table_name, strategy_id, strategy_name, underlying, config_t
     ]
 
 
-_BT_ANCHOR_LOOKBACK_DAYS = 2  # covers the straddling anchor (1d bars => up to 24h back)
+# Bars activate at closing_ts (= ts + tf_minutes), so the anchor straddling
+# ts_start can have ts up to 2 × 1440 min back (a 1d bar activated at ts+1440,
+# held until the next bar activates). 3 days covers that plus a one-bar margin —
+# same reasoning as _BAR_FETCH_LOOKBACK_MINUTES in scripts/audit_pnl.py.
+_BT_ANCHOR_LOOKBACK_DAYS = 3
 
 
 def fetch_bt_anchors(
@@ -138,8 +142,9 @@ def fetch_bt_anchors(
 ) -> Dict[str, List[BtAnchor]]:
     """Per-strategy cum-table anchors for [ts_start - lookback, ts_end), deduped.
 
-    The lookback includes the one anchor straddling ts_start so the first minute of
-    the window has an anchor. Returns {strategy_table_name: [BtAnchor sorted by ts]}.
+    The lookback includes the one anchor straddling ts_start (active at ts_start
+    via its closing_ts) so the first minute of the window has an anchor.
+    Returns {strategy_table_name: [BtAnchor sorted by ts]}.
     The cum-table has no `underlying` column — filter by the u= token in
     strategy_table_name. SharedReplacingMergeTree(computed_at) => dedupe via LIMIT 1 BY.
     """
