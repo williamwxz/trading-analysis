@@ -21,9 +21,11 @@ from libs.computation.bootstrap import (
 from libs.computation.candle_lookup import (
     StrategyBar,
     StrategyRevision,
+    fetch_bt_anchors_for_candle,
     fetch_real_trade_for_candle,
     fetch_strategies_for_candle,
 )
+from libs.computation.fetch_bars import fetch_bt_anchors
 
 DATETIME_MIN = datetime.min
 
@@ -295,6 +297,56 @@ def test_fetch_real_trade_returns_empty_when_no_rows():
             instrument="BTCUSDT", candle_ts=_CANDLE_TS
         )
     assert revisions == []
+
+
+@pytest.mark.unit
+def test_fetch_bt_anchors_for_candle_sql_gates_on_closing_ts():
+    """BT bars activate at closing_ts (ts + tf_minutes), matching prod."""
+    captured = []
+
+    def capture(sql):
+        captured.append(sql)
+        return []
+
+    with patch("libs.computation.candle_lookup.query_dicts", side_effect=capture):
+        fetch_bt_anchors_for_candle(
+            instrument="BTCUSDT", candle_ts=datetime(2026, 5, 10, 18, 5, 0)
+        )
+    sql = captured[0]
+    assert "ts + toIntervalMinute" in sql, "bt must gate on closing_ts, not raw ts"
+    assert "<= '2026-05-10 18:05:00'" in sql
+
+
+@pytest.mark.unit
+def test_candle_lookup_tf_expr_covers_10m():
+    """10m strategies must map to 10 minutes, not the 5-minute fallback."""
+    captured = []
+
+    def capture(sql):
+        captured.append(sql)
+        return []
+
+    with patch("libs.computation.candle_lookup.query_dicts", side_effect=capture):
+        fetch_bt_anchors_for_candle(
+            instrument="BTCUSDT", candle_ts=datetime(2026, 5, 10, 18, 5, 0)
+        )
+    assert "'10m', 10" in captured[0]
+
+
+@pytest.mark.unit
+def test_fetch_bt_anchors_lookback_covers_closing_ts_straddle():
+    """With closing_ts activation, the anchor straddling window_start can have
+    ts up to 2×1440 min back (1d bars); a 3-day fetch lookback keeps a one-bar
+    safety margin (mirrors _BAR_FETCH_LOOKBACK_MINUTES reasoning in audit_pnl)."""
+    captured = []
+
+    def capture(sql, client=None):
+        captured.append(sql)
+        return []
+
+    with patch("libs.computation.fetch_bars.query_dicts", side_effect=capture):
+        fetch_bt_anchors("BTC", "2026-05-10 00:00:00", "2026-05-11 00:00:00")
+    assert "2026-05-07 00:00:00" in captured[0]
 
 
 def _mk_pos_row(

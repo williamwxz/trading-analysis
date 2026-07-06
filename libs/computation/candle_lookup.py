@@ -12,7 +12,10 @@ from datetime import datetime
 from libs.clickhouse_client import query_dicts
 from libs.computation.pnl_formula import parse_strategy_table_name
 
-_BT_STREAM_LOOKBACK = "3 DAY"
+# BT bars activate at closing_ts (= ts + tf_minutes), so the active anchor for a
+# 1d strategy can have ts up to 2 days before the candle; 4 days keeps a one-bar
+# margin on top (the cum-table scan is LIMIT 1 BY over a LIKE-bounded range).
+_BT_STREAM_LOOKBACK = "4 DAY"
 
 # 2-day lookback: a 1d bar stays the active bar up to ~2 days after its ts
 # (execution_ts ≈ next midnight, held until the following day's bar). A 1-day
@@ -50,6 +53,7 @@ multiIf(
         config_timeframe = '1m',  1,
         config_timeframe = '3m',  3,
         config_timeframe = '5m',  5,
+        config_timeframe = '10m', 10,
         config_timeframe = '15m', 15,
         config_timeframe = '30m', 30,
         config_timeframe = '1h',  60,
@@ -208,12 +212,15 @@ def fetch_bt_anchors_for_candle(
     instrument: str,
     candle_ts: datetime,
 ) -> list[BtLiveAnchor]:
-    """Latest cum-table anchor per strategy with ts <= candle_ts.
+    """Latest cum-table anchor per strategy whose closing_ts <= candle_ts.
 
-    pos_first / cum_pnl_first come from strategy_cum_pnl_bt_v2; the consumer chains
-    cpnl via AnchorState using candle.open (no anchor price is resolved here). The
-    benchmark is the ONLY value still read from strategy_output_history_bt_v2 in the
-    BT path — strategy-specific and not price-derivable.
+    A bar's pos_first takes effect at closing_ts (= ts + tf_minutes) — the same
+    gate as fetch_strategies_for_candle, so bt holds the same position as prod
+    minute-for-minute. pos_first / cum_pnl_first come from strategy_cum_pnl_bt_v2;
+    the consumer chains cpnl via AnchorState using candle.open (no anchor price is
+    resolved here). The benchmark is the ONLY value still read from
+    strategy_output_history_bt_v2 in the BT path — strategy-specific and not
+    price-derivable.
     """
     underlying = instrument.removesuffix("USDT")
     ts_str = candle_ts.strftime("%Y-%m-%d %H:%M:%S")
@@ -228,7 +235,7 @@ SELECT
     weighting
 FROM analytics.strategy_cum_pnl_bt_v2
 WHERE strategy_table_name LIKE '{like}'
-  AND ts <= '{ts_str}'
+  AND ts + toIntervalMinute({_TF_MINUTES_EXPR_NO_ALIAS}) <= '{ts_str}'
   AND ts >  '{ts_str}'::DateTime - INTERVAL {_BT_STREAM_LOOKBACK}
 ORDER BY strategy_table_name, ts DESC, computed_at DESC
 LIMIT 1 BY strategy_table_name

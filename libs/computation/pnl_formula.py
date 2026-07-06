@@ -271,7 +271,9 @@ def compute_bt_pnl(
 ) -> List[list]:
     """Minute-chain cum-table bars to 1-min rows over [window_start, window_end).
 
-    The active bar at minute m is the most-recent BtAnchor with ts <= m; its
+    The active bar at minute m is the most-recent BtAnchor whose closing_ts
+    (= ts + tf_minutes) <= m — the same activation rule as iter_compute_prod_pnl,
+    so bt and prod hold identical positions minute-for-minute. The active bar's
     pos_first is the position held that minute. PnL chains minute to minute:
         cpnl(m) = cpnl(m-1) + pos(m) * (price(m) - price(m-1)) / price(m-1)
 
@@ -293,7 +295,14 @@ def compute_bt_pnl(
 
     for stn, strat_anchors in by_strategy.items():
         strat_anchors.sort(key=lambda a: a.ts)
-        ts_list = [a.ts for a in strat_anchors]
+        # Activation time per bar: closing_ts = ts + tf_minutes (prod semantics).
+        act_list = [
+            (
+                _parse_ts(a.ts)
+                + timedelta(minutes=TIMEFRAME_MAP.get(a.config_timeframe, 5))
+            ).strftime("%Y-%m-%d %H:%M:%S")
+            for a in strat_anchors
+        ]
         strategy_id, strategy_name, underlying, siid = parse_strategy_table_name(stn)
 
         seed = seed_anchors.get(stn)
@@ -303,12 +312,12 @@ def compute_bt_pnl(
             anchor_pnl = strat_anchors[0].cum_pnl_first
             anchor_price = 0.0
 
-        first_anchor_dt = _parse_ts(strat_anchors[0].ts)
-        m = max(start_dt, first_anchor_dt).replace(second=0, microsecond=0)
+        first_active_dt = _parse_ts(act_list[0])
+        m = max(start_dt, first_active_dt).replace(second=0, microsecond=0)
         idx = 0
         while m < end_dt:
             m_str = m.strftime("%Y-%m-%d %H:%M:%S")
-            while idx + 1 < len(ts_list) and ts_list[idx + 1] <= m_str:
+            while idx + 1 < len(act_list) and act_list[idx + 1] <= m_str:
                 idx += 1
             live_price = (
                 prices.get(m_str, anchor_price)

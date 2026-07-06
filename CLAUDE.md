@@ -135,7 +135,7 @@ All three modes share the same formula and anchor-chaining loop. Differences are
 - Output columns: `INSERT_COLUMNS` (16 cols, ts at index 7, updated_at at index 14, strategy_instance_id at index 15).
 
 **Backtest** (`source_label="backtest"`, `compute_bt_pnl`):
-- PnL chains minute-to-minute exactly like prod: `cpnl(m) = cpnl(m-1) + pos(m) * (price(m) - price(m-1)) / price(m-1)`. Position source: `strategy_cum_pnl_bt_v2` — `pos_first` of the most-recent cum-table bar with `ts <= minute`, held flat across the bar. Batch fetch: `fetch_bt_anchors`; live: `fetch_bt_anchors_for_candle`.
+- PnL chains minute-to-minute exactly like prod: `cpnl(m) = cpnl(m-1) + pos(m) * (price(m) - price(m-1)) / price(m-1)`. Position source: `strategy_cum_pnl_bt_v2` — `pos_first` of the most-recent cum-table bar whose `closing_ts` (= `ts + tf_minutes`) `<= minute`, held flat until the next bar's closing_ts. Same activation rule as prod, so bt and prod hold identical positions minute-for-minute. Batch fetch: `fetch_bt_anchors`; live: `fetch_bt_anchors_for_candle`.
 - Anchor seed: the previous minute's row in `strategy_pnl_1min_bt_v2` (batch: `fetch_seed_anchor("bt", …)`; live: `_bootstrap_bt_state` reads the table tail). `cum_pnl_first` from the cum table seeds cpnl **only** on a strategy's first-ever minute (cold start, via a `price=0` hold) — never re-anchored after, so bar boundaries do **not** snap back to `cum_pnl_first`.
 - Benchmark source: `strategy_output_history_bt_v2` (`argMin(row_json,'benchmark')` per bar) — the **only** remaining use of that table for BT. Batch: `fetch_bt_benchmarks`; live: the `bench_sql` lookup in `fetch_bt_anchors_for_candle`. The benchmark is strategy-specific (not the underlying buy-and-hold) and is not price-derivable.
 - `final_signal` is `0.0` for BT (not sourced). Output columns: same `INSERT_COLUMNS` (16 cols). Full historical rebuild: `audit_pnl.py --rebuild-bt` (monthly chunks, forward-seeded).
@@ -190,7 +190,7 @@ Full detail in `docs/pnl_consumer_logic.md`. Shared query library in `libs/compu
 - Lazy-seed: brand-new strategies seeded on first appearance
 
 **Live loop — bt:**
-- Re-query `strategy_cum_pnl_bt_v2` every candle (`fetch_bt_anchors_for_candle`); active bar = most-recent cum row with `ts <= candle_ts`. Chain `cpnl` via `AnchorState` using that bar's `pos_first`; benchmark from `strategy_output_history_bt_v2`; `final_signal = 0.0`.
+- Re-query `strategy_cum_pnl_bt_v2` every candle (`fetch_bt_anchors_for_candle`); active bar = most-recent cum row whose `closing_ts` (= `ts + tf_minutes`) `<= candle_ts` — the same gate as prod's `fetch_strategies_for_candle`. Chain `cpnl` via `AnchorState` using that bar's `pos_first`; benchmark from `strategy_output_history_bt_v2`; `final_signal = 0.0`.
 - Lazy-seed: brand-new strategies seeded from `cum_pnl_first` (price=0 hold) on first appearance. Strategies absent from a candle's lookup carry forward at the last position.
 
 **Live loop — real_trade:**
