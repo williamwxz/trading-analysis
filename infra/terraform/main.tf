@@ -858,8 +858,11 @@ resource "aws_ecs_task_definition" "pnl_consumer" {
   family                   = "${local.name_prefix}-pnl-consumer-${each.key}"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = 512
-  memory                   = 2048
+  # Right-sized 2026-07: observed usage ~55-65MB mem / ~0.28 vCPU peak per
+  # consumer; 0.25 vCPU throttles the cold-start bootstrap walk (slower
+  # restarts) but the 1-min live loop has ample slack.
+  cpu                      = 256
+  memory                   = 512
   execution_role_arn       = aws_iam_role.ecs_execution.arn
   task_role_arn            = aws_iam_role.pnl_consumer_task.arn
 
