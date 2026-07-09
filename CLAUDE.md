@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Mini trading analytics pipeline. Streams strategy PnL data: Binance API → streaming producer (Kafka/Redpanda) → pnl_consumer → ClickHouse Cloud analytics → Grafana Cloud dashboards. Batch recompute/repair is handled by `scripts/audit_pnl.py`; market-data gap-fill is a daily `backfill_prices` Lambda. Services run on AWS ECS Fargate in `ap-northeast-1` (Tokyo). Grafana is Grafana Cloud (not self-hosted).
+Mini trading analytics pipeline. Streams strategy PnL data: Binance API → streaming producer (Kafka/Redpanda) → pnl_consumer → ClickHouse Cloud analytics → Grafana Cloud dashboards. Batch recompute/repair is handled by `scripts/audit_pnl.py`; market-data gap-fill is a daily `backfill_prices` Lambda; a daily `fix_bt_window` Lambda repairs the trailing bt PnL window (retro-corrects `strategy_cum_pnl_bt_v2` publish lag). Services run on AWS ECS Fargate in `ap-northeast-1` (Tokyo). Grafana is Grafana Cloud (not self-hosted).
 
 ## Commands
 
@@ -46,7 +46,7 @@ Independent ECS Fargate services, each with its own Dockerfile:
 | `trading-analysis-ws-consumer` | `services/streaming/` | Binance WebSocket → Kafka/Redpanda topic `binance.price.ticks` |
 | `trading-analysis-pnl-consumer-{prod,bt,real-trade,price}` | `services/pnl_consumer/` | Kafka consumer → real-time PnL → ClickHouse (one ECS service per mode; the `price` sink writes `futures_price_1min` from `candle.open`) |
 
-Batch PnL recompute/repair is the standalone script `scripts/audit_pnl.py` (not a service). Market-data historical gap-fill (`futures_price_1min`) is `services/backfill_prices/` — a daily AWS Lambda using ccxt.
+Batch PnL recompute/repair is the standalone script `scripts/audit_pnl.py` (not a service). Market-data historical gap-fill (`futures_price_1min`) is `services/backfill_prices/` — a daily AWS Lambda using ccxt. `services/fix_bt_window/` is a daily AWS Lambda (15:00 UTC) that pauses the bt consumer, runs `audit_pnl --type bt --fix-window` over the trailing 49h, and resumes it — retro-correcting positions once late `strategy_cum_pnl_bt_v2` batches land (the cum publisher delivers hours-to-days after bar time; the post-resume bootstrap re-seeds the consumer's chain from the repaired tail).
 
 Adding new instruments requires updating `INSTRUMENTS` in `services/streaming/streaming/binance_ws_consumer.py` and in the `backfill_prices` Lambda.
 
@@ -68,6 +68,10 @@ Binance WebSocket (1m closed candles)
 ```
 backfill_prices Lambda (daily, ccxt)  — fills futures_price_1min historical gaps only
     → analytics.futures_price_1min
+
+fix_bt_window Lambda (daily 15:00 UTC)  — pause bt consumer → audit_pnl --type bt
+    --fix-window [now-49h, now) → resume — retro-corrects cum-table publish lag
+    → analytics.strategy_pnl_1min_bt_v2 (+ 1hour/1day rollups)
 
 External strategy service (push)
     → analytics.strategy_output_history_v2 / _bt_v2
@@ -231,6 +235,7 @@ Each service rebuilds only if its paths changed (via `dorny/paths-filter`). `wor
 - `streaming`: `services/streaming/**`
 - `pnl-consumer`: `services/pnl_consumer/**`
 - `backfill-prices`: `services/backfill_prices/**`
+- `fix-bt-window`: `services/fix_bt_window/**`, `libs/**`, `scripts/audit_pnl.py` (the image embeds both)
 - `terraform`: `infra/terraform/**`
 - `grafana`: `infra/grafana/**`
 
