@@ -17,6 +17,7 @@ jobs:
       streaming:        ${{ steps.filter.outputs.streaming        == 'true' || steps.filter.outputs.terraform == 'true' || steps.force.outputs.streaming        == 'true' }}
       pnl-consumer:     ${{ steps.filter.outputs.pnl-consumer     == 'true' || steps.filter.outputs.terraform == 'true' || steps.force.outputs.pnl-consumer     == 'true' }}
       backfill-prices:  ${{ steps.filter.outputs.backfill-prices  == 'true' || steps.filter.outputs.terraform == 'true' || steps.force.outputs.backfill-prices  == 'true' }}
+      fix-bt-window:    ${{ steps.filter.outputs.fix-bt-window    == 'true' || steps.filter.outputs.terraform == 'true' || steps.force.outputs.fix-bt-window    == 'true' }}
       terraform:        ${{ steps.filter.outputs.terraform        == 'true' || steps.force.outputs.terraform == 'true' }}
       grafana:          ${{ steps.filter.outputs.grafana          == 'true' || steps.filter.outputs.terraform == 'true' || steps.force.outputs.grafana          == 'true' }}
     steps:
@@ -33,6 +34,10 @@ jobs:
               - 'libs/**'
             backfill-prices:
               - 'services/backfill_prices/**'
+            fix-bt-window:
+              - 'services/fix_bt_window/**'
+              - 'libs/**'
+              - 'scripts/audit_pnl.py'
             terraform:
               - 'infra/terraform/**'
             grafana:
@@ -45,6 +50,7 @@ jobs:
           echo "streaming=true"        >> $GITHUB_OUTPUT
           echo "pnl-consumer=true"     >> $GITHUB_OUTPUT
           echo "backfill-prices=true"  >> $GITHUB_OUTPUT
+          echo "fix-bt-window=true"    >> $GITHUB_OUTPUT
           echo "terraform=true"        >> $GITHUB_OUTPUT
           echo "grafana=true"          >> $GITHUB_OUTPUT
 
@@ -67,7 +73,7 @@ jobs:
 
       - name: Run tests
         run: |
-          pytest libs/tests/ services/streaming/tests/ services/pnl_consumer/tests/ -v --tb=short -m "not integration and not streaming_integration"
+          pytest libs/tests/ services/streaming/tests/ services/pnl_consumer/tests/ services/fix_bt_window/tests/ -v --tb=short -m "not integration and not streaming_integration"
 
   integration-test:
     runs-on: ubuntu-latest
@@ -247,6 +253,66 @@ jobs:
           echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
           echo "image_tag=${{ github.sha }}" >> $GITHUB_OUTPUT
       # Terraform owns Lambda updates (data.aws_ecr_image digest pin in backfill_prices.tf).
+
+
+  build-fix-bt-window:
+    runs-on: ubuntu-latest
+    # Same contract as build-backfill-prices: the Lambda image must exist in
+    # ECR before `terraform` creates/updates the function, and this job owns
+    # the ECR repo (terraform reads it via a data block).
+    needs: [test, detect-changes]
+    if: |
+      always() &&
+      github.event_name != 'pull_request' &&
+      needs.test.result == 'success' &&
+      needs.detect-changes.outputs.fix-bt-window == 'true'
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.GHA_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Ensure ECR repo exists
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          REPO=trading-analysis-fix-bt-window
+          aws ecr describe-repositories --repository-names "$REPO" --region "$AWS_REGION" >/dev/null 2>&1 || \
+            aws ecr create-repository \
+              --repository-name "$REPO" \
+              --image-tag-mutability MUTABLE \
+              --region "$AWS_REGION" \
+              --no-cli-pager >/dev/null
+
+      - name: Build and push fix-bt-window image
+        env:
+          REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+        run: |
+          [ -n "$REGISTRY" ] || { echo "ERROR: REGISTRY is empty"; exit 1; }
+          IMAGE_URI=$REGISTRY/trading-analysis-fix-bt-window:${{ github.sha }}
+          LATEST=$REGISTRY/trading-analysis-fix-bt-window:latest
+          IMAGE_CACHE=$REGISTRY/trading-analysis-fix-bt-window:cache
+          docker buildx build \
+            -f services/fix_bt_window/Dockerfile \
+            --cache-from type=registry,ref=$IMAGE_CACHE \
+            --cache-to   type=registry,ref=$IMAGE_CACHE,mode=max \
+            --provenance=false \
+            -t $IMAGE_URI \
+            -t $LATEST \
+            --push .
+      # Terraform owns Lambda updates (data.aws_ecr_image digest pin in fix_bt_window.tf).
 
   deploy-streaming:
     runs-on: ubuntu-latest
@@ -433,12 +499,13 @@ jobs:
     # (:latest) exists in ECR by the time Terraform creates the function.
     # When backfill isn't changed, build-backfill-prices skips and Terraform
     # proceeds.
-    needs: [test, detect-changes, build-backfill-prices]
+    needs: [test, detect-changes, build-backfill-prices, build-fix-bt-window]
     if: |
       always() &&
       github.event_name != 'pull_request' &&
       needs.test.result == 'success' &&
       (needs.build-backfill-prices.result == 'success' || needs.build-backfill-prices.result == 'skipped') &&
+      (needs.build-fix-bt-window.result == 'success' || needs.build-fix-bt-window.result == 'skipped') &&
       needs.detect-changes.outputs.terraform == 'true'
     permissions:
       id-token: write

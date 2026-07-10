@@ -54,11 +54,13 @@ testpaths = [
     "libs/tests",
     "services/streaming/tests",
     "services/pnl_consumer/tests",
+    "services/fix_bt_window/tests",
 ]
 pythonpath = [
     ".",
     "services/streaming",
     "services/pnl_consumer",
+    "services/fix_bt_window",
 ]
 markers = [
     "unit: Unit tests (fast, no external dependencies)",
