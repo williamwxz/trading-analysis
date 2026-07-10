@@ -1,4 +1,7 @@
 # Daily bt trailing-window repair — image-package Lambda + EventBridge Rule.
+# VPC-attached so it egresses through the fck-nat EIP: ClickHouse Cloud only
+# accepts connections from allowlisted IPs (the NAT EIP) — a non-VPC Lambda's
+# public egress IPs are rejected at the TLS layer (verified on first deploy).
 #
 # Why: analytics.strategy_cum_pnl_bt_v2 (the bt position source) is published in
 # batches hours-to-days after bar time, so the live bt consumer holds stale
@@ -39,6 +42,13 @@ resource "aws_iam_role" "fix_bt_window_lambda" {
 resource "aws_iam_role_policy_attachment" "fix_bt_window_lambda_basic" {
   role       = aws_iam_role.fix_bt_window_lambda.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+# VPC ENI management (CreateNetworkInterface / DescribeNetworkInterfaces /
+# DeleteNetworkInterface) — required for vpc_config.
+resource "aws_iam_role_policy_attachment" "fix_bt_window_lambda_vpc" {
+  role       = aws_iam_role.fix_bt_window_lambda.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
 }
 
 # Read the ClickHouse secret bundle (handler fetches via boto3 on cold start).
@@ -94,6 +104,12 @@ resource "aws_lambda_function" "fix_bt_window" {
   # Never two repairs at once (double pause/resume + overlapping DELETEs).
   reserved_concurrent_executions = 1
 
+  # Egress through the fck-nat EIP — the only IP ClickHouse Cloud allows.
+  vpc_config {
+    subnet_ids         = [aws_subnet.private.id]
+    security_group_ids = [aws_security_group.ecs_tasks.id]
+  }
+
   environment {
     variables = {
       CLICKHOUSE_USER       = "dagster"
@@ -109,6 +125,7 @@ resource "aws_lambda_function" "fix_bt_window" {
   depends_on = [
     aws_cloudwatch_log_group.fix_bt_window,
     aws_iam_role_policy_attachment.fix_bt_window_lambda_basic,
+    aws_iam_role_policy_attachment.fix_bt_window_lambda_vpc,
   ]
 
   tags = local.common_tags
