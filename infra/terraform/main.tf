@@ -734,17 +734,27 @@ resource "aws_ecs_task_definition" "redpanda" {
   family                   = "${local.name_prefix}-redpanda"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = 1024
-  memory                   = 2048
-  execution_role_arn       = aws_iam_role.ecs_execution.arn
+  # Right-sized 2026-07: 14-day observed usage was ~1% avg / 5% peak CPU of
+  # 1 vCPU and ~240MB memory for 8 instruments x 1 candle/min on 1 partition.
+  # --overprovisioned tells Seastar the CPU is shared (no busy-poll/pinning),
+  # required for sane behavior at 0.25 vCPU.
+  cpu                = 256
+  memory             = 1024
+  execution_role_arn = aws_iam_role.ecs_execution.arn
 
   container_definitions = jsonencode([{
-    name       = "redpanda"
-    image      = "redpandadata/redpanda:latest"
+    name = "redpanda"
+    # Pinned to the version verified running in prod (digest sha256:3e72ea35...,
+    # 2026-07-11). The broker has no persistent volume — every Spot reclaim
+    # re-pulls the image, so :latest would upgrade the broker at random times.
+    image      = "redpandadata/redpanda:v26.1.12"
     essential  = true
     entryPoint = ["/bin/bash", "-c"]
+    # Topic create polls for broker readiness instead of a fixed sleep — boot
+    # is slower on 0.25 vCPU and a missed one-shot create would leave the
+    # topic absent until the health check recycles the task.
     command = [
-      "rpk redpanda start --smp 1 --memory 1500M --reserve-memory 0M --node-id 0 --kafka-addr PLAINTEXT://0.0.0.0:9092 --advertise-kafka-addr PLAINTEXT://redpanda.${local.name_prefix}.local:9092 --set redpanda.log_segment_ms=604800000 & sleep 15 && rpk topic create binance.price.ticks --brokers localhost:9092 --partitions 1 --replicas 1 && rpk topic alter-config binance.price.ticks --brokers localhost:9092 --set retention.ms=2592000000; wait"
+      "rpk redpanda start --smp 1 --memory 750M --reserve-memory 0M --overprovisioned --node-id 0 --kafka-addr PLAINTEXT://0.0.0.0:9092 --advertise-kafka-addr PLAINTEXT://redpanda.${local.name_prefix}.local:9092 --set redpanda.log_segment_ms=604800000 & until rpk cluster info --brokers localhost:9092 > /dev/null 2>&1; do sleep 2; done && rpk topic create binance.price.ticks --brokers localhost:9092 --partitions 1 --replicas 1 && rpk topic alter-config binance.price.ticks --brokers localhost:9092 --set retention.ms=2592000000; wait"
     ]
     portMappings = [{ containerPort = 9092, protocol = "tcp" }]
     healthCheck = {
@@ -752,7 +762,7 @@ resource "aws_ecs_task_definition" "redpanda" {
       interval    = 15
       timeout     = 5
       retries     = 3
-      startPeriod = 30
+      startPeriod = 60
     }
     logConfiguration = {
       logDriver = "awslogs"
@@ -861,10 +871,10 @@ resource "aws_ecs_task_definition" "pnl_consumer" {
   # Right-sized 2026-07: observed usage ~55-65MB mem / ~0.28 vCPU peak per
   # consumer; 0.25 vCPU throttles the cold-start bootstrap walk (slower
   # restarts) but the 1-min live loop has ample slack.
-  cpu                      = 256
-  memory                   = 512
-  execution_role_arn       = aws_iam_role.ecs_execution.arn
-  task_role_arn            = aws_iam_role.pnl_consumer_task.arn
+  cpu                = 256
+  memory             = 512
+  execution_role_arn = aws_iam_role.ecs_execution.arn
+  task_role_arn      = aws_iam_role.pnl_consumer_task.arn
 
   container_definitions = jsonencode([{
     name      = "pnl-consumer"
@@ -944,6 +954,13 @@ resource "aws_ecs_service" "redpanda" {
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.redpanda.arn
   desired_count   = 1
+
+  # Stop-then-start: the default 100/200 rolling deploy briefly runs two
+  # single-node brokers (same node-id) behind one Cloud Map DNS name. The
+  # broker is ephemeral anyway, so deploys should take the same path as a
+  # Spot reclaim: old task down, then new task up.
+  deployment_minimum_healthy_percent = 0
+  deployment_maximum_percent         = 100
 
   capacity_provider_strategy {
     capacity_provider = "FARGATE_SPOT"
