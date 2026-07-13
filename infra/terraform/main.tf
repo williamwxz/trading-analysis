@@ -750,11 +750,17 @@ resource "aws_ecs_task_definition" "redpanda" {
     image      = "redpandadata/redpanda:v26.1.12"
     essential  = true
     entryPoint = ["/bin/bash", "-c"]
-    # Topic create polls for broker readiness instead of a fixed sleep — boot
-    # is slower on 0.25 vCPU and a missed one-shot create would leave the
-    # topic absent until the health check recycles the task.
+    # Topic setup polls for broker readiness, then retries create + alter-config
+    # until both stick. A one-shot create races Cloud Map on every task
+    # replacement: rpk bootstraps via localhost but dials the ADVERTISED address
+    # (redpanda.<ns>.local) for the actual create, and the new task's A-record
+    # isn't registered yet (2026-07-13 cutover: create failed "no such host",
+    # clients auto-created the topic with broker-default 7d retention, and the
+    # 30d alter-config never ran). The describe fallback exits the create loop
+    # once the topic exists regardless of who created it; alter-config then
+    # enforces 30d retention either way.
     command = [
-      "rpk redpanda start --smp 1 --memory 750M --reserve-memory 0M --overprovisioned --node-id 0 --kafka-addr PLAINTEXT://0.0.0.0:9092 --advertise-kafka-addr PLAINTEXT://redpanda.${local.name_prefix}.local:9092 --set redpanda.log_segment_ms=604800000 & until rpk cluster info --brokers localhost:9092 > /dev/null 2>&1; do sleep 2; done && rpk topic create binance.price.ticks --brokers localhost:9092 --partitions 1 --replicas 1 && rpk topic alter-config binance.price.ticks --brokers localhost:9092 --set retention.ms=2592000000; wait"
+      "rpk redpanda start --smp 1 --memory 750M --reserve-memory 0M --overprovisioned --node-id 0 --kafka-addr PLAINTEXT://0.0.0.0:9092 --advertise-kafka-addr PLAINTEXT://redpanda.${local.name_prefix}.local:9092 --set redpanda.log_segment_ms=604800000 & until rpk cluster info --brokers localhost:9092 > /dev/null 2>&1; do sleep 2; done; until rpk topic create binance.price.ticks --brokers localhost:9092 --partitions 1 --replicas 1 2> /dev/null || rpk topic describe binance.price.ticks --brokers localhost:9092 > /dev/null 2>&1; do echo 'topic binance.price.ticks not confirmed yet, retrying create'; sleep 2; done; until rpk topic alter-config binance.price.ticks --brokers localhost:9092 --set retention.ms=2592000000; do sleep 2; done; echo 'topic binance.price.ticks ready with retention.ms=2592000000'; wait"
     ]
     portMappings = [{ containerPort = 9092, protocol = "tcp" }]
     healthCheck = {
