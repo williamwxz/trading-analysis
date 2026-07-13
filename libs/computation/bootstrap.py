@@ -74,12 +74,26 @@ class LastPnlAnchor:
     Used to seed the live AnchorState continuously: the first post-restart write
     chains from the exact last stored value, so a consumer restart produces no
     re-anchor step.
+
+    Carries the stored row's bar metadata so bootstrap can seed carry-forward-
+    capable records: carry-forward silently skips records with an empty
+    underlying/strategy_instance_id, and a freshly-restarted task must be able
+    to hold 1d strategies through the just-after-midnight window where they are
+    invisible to the candle lookups (incident 2026-07-13 00:25/00:26).
     """
 
     strategy_table_name: str
     pnl: float
     price: float
     ts: datetime
+    strategy_id: int = 0
+    strategy_name: str = ""
+    underlying: str = ""
+    config_timeframe: str = ""
+    weighting: float = 0.0
+    strategy_instance_id: str = ""
+    final_signal: float = 0.0
+    benchmark: float = 0.0
 
 
 def fetch_last_pnl_anchors(
@@ -124,17 +138,22 @@ SELECT
     strategy_table_name,
     argMax(cumulative_pnl, (ts, updated_at)) AS cumulative_pnl,
     argMax(price,          (ts, updated_at)) AS price,
-    max(ts)                                  AS last_ts
+    max(ts)                                  AS last_ts,
+    argMax(strategy_id,          (ts, updated_at)) AS strategy_id,
+    argMax(strategy_name,        (ts, updated_at)) AS strategy_name,
+    argMax(underlying,           (ts, updated_at)) AS underlying,
+    argMax(config_timeframe,     (ts, updated_at)) AS config_timeframe,
+    argMax(weighting,            (ts, updated_at)) AS weighting,
+    argMax(strategy_instance_id, (ts, updated_at)) AS strategy_instance_id,
+    argMax(final_signal,         (ts, updated_at)) AS final_signal,
+    argMax(benchmark,            (ts, updated_at)) AS benchmark
 FROM {pnl_table}
 WHERE ts >= '{window_start_str}' AND ts < '{ref_str}'
 GROUP BY strategy_table_name
 """
     for r in query_dicts(bounded_sql):
-        anchors[r["strategy_table_name"]] = LastPnlAnchor(
-            strategy_table_name=r["strategy_table_name"],
-            pnl=float(r["cumulative_pnl"] or 0.0),
-            price=float(r["price"]),
-            ts=r["last_ts"],
+        anchors[r["strategy_table_name"]] = _parse_anchor_row(
+            r["strategy_table_name"], r, r["last_ts"]
         )
 
     # Unbounded fallback for strategies inactive beyond the window — look all the
@@ -143,7 +162,9 @@ GROUP BY strategy_table_name
         if stn in anchors:
             continue
         fallback_sql = f"""\
-SELECT cumulative_pnl, price, ts
+SELECT cumulative_pnl, price, ts,
+       strategy_id, strategy_name, underlying, config_timeframe,
+       weighting, strategy_instance_id, final_signal, benchmark
 FROM {pnl_table}
 WHERE strategy_table_name = '{stn}' AND ts < '{ref_str}'
 ORDER BY ts DESC, updated_at DESC
@@ -152,13 +173,25 @@ LIMIT 1
         rows = query_dicts(fallback_sql)
         if rows:
             r = rows[0]
-            anchors[stn] = LastPnlAnchor(
-                strategy_table_name=stn,
-                pnl=float(r["cumulative_pnl"] or 0.0),
-                price=float(r["price"]),
-                ts=r["ts"],
-            )
+            anchors[stn] = _parse_anchor_row(stn, r, r["ts"])
     return anchors
+
+
+def _parse_anchor_row(stn: str, r: dict, ts: datetime) -> LastPnlAnchor:
+    return LastPnlAnchor(
+        strategy_table_name=stn,
+        pnl=float(r["cumulative_pnl"] or 0.0),
+        price=float(r["price"]),
+        ts=ts,
+        strategy_id=int(r.get("strategy_id") or 0),
+        strategy_name=str(r.get("strategy_name") or ""),
+        underlying=str(r.get("underlying") or ""),
+        config_timeframe=str(r.get("config_timeframe") or ""),
+        weighting=float(r.get("weighting") or 0.0),
+        strategy_instance_id=str(r.get("strategy_instance_id") or ""),
+        final_signal=float(r.get("final_signal") or 0.0),
+        benchmark=float(r.get("benchmark") or 0.0),
+    )
 
 
 def fetch_last_pnl_anchor_for_strategy(

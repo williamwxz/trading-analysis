@@ -1442,3 +1442,76 @@ def test_fetch_real_trade_for_candle_lookback_covers_prior_day_daily_bar():
 
     assert "INTERVAL 2 DAY" in captured[0], "1d bars need a 2-day live lookback"
     assert "INTERVAL 1 DAY" not in captured[0]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Midnight-restart 1d regression (incident 2026-07-13 00:25/00:26)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_fetch_last_pnl_anchors_returns_metadata():
+    """Anchors must carry bar metadata so bootstrap can seed carry-forward-capable
+    records (midnight-restart 1d incident: bare records were dropped silently)."""
+    universe_row = [{"strategy_table_name": "STN_A"}]
+    bounded_row = [
+        {
+            "strategy_table_name": "STN_A",
+            "cumulative_pnl": 1.5,
+            "price": 100.0,
+            "last_ts": datetime(2026, 7, 13, 0, 24, 0),
+            "strategy_id": 42,
+            "strategy_name": "momo",
+            "underlying": "BTC",
+            "config_timeframe": "1d",
+            "weighting": 1.0,
+            "strategy_instance_id": "inst_042",
+            "final_signal": 1.0,
+            "benchmark": 0.1,
+        }
+    ]
+    with patch(
+        "libs.computation.bootstrap.query_dicts",
+        side_effect=[universe_row, bounded_row],
+    ):
+        anchors = fetch_last_pnl_anchors(
+            "analytics.strategy_pnl_1min_bt_v2", datetime(2026, 7, 13, 0, 25, 0)
+        )
+    a = anchors["STN_A"]
+    assert a.underlying == "BTC"
+    assert a.strategy_instance_id == "inst_042"
+    assert a.config_timeframe == "1d"
+    assert a.strategy_name == "momo"
+
+
+@pytest.mark.unit
+def test_fetch_strategies_lookback_floored_to_midnight():
+    """The prod bar-ts lower bound must floor to midnight so the previous 1d bar
+    (ts = D-2 00:00) stays eligible until the new day's bar arrives (~00:31)."""
+    captured = []
+
+    def capture(sql):
+        captured.append(sql)
+        return []
+
+    with patch("libs.computation.candle_lookup.query_dicts", side_effect=capture):
+        fetch_strategies_for_candle(
+            instrument="BTCUSDT", candle_ts=datetime(2026, 7, 13, 0, 25, 0)
+        )
+    assert "toStartOfDay(" in captured[0]
+
+
+@pytest.mark.unit
+def test_fetch_real_trade_lookback_floored_to_midnight():
+    """Same floor for the real_trade bar-ts lower bound."""
+    captured = []
+
+    def capture(sql):
+        captured.append(sql)
+        return []
+
+    with patch("libs.computation.candle_lookup.query_dicts", side_effect=capture):
+        fetch_real_trade_for_candle(
+            instrument="BTCUSDT", candle_ts=datetime(2026, 7, 13, 0, 25, 0)
+        )
+    assert "toStartOfDay(" in captured[0]

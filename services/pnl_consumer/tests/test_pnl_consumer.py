@@ -904,3 +904,120 @@ def test_bootstrap_state_seeds_flat_when_pnl_chain_but_no_current_revision():
     rec = state.get("RETIRED")
     assert rec.pnl == pytest.approx(7.5)  # chain continues from last stored value
     assert rec.position == pytest.approx(0.0)  # flat — no current revision
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Midnight-restart 1d regression (incident 2026-07-13 00:25/00:26)
+#
+# Just after midnight UTC the new day's 1d bars don't exist yet and the previous
+# day's bar falls outside the candle-lookup gates, so every sink depends on
+# in-memory carry-forward. Carry-forward silently drops records without bar
+# metadata — and a freshly-restarted task's state had none for bt (bare by
+# design) or for prod/rt strategies missing a bootstrap seed. These tests pin
+# the fix: bootstrap must seed metadata onto every record it anchors.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_MIDNIGHT_CANDLE_TS = datetime(2026, 7, 13, 0, 25, 0)
+
+
+def _anchor_1d(stn="s42|momo|u=BTC|inst_1d_042"):
+    return LastPnlAnchor(
+        strategy_table_name=stn,
+        pnl=0.5,
+        price=93100.0,
+        ts=datetime(2026, 7, 13, 0, 24, 0),
+        strategy_id=42,
+        strategy_name="momo",
+        underlying="BTC",
+        config_timeframe="1d",
+        weighting=1.0,
+        strategy_instance_id="inst_1d_042",
+        final_signal=1.0,
+        benchmark=0.1,
+    )
+
+
+@pytest.mark.unit
+def test_bootstrap_bt_state_seeds_metadata_from_anchor():
+    """bt bootstrap must seed bar metadata so carry-forward can fire before the
+    strategy's first live lookup hit (midnight-restart 1d incident)."""
+    from pnl_consumer.pnl_consumer import _bootstrap_bt_state
+
+    stn = "s42|momo|u=BTC|inst_1d_042"
+    with (
+        patch(f"{_MOD}.fetch_last_pnl_anchors", return_value={stn: _anchor_1d(stn)}),
+        patch(f"{_MOD}.pnl_table_is_empty", return_value=False),
+    ):
+        state = _bootstrap_bt_state(_MIDNIGHT_CANDLE_TS)
+
+    rec = state.get(stn)
+    assert rec.underlying == "BTC"
+    assert rec.strategy_instance_id == "inst_1d_042"
+    assert rec.config_timeframe == "1d"
+
+
+@pytest.mark.unit
+def test_midnight_restart_bt_carry_forward_emits_1d_row():
+    """Freshly-restarted bt task + 1d strategy invisible to the cum lookup:
+    the carry-forward row must still be emitted (it was silently dropped)."""
+    from pnl_consumer.pnl_consumer import _bootstrap_bt_state
+
+    stn = "s42|momo|u=BTC|inst_1d_042"
+    with (
+        patch(f"{_MOD}.fetch_last_pnl_anchors", return_value={stn: _anchor_1d(stn)}),
+        patch(f"{_MOD}.pnl_table_is_empty", return_value=False),
+    ):
+        state_bt = _bootstrap_bt_state(_MIDNIGHT_CANDLE_TS)
+
+    cfg = SinkConfig(price=False, prod=False, real_trade=False, bt=True)
+    with patch(f"{_MOD}.fetch_bt_anchors_for_candle", return_value=[]):
+        rows, _, _, _ = process_candle(
+            _candle(ts=_MIDNIGHT_CANDLE_TS),
+            AnchorState(),
+            AnchorState(),
+            cfg,
+            state_bt=state_bt,
+        )
+
+    bt_rows = [r["_row"] for r in rows if r["_sink"] == "pnl_bt"]
+    assert len(bt_rows) == 1
+    assert bt_rows[0][0] == stn
+    assert bt_rows[0][3] == "BTC"  # underlying
+    assert bt_rows[0][15] == "inst_1d_042"  # strategy_instance_id
+
+
+@pytest.mark.unit
+def test_bootstrap_state_no_seed_fallback_keeps_anchor_metadata():
+    """prod/rt: a strategy with a pnl chain but no bootstrap seed must keep the
+    anchor's metadata so carry-forward still fires (was seeded bare)."""
+    stn = "s42|momo|u=BTC|inst_1d_042"
+    with (
+        patch(f"{_MOD}.fetch_last_pnl_anchors", return_value={stn: _anchor_1d(stn)}),
+        patch(f"{_MOD}.fetch_bootstrap_seeds", return_value=[]),
+        patch(f"{_MOD}._fetch_walk_anchors", return_value=({}, {})),
+        patch(f"{_MOD}.fetch_walk_rows", return_value=[]),
+    ):
+        state = _bootstrap_state("real_trade", reference_ts=_MIDNIGHT_CANDLE_TS)
+
+    rec = state.get(stn)
+    assert rec.position == pytest.approx(0.0)  # still flat — no current revision
+    assert rec.underlying == "BTC"
+    assert rec.strategy_instance_id == "inst_1d_042"
+
+
+@pytest.mark.unit
+def test_carry_forward_drop_logs_warning(caplog):
+    """A metadata-less record skipped by carry-forward must log loudly, not
+    vanish silently (incident 2026-07-13: 79 1d strategies dropped unseen)."""
+    import logging
+
+    from pnl_consumer.pnl_consumer import _carry_forward_row
+
+    state = AnchorState()
+    state.set("BARE", AnchorRecord(pnl=1.0, price=100.0, position=0.0))
+    with caplog.at_level(logging.WARNING, logger=_MOD):
+        row = _carry_forward_row(
+            state, "BARE", _candle(ts=_MIDNIGHT_CANDLE_TS), "backtest", datetime.now()
+        )
+    assert row is None
+    assert any("BARE" in r.message for r in caplog.records)

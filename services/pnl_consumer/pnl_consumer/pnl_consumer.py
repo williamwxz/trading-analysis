@@ -264,6 +264,29 @@ GROUP BY strategy_table_name
     return pnl_map, price_map
 
 
+def _anchor_record_from_last_anchor(anchor, position: float = 0.0) -> AnchorRecord:
+    """Build an AnchorRecord from a stored LastPnlAnchor, keeping its metadata.
+
+    Carry-forward requires underlying + strategy_instance_id on the record;
+    seeding them from the stored row means a freshly-restarted task can hold a
+    strategy through a lookup-invisible window (e.g. 1d strategies just after
+    midnight UTC) instead of silently dropping it.
+    """
+    return AnchorRecord(
+        pnl=anchor.pnl,
+        price=anchor.price,
+        position=position,
+        strategy_id=anchor.strategy_id,
+        strategy_name=anchor.strategy_name,
+        underlying=anchor.underlying,
+        config_timeframe=anchor.config_timeframe,
+        weighting=anchor.weighting,
+        strategy_instance_id=anchor.strategy_instance_id,
+        final_signal=anchor.final_signal,
+        benchmark=anchor.benchmark,
+    )
+
+
 def _bootstrap_state(
     mode: str,
     reference_ts: "datetime | None",
@@ -320,9 +343,9 @@ def _bootstrap_state(
         else:
             # PnL chain exists but no current revision (retired/quiet) — seed flat;
             # guard stays at datetime.min so any future revision is accepted.
-            state.set(
-                stn, AnchorRecord(pnl=anchor.pnl, price=anchor.price, position=0.0)
-            )
+            # Metadata comes from the stored anchor row so carry-forward can still
+            # fire (a bare record is silently skipped — incident 2026-07-13).
+            state.set(stn, _anchor_record_from_last_anchor(anchor, position=0.0))
 
     # Brand-new strategies: a current revision but no stored pnl row yet.
     for seed in seeds:
@@ -426,8 +449,11 @@ def _bootstrap_bt_state(reference_ts: "datetime | None") -> AnchorState:
     value. Position is NOT seeded here — the live loop passes the active cum bar's
     pos_first into compute_pnl each candle. Brand-new strategies (no stored row)
     lazy-seed from cum_pnl_first on first appearance. Metadata (instance_id,
-    underlying, ...) is populated on the first live candle. No history-shaped seeds
-    and no walk-verify (bt's source is the authoritative cum table).
+    underlying, ...) is seeded from the stored anchor row so carry-forward can fire
+    before the strategy's first live lookup hit — a bare record is silently skipped
+    by carry-forward, which dropped the 79 1d strategies during the lookup-invisible
+    just-after-midnight window (incident 2026-07-13 00:25/00:26). No history-shaped
+    seeds and no walk-verify (bt's source is the authoritative cum table).
     """
     now = datetime.now(UTC).replace(tzinfo=None)
     ref_ts = reference_ts if reference_ts is not None else now
@@ -442,8 +468,17 @@ def _bootstrap_bt_state(reference_ts: "datetime | None") -> AnchorState:
             "is non-empty — refusing to start (would mass re-anchor to cum_pnl_first)"
         )
     state = AnchorState()
+    bare = 0
     for stn, anchor in anchors.items():
-        state.set(stn, AnchorRecord(pnl=anchor.pnl, price=anchor.price, position=0.0))
+        if not anchor.strategy_instance_id or not anchor.underlying:
+            bare += 1
+        state.set(stn, _anchor_record_from_last_anchor(anchor, position=0.0))
+    if bare:
+        logger.warning(
+            "Bootstrap [bt]: %d anchors have empty metadata — carry-forward "
+            "cannot cover them until their first live lookup hit",
+            bare,
+        )
     logger.info("Bootstrap [bt]: ref_ts=%s anchored=%d", ref_ts, len(anchors))
     return state
 
@@ -572,6 +607,13 @@ def _carry_forward_row(
     """
     rec = state.get(strategy_table_name)
     if not rec.strategy_instance_id:
+        logger.warning(
+            "Carry-forward dropped '%s' at candle %s [%s]: record has no bar "
+            "metadata — a stored-row gap will appear for this minute",
+            strategy_table_name,
+            candle.ts,
+            source_label,
+        )
         return None
     pnl = state.compute_pnl(
         strategy_table_name,
