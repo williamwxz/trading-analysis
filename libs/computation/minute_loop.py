@@ -10,9 +10,11 @@ For prod/bt:
 
 For real_trade:
     Active revision at minute M = accepted revision R where execution_ts(R) <= M
-    < next_execution_ts(R). Acceptance filter: (bar_ts, revision_ts) must be strictly
-    greater than the previous accepted revision's (bar_ts, revision_ts) — mirrors
-    AnchorState.should_apply_revision in the pnl_consumer.
+    < next_execution_ts(R). Acceptance filter: revisions are processed in arrival
+    (revision_ts) order and accepted iff (bar_ts, revision_ts) is strictly greater
+    than the last APPLIED revision's (bar_ts, revision_ts) — mirrors
+    AnchorState.should_apply_revision in the pnl_consumer (see
+    pnl_formula.accept_rt_revisions).
 """
 
 from bisect import bisect_right
@@ -20,7 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
-from libs.computation.pnl_formula import TIMEFRAME_MAP
+from libs.computation.pnl_formula import TIMEFRAME_MAP, accept_rt_revisions
 
 
 def _parse_ts(s: str) -> datetime:
@@ -73,15 +75,14 @@ def build_prod_lookup(bars: list[dict]) -> ProdLookup:
 def build_rt_lookup(bars: list[dict]) -> RtLookup:
     """Build per-strategy sorted execution_ts lookup for real_trade revisions.
 
-    Acceptance filter mirrors AnchorState.should_apply_revision: a revision is
-    accepted iff (bar_ts, revision_ts) > (prev_accepted.ts, prev_accepted.revision_ts).
-    Revisions are sorted by (ts, revision_ts) ascending before filtering.
+    Acceptance: see accept_rt_revisions (live-consumer arrival-order guard).
 
-    After acceptance, revisions are re-sorted by execution_ts and deduplicated:
-    when multiple accepted revisions share the same execution_ts (e.g. a late
-    bulk re-revision batch covering many bars at the same revision_ts), only the
-    last one in (ts, revision_ts) order is kept. This ensures the lookup timeline
-    is strictly monotonic so no entry has a zero-width active window.
+    Accepted revisions are deduplicated by execution_ts: when multiple share
+    the same execution minute, only the last applied one is kept, so the
+    lookup timeline is strictly monotonic and no entry has a zero-width
+    active window. The tail entry holds for tf_minutes past its closing_ts,
+    floored at its own execution_ts so the hold never runs backwards when a
+    revision arrives long after its bar closed.
     """
     by_stn: dict[str, list[dict]] = {}
     for bar in bars:
@@ -89,25 +90,14 @@ def build_rt_lookup(bars: list[dict]) -> RtLookup:
 
     lookup: RtLookup = {}
     for stn, stn_bars in by_stn.items():
-        stn_bars.sort(key=lambda b: (b["ts"], b["revision_ts"]))
-        accepted: list[dict] = []
-        last_bar_ts: str = ""
-        last_revision_ts: str = ""
-        for rev in stn_bars:
-            if (rev["ts"], rev["revision_ts"]) > (last_bar_ts, last_revision_ts):
-                accepted.append(rev)
-                last_bar_ts = rev["ts"]
-                last_revision_ts = rev["revision_ts"]
+        accepted = accept_rt_revisions(stn_bars)
         if not accepted:
             continue
 
-        # Re-sort by execution_ts; deduplicate by keeping the last accepted
-        # revision per execution_ts (latest (ts, revision_ts) wins).
-        accepted.sort(key=lambda b: (b["execution_ts"], b["ts"], b["revision_ts"]))
         deduped: list[dict] = []
         for rev in accepted:
             if deduped and deduped[-1]["execution_ts"] == rev["execution_ts"]:
-                deduped[-1] = rev  # replace with later (ts, revision_ts)
+                deduped[-1] = rev  # replace with the later-applied revision
             else:
                 deduped.append(rev)
 
@@ -118,7 +108,9 @@ def build_rt_lookup(bars: list[dict]) -> RtLookup:
                 next_exec_ts = _parse_ts(deduped[i + 1]["execution_ts"])
             else:
                 tf = TIMEFRAME_MAP.get(rev["config_timeframe"], 5)
-                next_exec_ts = _parse_ts(rev["closing_ts"]) + timedelta(minutes=tf)
+                next_exec_ts = max(
+                    exec_ts, _parse_ts(rev["closing_ts"]) + timedelta(minutes=tf)
+                )
             entries.append(RtRevisionEntry(execution_ts=exec_ts, next_execution_ts=next_exec_ts, rev=rev))
         lookup[stn] = entries
     return lookup
