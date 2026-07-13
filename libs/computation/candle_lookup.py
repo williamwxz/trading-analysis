@@ -21,6 +21,14 @@ _BT_STREAM_LOOKBACK = "4 DAY"
 # (execution_ts ≈ next midnight, held until the following day's bar). A 1-day
 # window dropped 1d strategies from the live stream. argMax / LIMIT 1 BY still
 # pick the latest bar, so widening only grows the candidate set — safe for all tf.
+#
+# The lower bound is additionally FLOORED TO MIDNIGHT (toStartOfDay). Without the
+# floor, a candle just after midnight UTC excludes the newest ARRIVED 1d bar: at
+# candle D 00:25 the bound is D-2 00:25, one minute past the bar at ts=D-2 00:00,
+# while the new day's bar only lands ~00:31 — so every 1d strategy vanished from
+# the prod/rt lookups for the first ~half hour of each day and coverage depended
+# entirely on in-memory carry-forward (incident 2026-07-13 00:25/00:26). Same
+# rationale as the floored-2-day bootstrap seed window (fetch_bootstrap_seeds).
 _LOOKBACK = "2 DAY"
 
 # Per-query memory controls for the two heaviest live-loop aggregations, applied via
@@ -176,7 +184,7 @@ WHERE underlying = '{underlying}'
       FROM analytics.strategy_output_history_v2
       WHERE underlying = '{underlying}'
         AND ts + toIntervalMinute({_TF_MINUTES_EXPR_NO_ALIAS}) <= '{ts_str}'
-        AND ts >= '{ts_str}'::DateTime - INTERVAL {_LOOKBACK}
+        AND ts >= toStartOfDay('{ts_str}'::DateTime - INTERVAL {_LOOKBACK})
       GROUP BY strategy_instance_id
   )
 GROUP BY
@@ -324,7 +332,7 @@ SELECT
     argMax(row_json, (ts, revision_ts))     AS row_json
 FROM analytics.strategy_output_history_v2
 PREWHERE underlying = '{underlying}'
-WHERE ts >= '{ts_str}'::DateTime - INTERVAL {_LOOKBACK}
+WHERE ts >= toStartOfDay('{ts_str}'::DateTime - INTERVAL {_LOOKBACK})
   AND ts <= '{ts_str}'::DateTime
   AND revision_ts <= '{ts_str}'
 GROUP BY
