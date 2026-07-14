@@ -738,6 +738,12 @@ resource "aws_ecs_task_definition" "redpanda" {
   # 1 vCPU and ~240MB memory for 8 instruments x 1 candle/min on 1 partition.
   # --overprovisioned tells Seastar the CPU is shared (no busy-poll/pinning),
   # required for sane behavior at 0.25 vCPU.
+  # The 2026-07-13 double restart at this size was Fargate Spot reclaims, NOT
+  # memory pressure (correlated ws-consumer reclaim in the same sweep; clean
+  # logs to the last second, no bad_alloc; June had near-daily reclaims) — see
+  # docs/runbooks/2026-07-13-broker-replacement-consumer-wedge.md. Every
+  # replacement is a NEW cluster (ephemeral storage → new ClusterId); consumers
+  # crash-to-recover on detecting it, so reclaims cost ~2-3 min of stream pause.
   cpu                = 256
   memory             = 1024
   execution_role_arn = aws_iam_role.ecs_execution.arn

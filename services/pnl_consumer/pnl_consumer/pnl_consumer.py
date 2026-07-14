@@ -13,8 +13,11 @@ Position source: strategy_output_history_* via libs.computation candle lookups.
 import json
 import logging
 import os
+import re
 import signal
 import sys
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -86,6 +89,90 @@ def _walk_deviation_action(deviation: float) -> str:
     if deviation > _PNL_WARN_TOLERANCE:
         return "warn"
     return "ok"
+
+
+# ── Crash-to-recover: broker-replacement wedge detection ────────────────────
+# The Redpanda broker runs on Fargate Spot with ephemeral storage: every task
+# replacement is a brand-new cluster (new ClusterId, new topic ids). librdkafka
+# treats that as "client connected to multiple clusters", logs CLUSTERID /
+# PARTCNT->0 at warn level, stops fetching, and poll() returns None forever —
+# no error event ever reaches the poll loop (incident 2026-07-13: prod/bt/price
+# wedged silently for ~20h). Detect the condition and exit non-zero so ECS
+# replaces the task; a fresh client bootstraps cleanly against the new cluster.
+
+
+class ConsumerWedgedError(RuntimeError):
+    """The Kafka client is in a state it will never recover from."""
+
+
+_PARTCNT_DROPPED_TO_ZERO = re.compile(r"partition count changed from \d+ to 0\b")
+
+
+class RdkafkaWedgeDetector(logging.Handler):
+    """Flags librdkafka log lines that mean the client will never fetch again.
+
+    confluent-kafka forwards librdkafka logs to the configured logger as
+    ``log(level, "%s [%s] %s", facility, client_name, message)``; the
+    unrecoverable broker-replacement conditions arrive only through this
+    channel — never as poll() error events.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reason: str | None = None
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if isinstance(record.args, tuple) and len(record.args) == 3:
+            facility, _client, detail = (str(a) for a in record.args)
+        else:
+            facility, detail = "", record.getMessage()
+        wedged = (
+            facility == "CLUSTERID"
+            or "different ClusterId" in detail
+            or _PARTCNT_DROPPED_TO_ZERO.search(detail) is not None
+        )
+        if wedged and self.reason is None:
+            self.reason = f"{facility or 'rdkafka'}: {detail}"
+
+
+class PollSilenceWatchdog:
+    """Backstop for wedge modes without a known log signature.
+
+    binance.price.ticks carries ~8 msgs/min around the clock, so poll()
+    delivering nothing at all for this long means a dead pipeline either way;
+    exiting is idempotent (uncommitted offsets replay after restart).
+    """
+
+    def __init__(
+        self, max_silence_secs: float, now: Callable[[], float] = time.monotonic
+    ) -> None:
+        self._max = max_silence_secs
+        self._now = now
+        self._last = now()
+
+    def record_activity(self) -> None:
+        self._last = self._now()
+
+    def check(self) -> str | None:
+        if self._max <= 0:
+            return None
+        elapsed = self._now() - self._last
+        if elapsed > self._max:
+            return f"no Kafka events for {elapsed:.0f}s (limit {self._max:.0f}s)"
+        return None
+
+
+def _raise_if_wedged(
+    detector: RdkafkaWedgeDetector, watchdog: PollSilenceWatchdog
+) -> None:
+    reason = detector.reason or watchdog.check()
+    if reason is None:
+        return
+    logger.critical(
+        "Kafka client wedged (%s) — exiting so ECS restarts with a fresh client",
+        reason,
+    )
+    raise ConsumerWedgedError(reason)
 
 
 PRICE_COLUMNS = [
@@ -980,13 +1067,24 @@ def run() -> None:
     group_id = resolve_group_id()
     sink_label = group_id.removeprefix("pnl-consumer-") or group_id
 
+    # Route librdkafka logs through Python logging so the unrecoverable
+    # broker-replacement conditions (CLUSTERID / PARTCNT->0) are detectable —
+    # librdkafka only logs them; nothing is delivered as a poll() error.
+    rdkafka_logger = logging.getLogger("pnl_consumer.rdkafka")
+    wedge_detector = RdkafkaWedgeDetector()
+    rdkafka_logger.addHandler(wedge_detector)
+    watchdog = PollSilenceWatchdog(
+        float(os.environ.get("MAX_POLL_SILENCE_MINUTES", "30")) * 60
+    )
+
     consumer = Consumer(
         {
             "bootstrap.servers": os.environ["REDPANDA_BROKERS"],
             "group.id": group_id,
             "auto.offset.reset": "earliest",
             "enable.auto.commit": False,
-        }
+        },
+        logger=rdkafka_logger,
     )
     consumer.subscribe([TOPIC])
     logger.info("Subscribed to %s as group %s", TOPIC, group_id)
@@ -1004,6 +1102,11 @@ def run() -> None:
     try:
         while True:
             msg = consumer.poll(timeout=1.0)
+            if msg is not None:
+                watchdog.record_activity()
+            # Check before processing: an unprocessed message is uncommitted
+            # and replays after the restart.
+            _raise_if_wedged(wedge_detector, watchdog)
             if msg is None:
                 continue
             err = msg.error()
@@ -1101,6 +1204,11 @@ def run() -> None:
                 len(pnl_bt_rows),
             )
 
+    except ConsumerWedgedError:
+        # Already logged at CRITICAL. Skip consumer.close(): a wedged client
+        # can block in LeaveGroup, and the group lives on a cluster that no
+        # longer exists — exit hard so ECS restarts the task.
+        sys.exit(1)
     except Exception:
         logger.exception("Fatal error in consumer loop")
         consumer.close()

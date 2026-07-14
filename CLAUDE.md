@@ -205,6 +205,8 @@ Full detail in `docs/pnl_consumer_logic.md`. Shared query library in `libs/compu
 - `bar_ts` = `strategy_output_history_v2.ts` (bar open time, not closing_ts or revision_ts)
 - Bootstrap walk resolves position as "latest revision with `revision_ts <= row.ts`" (same guard logic)
 
+**Crash-to-recover (broker replacement):** the Redpanda broker is Fargate Spot with ephemeral storage — every task replacement is a brand-new cluster (new ClusterId/topic ids), which librdkafka treats as unrecoverable but only logs (never a `poll()` error; consumers wedged silently ~20h, incident 2026-07-13). The consumer routes librdkafka logs through Python logging, detects `CLUSTERID`/`PARTCNT→0` (`RdkafkaWedgeDetector`), and exits non-zero so ECS restarts it fresh; a `PollSilenceWatchdog` (`MAX_POLL_SILENCE_MINUTES`, default 30, 0=off) backstops unknown wedge modes. See `docs/runbooks/2026-07-13-broker-replacement-consumer-wedge.md`.
+
 **Critical data-source rules:**
 - `position` for prod/real_trade always from `strategy_output_history_*` — never from the PnL table. **BT is the exception**: its position (`pos_first`) comes from `strategy_cum_pnl_bt_v2`, also never from the PnL table.
 - `price` always from `futures_price_1min` (bootstrap/walk) or Redpanda candle `open` (live) — never from the PnL table's `price` column
