@@ -688,6 +688,33 @@ def _prepare_rows_for_insert(rows: list[list]) -> list[list]:
     return rows
 
 
+def report_zero_row_strategies(
+    type_: Mode, underlying: str, group: list[StrategyFix]
+) -> list[str]:
+    """Log a loud error for strategies whose repair wrote 0 rows.
+
+    A 0-row outcome after fix_applied means the window's rows were DELETEd and
+    nothing was recomputed — silent data loss (the FET 2026-07-13 incident,
+    where a stale re-revision collapsed last_active_minute before the window).
+    Returns the affected strategy_table_names.
+    """
+    zero = [
+        f.strategy_table_name for f in group if f.fix_applied and f.rows_written == 0
+    ]
+    if zero:
+        log.error(
+            "[%s/%s] %d strategies wrote 0 rows over a nonempty repair window — "
+            "their existing rows were deleted and NOT recomputed (data loss). "
+            "Affected: %s%s",
+            type_,
+            underlying,
+            len(zero),
+            sorted(zero)[:10],
+            "..." if len(zero) > 10 else "",
+        )
+    return zero
+
+
 def fix_prod_rt_strategies(
     type_: Mode, fixes: list[StrategyFix], client, *, dry_run: bool, now_ts: datetime
 ) -> None:
@@ -861,6 +888,7 @@ def fix_prod_rt_strategies(
                 f.strategy_table_name,
                 f.rows_written,
             )
+        report_zero_row_strategies(type_, underlying, group)
 
 
 def fix_bt_strategies(

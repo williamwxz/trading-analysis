@@ -361,6 +361,32 @@ def compute_bt_pnl(
     return output
 
 
+def accept_rt_revisions(stn_bars: List[dict]) -> List[dict]:
+    """Filter one strategy's revisions the way the live consumer applies them.
+
+    Mirrors AnchorState.should_apply_revision: revisions are processed in
+    ARRIVAL order (revision_ts ascending — the order the consumer sees them),
+    and one is accepted iff its (ts, revision_ts) is strictly greater than the
+    last APPLIED revision's (ts, revision_ts). A late re-publication of an old
+    bar (ts < the last applied bar's ts) is therefore rejected — processing in
+    (ts, revision_ts) order instead would degrade the guard to a pure dedup
+    and accept it (the FET 2026-07-13 stale re-revision incident).
+
+    The accepted list is ascending in both revision_ts (hence execution_ts)
+    and (ts, revision_ts).
+    """
+    ordered = sorted(stn_bars, key=lambda b: (b["revision_ts"], b["ts"]))
+    accepted: List[dict] = []
+    last_bar_ts: str = ""
+    last_revision_ts: str = ""
+    for rev in ordered:
+        if (rev["ts"], rev["revision_ts"]) > (last_bar_ts, last_revision_ts):
+            accepted.append(rev)
+            last_bar_ts = rev["ts"]
+            last_revision_ts = rev["revision_ts"]
+    return accepted
+
+
 def compute_real_trade_pnl(
     bars: List[dict],
     anchors: Dict[str, Tuple[float, float, float]],
@@ -368,13 +394,13 @@ def compute_real_trade_pnl(
 ) -> List[list]:
     """Expand real_trade revisions to 1-min rows.
 
-    Acceptance rule: mirrors AnchorState.should_apply_revision in the pnl_consumer.
-    A revision is accepted iff (bar_ts, revision_ts) > (prev_accepted.ts, prev_accepted.revision_ts).
-    Revisions are processed in (ts, revision_ts) ascending order; any revision that is
-    not strictly greater than the last accepted one is discarded (duplicate or stale).
-    Accepted revisions expand from their execution_ts until the next accepted
-    revision's execution_ts. The last accepted revision holds for tf_minutes past
-    its closing_ts.
+    Acceptance rule: accept_rt_revisions — the live consumer's arrival-order
+    guard (AnchorState.should_apply_revision). Stale re-publications of old
+    bars are discarded. Accepted revisions expand from their execution_ts
+    until the next accepted revision's execution_ts. The last accepted
+    revision holds for tf_minutes past its closing_ts (floored at its own
+    execution_ts, so a revision arriving long after its bar closed never
+    yields a backwards hold).
     """
     by_strategy: Dict[str, List[dict]] = defaultdict(list)
     for bar in bars:
@@ -384,17 +410,8 @@ def compute_real_trade_pnl(
     output: List[list] = []
 
     for stn, strategy_bars in by_strategy.items():
-        strategy_bars.sort(key=lambda b: (b["ts"], b["revision_ts"]))
         anchor_pnl, anchor_price, _active_pos = anchors.get(stn, (0.0, 0.0, 0.0))
-
-        accepted: List[dict] = []
-        last_bar_ts: str = ""
-        last_revision_ts: str = ""
-        for rev in strategy_bars:
-            if (rev["ts"], rev["revision_ts"]) > (last_bar_ts, last_revision_ts):
-                accepted.append(rev)
-                last_bar_ts = rev["ts"]
-                last_revision_ts = rev["revision_ts"]
+        accepted = accept_rt_revisions(strategy_bars)
 
         for i, rev in enumerate(accepted):
             exec_ts = _parse_ts(rev["execution_ts"])
@@ -402,7 +419,10 @@ def compute_real_trade_pnl(
                 end_ts = _parse_ts(accepted[i + 1]["execution_ts"])
             else:
                 tf_minutes = TIMEFRAME_MAP.get(rev["config_timeframe"], 5)
-                end_ts = _parse_ts(rev["closing_ts"]) + timedelta(minutes=tf_minutes)
+                end_ts = max(
+                    exec_ts,
+                    _parse_ts(rev["closing_ts"]) + timedelta(minutes=tf_minutes),
+                )
 
             ts_cur = exec_ts
             while ts_cur < end_ts:
