@@ -236,20 +236,37 @@ def resolve_group_id(env: dict[str, str] | None = None) -> str:
     return env.get("KAFKA_GROUP_ID", _DEFAULT_GROUP_ID)
 
 
+@dataclass(frozen=True)
+class ReferencePeek:
+    """Cold-start reference_ts plus where it came from.
+
+    from_committed_offset=False means no partition had a committed offset and
+    ts (if any) is the topic HIGH WATERMARK — a genuinely fresh group, or a
+    group whose offsets were lost (e.g. the ephemeral-storage broker was
+    replaced). The two cases must be logged distinctly: incident 2026-07-17
+    06:32 was misdiagnosed as a commit-ordering bug because the watermark
+    fallback was logged as "from committed offset".
+    """
+
+    ts: "datetime | None"
+    from_committed_offset: bool = False
+
+
 def peek_reference_ts(
     brokers: str,
     group_id: str,
     topic: str = TOPIC,
     timeout: float = 5.0,
-) -> "datetime | None":
-    """Return min candle ts at this group's committed offsets.
+) -> ReferencePeek:
+    """Return min candle ts at this group's committed offsets, with provenance.
 
     Behavior:
       - All partitions have committed offsets and we can read at least one
-        candle → returns min(candle.ts).
-      - All partitions are OFFSET_INVALID (genuinely fresh group: no prior
-        commits) → falls back to latest watermark; returns the most recent
-        candle's ts, or None if topic is empty.
+        candle → ReferencePeek(min(candle.ts), from_committed_offset=True).
+      - All partitions are OFFSET_INVALID (fresh group, or offsets lost with a
+        broker replacement) → falls back to latest watermark; returns the most
+        recent candle's ts with from_committed_offset=False, or ts=None if the
+        topic is empty.
       - Any error talking to Kafka (timeout, broker unreachable, etc.) →
         raises, so the caller exits without committing anything. We never
         silently fall back to now() because that would let a subsequent
@@ -290,6 +307,7 @@ def peek_reference_ts(
             ) from exc
 
         timestamps: list[datetime] = []
+        committed_reads = 0
         for tp in committed:
             offset = tp.offset
             use_watermark = False
@@ -311,8 +329,13 @@ def peek_reference_ts(
             raw = msg.value()
             data = json.loads(raw.decode() if raw is not None else "{}")
             timestamps.append(datetime.fromisoformat(data["ts"]))
+            if not use_watermark:
+                committed_reads += 1
 
-        return min(timestamps) if timestamps else None
+        return ReferencePeek(
+            ts=min(timestamps) if timestamps else None,
+            from_committed_offset=committed_reads > 0,
+        )
     finally:
         consumer.close()
 
@@ -349,6 +372,48 @@ GROUP BY strategy_table_name
             pnl_map[row["strategy_table_name"]] = float(row["cumulative_pnl"] or 0.0)
             price_map[row["strategy_table_name"]] = float(row["price"])
     return pnl_map, price_map
+
+
+_DEFAULT_GAP_ALERT_MINUTES = 10.0
+
+
+def _alert_on_bootstrap_gap(
+    audit_type: str,
+    newest_stored_ts: "datetime | None",
+    ref_ts: datetime,
+) -> None:
+    """CRITICAL-log when the table tail is far behind reference_ts.
+
+    The live loop resumes from reference_ts, so minutes between the newest
+    stored row and reference_ts will never be written by this consumer —
+    either offsets somehow ran ahead of table writes, or the topic backlog was
+    lost with a broker replacement (incident 2026-07-17 06:32→07:01). The gap
+    is not auto-backfilled: the candles (and their prices) may no longer exist
+    anywhere the consumer can read, and audit_pnl --fix-window is the
+    idempotent repair. Threshold via BOOTSTRAP_GAP_ALERT_MINUTES (0 disables);
+    the default tolerates normal restart/deploy lag.
+    """
+    limit = float(
+        os.environ.get("BOOTSTRAP_GAP_ALERT_MINUTES", str(_DEFAULT_GAP_ALERT_MINUTES))
+    )
+    if newest_stored_ts is None or limit <= 0:
+        return
+    gap_min = (ref_ts - newest_stored_ts).total_seconds() / 60.0
+    if gap_min <= limit:
+        return
+    gap_start = newest_stored_ts + timedelta(minutes=1)
+    logger.critical(
+        "Bootstrap [%s]: table tail %s is %.0f min behind reference_ts %s — the "
+        "live loop will NOT write the minutes in between. Repair with: "
+        'python scripts/audit_pnl.py --type %s --fix-window "%s" "%s"',
+        audit_type,
+        newest_stored_ts,
+        gap_min,
+        ref_ts,
+        audit_type,
+        gap_start.strftime("%Y-%m-%d %H:%M:%S"),
+        ref_ts.strftime("%Y-%m-%d %H:%M:%S"),
+    )
 
 
 def _anchor_record_from_last_anchor(anchor, position: float = 0.0) -> AnchorRecord:
@@ -404,6 +469,9 @@ def _bootstrap_state(
     # quiet ones, so the first post-restart write chains exactly from the stored
     # value — no re-anchor step.
     last_anchors = fetch_last_pnl_anchors(pnl_table, ref_ts)
+    _alert_on_bootstrap_gap(
+        mode, max((a.ts for a in last_anchors.values()), default=None), ref_ts
+    )
 
     state = AnchorState()
     for stn, anchor in last_anchors.items():
@@ -554,6 +622,9 @@ def _bootstrap_bt_state(reference_ts: "datetime | None") -> AnchorState:
             f"Bootstrap [bt]: anchored=0 at ref_ts={ref_ts} but {_BT_PNL_TABLE} "
             "is non-empty — refusing to start (would mass re-anchor to cum_pnl_first)"
         )
+    _alert_on_bootstrap_gap(
+        "bt", max((a.ts for a in anchors.values()), default=None), ref_ts
+    )
     state = AnchorState()
     bare = 0
     for stn, anchor in anchors.items():
@@ -1035,15 +1106,27 @@ def run() -> None:
 
     # peek_reference_ts now raises on Kafka errors instead of falling back to
     # now(), so a broker outage doesn't allow a later successful commit to
-    # advance past unprocessed messages. None is only returned when the topic
-    # is genuinely empty (true fresh deploy).
-    reference_ts = peek_reference_ts(os.environ["REDPANDA_BROKERS"], resolve_group_id())
-    if reference_ts is not None:
-        logger.info("Cold-start reference_ts from committed offset: %s", reference_ts)
-    else:
+    # advance past unprocessed messages. ts=None is only returned when the
+    # topic is genuinely empty (true fresh deploy, or a freshly replaced
+    # broker whose topic has no candles yet).
+    peek = peek_reference_ts(os.environ["REDPANDA_BROKERS"], resolve_group_id())
+    reference_ts = peek.ts
+    if reference_ts is None:
         logger.info(
             "No reference_ts (empty topic, fresh group) — bootstrap will seed "
             "from now() with no walk-verify"
+        )
+    elif peek.from_committed_offset:
+        logger.info("Cold-start reference_ts from committed offset: %s", reference_ts)
+    else:
+        logger.warning(
+            "Cold-start reference_ts %s is the topic HIGH WATERMARK — group %s "
+            "has no committed offsets (fresh group, or offsets lost with a "
+            "broker replacement). Backlog older than this ts is not replayable "
+            "from Kafka; the bootstrap gap check reports the exact repair "
+            "window if the PnL table is behind.",
+            reference_ts,
+            resolve_group_id(),
         )
 
     state_prod = AnchorState()
