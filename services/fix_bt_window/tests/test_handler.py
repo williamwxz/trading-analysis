@@ -35,7 +35,7 @@ def test_compute_window_event_overrides():
 def test_build_argv_shape():
     argv = h.build_argv("2026-07-07 14:00:00", "2026-07-09 15:00:00", dry_run=False)
     assert argv[0] == "audit_pnl"
-    assert ["--type", "bt"] == argv[1:3]
+    assert ["--type", "bt"] == argv[1:3]  # bt is the default audit type
     assert ["--fix-window", "2026-07-07 14:00:00", "2026-07-09 15:00:00"] == argv[3:6]
     assert "--no-pause" in argv  # the Lambda manages ECS itself
     # Lambda FS is read-only outside /tmp
@@ -48,6 +48,83 @@ def test_build_argv_shape():
 def test_build_argv_dry_run():
     argv = h.build_argv("a", "b", dry_run=True)
     assert "--dry-run" in argv
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mode parameterization — one image serves the bt/prod/real_trade schedules;
+# AUDIT_TYPE + CONSUMER_SERVICE env select the mode (never the event payload,
+# so a mis-sent payload can't repair one mode while pausing another's consumer).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_build_argv_prod_type():
+    argv = h.build_argv("a", "b", dry_run=False, audit_type="prod")
+    assert ["--type", "prod"] == argv[1:3]
+
+
+@pytest.mark.unit
+def test_audit_type_from_env(monkeypatch):
+    monkeypatch.setenv("AUDIT_TYPE", "real_trade")
+    assert h._audit_type() == "real_trade"
+
+
+@pytest.mark.unit
+def test_audit_type_defaults_to_bt(monkeypatch):
+    monkeypatch.delenv("AUDIT_TYPE", raising=False)
+    assert h._audit_type() == "bt"
+
+
+@pytest.mark.unit
+def test_audit_type_rejects_unknown(monkeypatch):
+    monkeypatch.setenv("AUDIT_TYPE", "everything")
+    with pytest.raises(ValueError, match="AUDIT_TYPE"):
+        h._audit_type()
+
+
+@pytest.mark.unit
+def test_consumer_service_from_env(monkeypatch):
+    monkeypatch.setenv("CONSUMER_SERVICE", "svc-x")
+    assert h._consumer_service("prod") == "svc-x"
+
+
+@pytest.mark.unit
+def test_consumer_service_legacy_bt_env_fallback(monkeypatch):
+    """BT_CONSUMER_SERVICE (the pre-parameterization env var) still wins for
+    bt when CONSUMER_SERVICE is unset — an old-config deploy keeps working."""
+    monkeypatch.delenv("CONSUMER_SERVICE", raising=False)
+    monkeypatch.setenv("BT_CONSUMER_SERVICE", "legacy-bt-svc")
+    assert h._consumer_service("bt") == "legacy-bt-svc"
+
+
+@pytest.mark.unit
+def test_consumer_service_mode_defaults(monkeypatch):
+    monkeypatch.delenv("CONSUMER_SERVICE", raising=False)
+    monkeypatch.delenv("BT_CONSUMER_SERVICE", raising=False)
+    assert h._consumer_service("prod") == "trading-analysis-pnl-consumer-prod"
+    assert h._consumer_service("real_trade") == (
+        "trading-analysis-pnl-consumer-real-trade"
+    )
+    assert h._consumer_service("bt") == "trading-analysis-pnl-consumer-bt"
+
+
+@pytest.mark.unit
+def test_handler_prod_mode_pauses_prod_service_and_passes_type(monkeypatch):
+    monkeypatch.setenv("AUDIT_TYPE", "prod")
+    monkeypatch.setenv("CONSUMER_SERVICE", "trading-analysis-pnl-consumer-prod")
+    ecs = MagicMock()
+    with (
+        patch.object(h, "_ecs", return_value=ecs),
+        patch.object(h, "run_audit", return_value=0) as ra,
+        patch.object(h, "_fetch_secrets_into_env"),
+    ):
+        out = h.handler({}, None)
+
+    argv = ra.call_args.args[0]
+    assert ["--type", "prod"] == argv[1:3]
+    paused = ecs.update_service.call_args_list[0]
+    assert paused.kwargs["service"] == "trading-analysis-pnl-consumer-prod"
+    assert out["status"] == "ok"
 
 
 @pytest.mark.unit

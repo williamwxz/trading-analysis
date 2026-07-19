@@ -1,20 +1,29 @@
-"""AWS Lambda entry point for the daily bt trailing-window repair.
+"""AWS Lambda entry point for scheduled trailing-window PnL repairs.
 
-Why this exists: analytics.strategy_cum_pnl_bt_v2 (the bt position source) is
-published in batches hours-to-days after bar time, so the live bt consumer
-holds stale positions between deliveries and the divergence PnL is baked into
-the minute chain. Once the bars land, the stored history is fully
-reconstructible — this Lambda re-runs the standard window repair daily:
+One image serves three scheduled functions (bt daily, prod and real_trade
+6-hourly) — the mode comes from env, never the event payload, so a mis-sent
+payload can't repair one mode while pausing another mode's consumer:
 
-    pause bt consumer -> audit_pnl --type bt --fix-window [now-49h, now)
-                      -> resume bt consumer
+    AUDIT_TYPE        bt | prod | real_trade   (default bt)
+    CONSUMER_SERVICE  ECS service to pause/resume around the rewrite
+    LOOKBACK_HOURS    default trailing-window size
+
+Why this exists: all live-written PnL rows go stale when their position
+source arrives late. For bt, strategy_cum_pnl_bt_v2 is published in batches
+hours-to-days after bar time; for prod/real_trade, first revisions land
+p50 ~16 min / p99 ~96 min past bar close (measured 2026-07-19). Once the
+bars land, history is fully reconstructible — this Lambda re-runs the
+standard window repair on a schedule:
+
+    pause consumer -> audit_pnl --type <mode> --fix-window [now-Lh, now)
+                   -> resume consumer
 
 The pause/resume matters: the repair rewrites the table tail, and the
 consumer's post-resume bootstrap re-seeds its in-memory chain from that
 repaired tail (hardened in PR #54), flushing the accumulated lag error.
 Kafka replays the paused span on resume, so no minutes are lost.
 
-Event schema (all optional; empty event = daily rolling window):
+Event schema (all optional; empty event = rolling window):
     {
         "window_start": "2026-07-07 14:00:00",   # or "2026-07-07"
         "window_end":   "2026-07-09 15:00:00",
@@ -77,8 +86,35 @@ def _cluster() -> str:
     return os.environ.get("ECS_CLUSTER", "trading-analysis")
 
 
-def _bt_service() -> str:
-    return os.environ.get("BT_CONSUMER_SERVICE", "trading-analysis-pnl-consumer-bt")
+_VALID_AUDIT_TYPES = ("bt", "prod", "real_trade")
+
+# audit_pnl --type value -> ECS service suffix (real_trade uses a hyphen there).
+_DEFAULT_SERVICES = {
+    "bt": "trading-analysis-pnl-consumer-bt",
+    "prod": "trading-analysis-pnl-consumer-prod",
+    "real_trade": "trading-analysis-pnl-consumer-real-trade",
+}
+
+
+def _audit_type() -> str:
+    mode = os.environ.get("AUDIT_TYPE", "bt")
+    if mode not in _VALID_AUDIT_TYPES:
+        raise ValueError(
+            f"AUDIT_TYPE must be one of {_VALID_AUDIT_TYPES}, got {mode!r}"
+        )
+    return mode
+
+
+def _consumer_service(audit_type: str) -> str:
+    svc = os.environ.get("CONSUMER_SERVICE")
+    if svc:
+        return svc
+    if audit_type == "bt":
+        # Pre-parameterization env var — keeps an old-config deploy working.
+        legacy = os.environ.get("BT_CONSUMER_SERVICE")
+        if legacy:
+            return legacy
+    return _DEFAULT_SERVICES[audit_type]
 
 
 def compute_window(now: datetime, event: dict[str, Any]) -> tuple[str, str]:
@@ -115,7 +151,13 @@ def compute_window(now: datetime, event: dict[str, Any]) -> tuple[str, str]:
     )
 
 
-def build_argv(window_start: str, window_end: str, *, dry_run: bool) -> list[str]:
+def build_argv(
+    window_start: str,
+    window_end: str,
+    *,
+    dry_run: bool,
+    audit_type: str = "bt",
+) -> list[str]:
     """argv for audit_pnl.main() — the same CLI contract as a manual run.
 
     --no-pause is required: audit_pnl's own ECS helper resolves a local AWS
@@ -124,7 +166,7 @@ def build_argv(window_start: str, window_end: str, *, dry_run: bool) -> list[str
     argv = [
         "audit_pnl",
         "--type",
-        "bt",
+        audit_type,
         "--fix-window",
         window_start,
         window_end,
@@ -162,20 +204,21 @@ def handler(event: dict[str, Any] | None, context: Any) -> dict[str, Any]:
 
     _fetch_secrets_into_env()
 
+    audit_type = _audit_type()
     now = datetime.now(UTC).replace(tzinfo=None)
     ws, we = compute_window(now, event)
-    argv = build_argv(ws, we, dry_run=dry_run)
-    log.info("fix-bt-window: [%s, %s) dry_run=%s", ws, we, dry_run)
+    argv = build_argv(ws, we, dry_run=dry_run, audit_type=audit_type)
+    log.info("fix-window [%s]: [%s, %s) dry_run=%s", audit_type, ws, we, dry_run)
 
     if dry_run:
         # No writes, no ECS churn — just compute and log what would happen.
         rc = run_audit(argv)
         if rc != 0:
             raise RuntimeError(f"audit_pnl dry-run failed rc={rc}")
-        return {"status": "ok", "window": [ws, we], "dry_run": True}
+        return {"status": "ok", "type": audit_type, "window": [ws, we], "dry_run": True}
 
     ecs = _ecs()
-    cluster, service = _cluster(), _bt_service()
+    cluster, service = _cluster(), _consumer_service(audit_type)
     log.info("Pausing %s", service)
     ecs.update_service(cluster=cluster, service=service, desiredCount=0)
     ecs.get_waiter("services_stable").wait(cluster=cluster, services=[service])
@@ -190,4 +233,4 @@ def handler(event: dict[str, Any] | None, context: Any) -> dict[str, Any]:
         log.info("Resuming %s", service)
         ecs.update_service(cluster=cluster, service=service, desiredCount=1)
 
-    return {"status": "ok", "window": [ws, we], "dry_run": False}
+    return {"status": "ok", "type": audit_type, "window": [ws, we], "dry_run": False}
