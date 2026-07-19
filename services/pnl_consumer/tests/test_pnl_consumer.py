@@ -4,6 +4,7 @@ Tests the orchestration layer only — no ClickHouse, no Kafka.
 Computation logic is in libs.computation and tested separately.
 """
 import json
+import logging
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
@@ -161,7 +162,7 @@ def test_peek_reference_ts_returns_none_for_genuinely_empty_topic():
             pass
 
     with patch(f"{_MOD}.Consumer", return_value=_EmptyTopic()):
-        assert peek_reference_ts("broker:9092", "grp") is None
+        assert peek_reference_ts("broker:9092", "grp").ts is None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -607,6 +608,72 @@ def test_flush_candle_commits_after_all_inserts():
     consumer.commit.assert_not_called()
 
 
+@pytest.mark.unit
+def test_flush_candle_commit_is_strictly_last():
+    """At-least-once ordering: the single offset commit happens only AFTER every
+    ClickHouse insert for the candle has returned. If offsets could ever run
+    ahead of table writes, a task dying mid-candle would permanently skip the
+    window on restart (incident 2026-07-17 06:32 investigation)."""
+    calls: list[str] = []
+    consumer = MagicMock()
+    consumer.commit.side_effect = lambda **kw: calls.append("commit")
+    price_row = [
+        "binance", "BTCUSDT", datetime(2026, 4, 26), 100.0, 101.0, 99.0, 100.5, 1.0,
+    ]
+    prod_rows = [["strat"] + [None] * 15]
+    rt_rows = [["strat_rt"] + [None] * 15]
+    bt_rows = [["strat_bt"] + [None] * 15]
+
+    with patch(
+        "pnl_consumer.pnl_consumer.insert_rows",
+        side_effect=lambda table, *a, **kw: calls.append(f"insert:{table}"),
+    ):
+        _flush_candle(consumer, price_row, prod_rows, rt_rows, bt_rows)
+
+    assert calls.count("commit") == 1
+    assert calls[-1] == "commit"  # commit strictly after all 4 inserts
+    assert sum(1 for c in calls if c.startswith("insert:")) == 4
+
+
+@pytest.mark.unit
+def test_flush_candle_no_commit_when_later_insert_fails():
+    """A failure on ANY insert — even after earlier inserts succeeded — must
+    leave the offset uncommitted so the whole candle replays."""
+    consumer = MagicMock()
+    price_row = [
+        "binance", "BTCUSDT", datetime(2026, 4, 26), 100.0, 101.0, 99.0, 100.5, 1.0,
+    ]
+    prod_rows = [["strat"] + [None] * 15]
+
+    inserts_done: list[str] = []
+
+    def _insert(table, *a, **kw):
+        if table == "analytics.strategy_pnl_1min_prod_v2":
+            raise RuntimeError("CH down mid-candle")
+        inserts_done.append(table)
+
+    with patch("pnl_consumer.pnl_consumer.insert_rows", side_effect=_insert):
+        with pytest.raises(RuntimeError):
+            _flush_candle(consumer, price_row, prod_rows, [], [])
+
+    assert inserts_done == ["analytics.futures_price_1min"]  # first insert ran
+    consumer.commit.assert_not_called()
+
+
+@pytest.mark.unit
+def test_flush_candle_no_commit_on_completeness_failure():
+    """The completeness guard fires BEFORE any insert and before the commit —
+    a partial candle must neither sink nor advance the offset."""
+    consumer = MagicMock()
+    # One distinct strategy_instance_id (index 15) but two fetched from history.
+    prod_rows = [["strat"] + [None] * 14 + ["inst_a"]]
+    with patch("pnl_consumer.pnl_consumer.insert_rows") as mock_insert:
+        with pytest.raises(RuntimeError, match="completeness"):
+            _flush_candle(consumer, None, prod_rows, [], [], expected_prod=2)
+    mock_insert.assert_not_called()
+    consumer.commit.assert_not_called()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # emit_candle_metrics
 # ─────────────────────────────────────────────────────────────────────────────
@@ -674,7 +741,8 @@ def test_peek_reference_ts_returns_min_ts_across_partitions():
     with patch(f"{_MOD}.Consumer", return_value=mock_consumer):
         result = peek_reference_ts("localhost:9092", "test-group")
 
-    assert result == ts0
+    assert result.ts == ts0
+    assert result.from_committed_offset is True
 
 
 @pytest.mark.unit
@@ -693,7 +761,42 @@ def test_peek_reference_ts_returns_none_when_no_messages():
     with patch(f"{_MOD}.Consumer", return_value=mock_consumer):
         result = peek_reference_ts("localhost:9092", "test-group")
 
-    assert result is None
+    assert result.ts is None
+
+
+@pytest.mark.unit
+def test_peek_reference_ts_flags_watermark_fallback():
+    """When the group has NO committed offsets (fresh group, or offsets lost
+    with a broker replacement) the returned ts is the topic high watermark —
+    the result must say so. Incident 2026-07-17 06:32: the watermark fallback
+    was logged as 'from committed offset', which misdirected the investigation
+    toward a commit-ordering bug that doesn't exist."""
+    from confluent_kafka import OFFSET_INVALID
+    from pnl_consumer.pnl_consumer import peek_reference_ts
+
+    mock_consumer = MagicMock()
+    tp0 = MagicMock()
+    tp0.partition, tp0.offset = 0, OFFSET_INVALID
+    meta_mock = MagicMock()
+    meta_mock.topics = {"binance.price.ticks": MagicMock(partitions={0: None})}
+    mock_consumer.list_topics.return_value = meta_mock
+    mock_consumer.committed.return_value = [tp0]
+    mock_consumer.get_watermark_offsets.return_value = (0, 9)
+
+    latest_ts = datetime(2026, 7, 17, 7, 8, 0)
+    msg = MagicMock()
+    msg.error.return_value = None
+    msg.value.return_value = json.dumps({
+        "exchange": "binance", "instrument": "BTCUSDT", "ts": latest_ts.isoformat(),
+        "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0,
+    }).encode()
+    mock_consumer.poll.return_value = msg
+
+    with patch(f"{_MOD}.Consumer", return_value=mock_consumer):
+        result = peek_reference_ts("localhost:9092", "pnl-consumer-prod-2")
+
+    assert result.ts == latest_ts
+    assert result.from_committed_offset is False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -904,6 +1007,77 @@ def test_bootstrap_state_seeds_flat_when_pnl_chain_but_no_current_revision():
     rec = state.get("RETIRED")
     assert rec.pnl == pytest.approx(7.5)  # chain continues from last stored value
     assert rec.position == pytest.approx(0.0)  # flat — no current revision
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bootstrap gap detection (incident 2026-07-17 06:32→07:01)
+#
+# The live loop resumes from reference_ts, so any distance between the table's
+# newest stored minute and reference_ts is a window the consumer will NEVER
+# write (offsets ahead of table writes, or topic data lost with a broker
+# replacement). Bootstrap must detect it and log the exact repair command.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _gap_anchor(ts):
+    return {
+        "S": LastPnlAnchor(
+            strategy_table_name="S", pnl=1.0, price=100.0, ts=ts,
+        )
+    }
+
+
+def _bootstrap_prod_with_tail(tail_ts, ref_ts):
+    with (
+        patch(f"{_MOD}.fetch_last_pnl_anchors", return_value=_gap_anchor(tail_ts)),
+        patch(f"{_MOD}.fetch_bootstrap_seeds", return_value=[]),
+        patch(f"{_MOD}._fetch_walk_anchors", return_value=({}, {})),
+        patch(f"{_MOD}.fetch_walk_rows", return_value=[]),
+    ):
+        _bootstrap_state("prod", reference_ts=ref_ts)
+
+
+@pytest.mark.unit
+def test_bootstrap_state_alerts_on_table_gap(caplog):
+    """Table tail 06:31 but reference_ts 07:08 → CRITICAL naming the exact
+    audit_pnl --fix-window repair for the missing window."""
+    with caplog.at_level(logging.INFO, logger=_MOD):
+        _bootstrap_prod_with_tail(
+            datetime(2026, 7, 17, 6, 31, 0), datetime(2026, 7, 17, 7, 8, 0)
+        )
+    crits = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert len(crits) == 1
+    msg = crits[0].getMessage()
+    assert "--type prod" in msg
+    assert '--fix-window "2026-07-17 06:32:00" "2026-07-17 07:08:00"' in msg
+
+
+@pytest.mark.unit
+def test_bootstrap_state_no_gap_alert_on_healthy_restart(caplog):
+    """A normal restart (tail one minute behind reference_ts) must not alarm."""
+    with caplog.at_level(logging.INFO, logger=_MOD):
+        _bootstrap_prod_with_tail(
+            datetime(2026, 7, 17, 6, 31, 0), datetime(2026, 7, 17, 6, 32, 0)
+        )
+    assert not [r for r in caplog.records if r.levelno == logging.CRITICAL]
+
+
+@pytest.mark.unit
+def test_bootstrap_bt_state_alerts_on_table_gap(caplog):
+    from pnl_consumer.pnl_consumer import _bootstrap_bt_state
+
+    anchors = {"S": _anchor_1d("S")}  # ts=2026-07-13 00:24
+    with (
+        patch(f"{_MOD}.fetch_last_pnl_anchors", return_value=anchors),
+        patch(f"{_MOD}.pnl_table_is_empty", return_value=False),
+        caplog.at_level(logging.INFO, logger=_MOD),
+    ):
+        _bootstrap_bt_state(datetime(2026, 7, 13, 1, 30, 0))
+    crits = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert len(crits) == 1
+    msg = crits[0].getMessage()
+    assert "--type bt" in msg
+    assert '--fix-window "2026-07-13 00:25:00" "2026-07-13 01:30:00"' in msg
 
 
 # ─────────────────────────────────────────────────────────────────────────────
