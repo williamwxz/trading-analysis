@@ -51,10 +51,12 @@ Batch PnL recompute/repair is the standalone script `scripts/audit_pnl.py` (not 
 | Function | Schedule | Window |
 |----------|----------|--------|
 | `fix-bt-window` | daily 15:00 UTC | trailing 49h (fixed) |
-| `fix-prod-window` | 6-hourly, 03:10 +6h | 49h floor, **arrival-driven** start, 120h cap |
-| `fix-real-trade-window` | 6-hourly, 03:40 +6h | 49h floor, **arrival-driven** start, 120h cap |
+| `fix-prod-window` | 6-hourly, 03:10 +6h | 49h floor, **arrival-driven** start, 120h cap, **end = now−3h** |
+| `fix-real-trade-window` | 6-hourly, 03:40 +6h | 49h floor, **arrival-driven** start, 120h cap, **end = now−3h** |
 
 **Why prod/real_trade are arrival-driven and bt is not.** bt sources positions from `strategy_cum_pnl_bt_v2`, re-pushed in bulk — a fixed trailing window is the right shape. prod/real_trade source from `strategy_output_history_v2`, whose revisions land p50 ~16m / p90 ~72m past bar close and which on 2026-07-28 backfilled bars **144h old**; a fixed 49h window would repair none of those. So the start bound is pulled back to the oldest bar whose revision arrived since the last run (`handler._probe_oldest_revised_bar`), floored at 49h and capped at `MAX_LOOKBACK_HOURS`.
+
+**The window end must stop short of `now()` (`END_MARGIN_HOURS`, default 3h).** The batch path emits rows only until one `tf` past the last bar it can *see*, while the live consumer carries the position forward indefinitely. Recomputing a stretch whose bars have not arrived yet therefore DELETES good carry-forward rows and writes nothing back. On 2026-08-01 a manual repair ending at 03:27 blew an 87-minute hole (02:00–03:26) in 7 ADA `sid=12` strategies whose first revisions run ~152 min late — their 01:00 bar landed at 03:33. bt is exempt: it sources from the cum table and minute-chains, so it has always run to `now()` safely.
 
 **The cap is a Lambda-timeout constraint, not a correctness one** — 900s max, ~2M rows per 4–5 min in-VPC, so 120h (~5M rows) is the safe ceiling. When a backfill reaches further the handler logs `clamped to MAX_LOOKBACK_HOURS` and a CloudWatch alarm fires; repair the remainder manually. If that becomes routine, move these two to an ECS RunTask rather than raising the cap.
 

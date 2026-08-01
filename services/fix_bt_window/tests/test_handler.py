@@ -213,7 +213,7 @@ def test_arrival_start_extends_window_past_fixed_lookback(monkeypatch):
     oldest = datetime(2026, 7, 3, 15, 0, 0)  # ~144h before _NOW
     ws, we = h.compute_window(_NOW, {}, arrival_probe=lambda *_: oldest)
     assert ws == "2026-07-03 15:00:00"
-    assert we == "2026-07-09 15:00:00"
+    assert we == "2026-07-09 12:00:00"  # backed off the 3h arrival horizon
 
 
 @pytest.mark.unit
@@ -222,7 +222,9 @@ def test_arrival_start_never_shrinks_below_default_lookback(monkeypatch):
     monkeypatch.setenv("AUDIT_TYPE", "prod")
     recent = datetime(2026, 7, 9, 14, 0, 0)  # 1h old — newer than now-49h
     ws, _ = h.compute_window(_NOW, {}, arrival_probe=lambda *_: recent)
-    assert ws == "2026-07-07 14:00:00"  # the 49h floor, not the 1h arrival
+    assert (
+        ws == "2026-07-07 11:00:00"
+    )  # the 49h floor, measured from the backed-off end
 
 
 @pytest.mark.unit
@@ -232,7 +234,7 @@ def test_arrival_start_capped_by_max_lookback(monkeypatch):
     monkeypatch.setenv("MAX_LOOKBACK_HOURS", "336")  # 14 days
     ancient = datetime(2026, 1, 1, 0, 0, 0)
     ws, _ = h.compute_window(_NOW, {}, arrival_probe=lambda *_: ancient)
-    assert ws == "2026-06-25 15:00:00"  # exactly 336h before _NOW
+    assert ws == "2026-06-25 12:00:00"  # exactly 336h before the backed-off end
 
 
 @pytest.mark.unit
@@ -266,7 +268,7 @@ def test_arrival_probe_failure_falls_back_to_fixed_lookback(monkeypatch):
         raise RuntimeError("clickhouse unreachable")
 
     ws, _ = h.compute_window(_NOW, {}, arrival_probe=_boom)
-    assert ws == "2026-07-07 14:00:00"
+    assert ws == "2026-07-07 11:00:00"
 
 
 @pytest.mark.unit
@@ -274,7 +276,7 @@ def test_arrival_probe_none_falls_back_to_fixed_lookback(monkeypatch):
     """No revisions since the last run → nothing extra to repair."""
     monkeypatch.setenv("AUDIT_TYPE", "prod")
     ws, _ = h.compute_window(_NOW, {}, arrival_probe=lambda *_: None)
-    assert ws == "2026-07-07 14:00:00"
+    assert ws == "2026-07-07 11:00:00"
 
 
 @pytest.mark.unit
@@ -294,3 +296,63 @@ def test_handler_pauses_the_mode_specific_consumer(monkeypatch):
     # repairing another mode's table would be silent corruption (from PR #65).
     argv = ra.call_args.args[0]
     assert ["--type", "real_trade"] == argv[1:3]
+
+
+# ── window end must stop short of the arrival horizon ───────────────────────
+#
+# Repairing up to now() actively destroys data. The batch recompute stops
+# emitting one tf after the last bar it can SEE, while the live consumer
+# carries forward indefinitely. On 2026-08-01 a manual repair with end=now
+# deleted 87 minutes of live carry-forward rows for 7 ADA sid=12 strategies
+# whose bars arrive ~152 min late: their 01:00 bar landed at 03:33, six minutes
+# after the window closed at 03:27, so the recompute wrote nothing for
+# 02:00-03:26 and the rows were simply gone.
+
+
+@pytest.mark.unit
+def test_window_end_backs_off_arrival_horizon_for_prod(monkeypatch):
+    monkeypatch.setenv("AUDIT_TYPE", "prod")
+    _, we = h.compute_window(_NOW, {}, arrival_probe=lambda *_: None)
+    assert we == "2026-07-09 12:00:00"  # _NOW 15:00 minus the 3h default margin
+
+
+@pytest.mark.unit
+def test_window_end_backs_off_for_real_trade(monkeypatch):
+    monkeypatch.setenv("AUDIT_TYPE", "real_trade")
+    _, we = h.compute_window(_NOW, {}, arrival_probe=lambda *_: None)
+    assert we == "2026-07-09 12:00:00"
+
+
+@pytest.mark.unit
+def test_window_end_margin_is_configurable(monkeypatch):
+    monkeypatch.setenv("AUDIT_TYPE", "prod")
+    monkeypatch.setenv("END_MARGIN_HOURS", "6")
+    _, we = h.compute_window(_NOW, {}, arrival_probe=lambda *_: None)
+    assert we == "2026-07-09 09:00:00"
+
+
+@pytest.mark.unit
+def test_bt_window_end_is_not_backed_off(monkeypatch):
+    """bt sources from the cum table and has always run to now() safely."""
+    monkeypatch.setenv("AUDIT_TYPE", "bt")
+    _, we = h.compute_window(_NOW, {})
+    assert we == "2026-07-09 15:00:00"
+
+
+@pytest.mark.unit
+def test_explicit_window_end_is_honoured_verbatim(monkeypatch):
+    """An operator asking for a specific end gets it, margin or not."""
+    monkeypatch.setenv("AUDIT_TYPE", "prod")
+    _, we = h.compute_window(
+        _NOW, {"window_end": "2026-07-09 14:00:00"}, arrival_probe=lambda *_: None
+    )
+    assert we == "2026-07-09 14:00:00"
+
+
+@pytest.mark.unit
+def test_lookback_floor_measured_from_the_backed_off_end(monkeypatch):
+    """The floor must not silently shrink when the end moves back."""
+    monkeypatch.setenv("AUDIT_TYPE", "prod")
+    ws, we = h.compute_window(_NOW, {}, arrival_probe=lambda *_: None)
+    assert we == "2026-07-09 12:00:00"
+    assert ws == "2026-07-07 11:00:00"  # 49h before the backed-off end

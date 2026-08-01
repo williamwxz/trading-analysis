@@ -78,6 +78,11 @@ _ARRIVAL_DRIVEN_MODES: frozenset[str] = frozenset({"prod", "real_trade"})
 _DEFAULT_LOOKBACK_HOURS = 49  # 48h coverage + 1h so runs overlap; repair is idempotent
 _DEFAULT_MAX_LOOKBACK_HOURS = 336  # 14d ceiling; a full-table re-push must not
 #                                    turn one scheduled run into a huge recompute
+# How far short of now() an arrival-driven repair must stop. Measured worst
+# first-revision arrival lag is ~155 min (ADA sid=12 liquidation family, which
+# runs a steady ~152 min); 3h clears it. Recomputing inside the horizon deletes
+# live carry-forward rows and writes nothing back — see compute_window.
+_DEFAULT_END_MARGIN_HOURS = 3
 _STATE_FILE = "/tmp/audit_pnl_state.json"  # Lambda FS is read-only outside /tmp
 _REPORT_FILE = "/tmp/audit_pnl_report.md"
 
@@ -168,6 +173,10 @@ def _max_lookback_hours() -> int:
     return int(os.environ.get("MAX_LOOKBACK_HOURS", _DEFAULT_MAX_LOOKBACK_HOURS))
 
 
+def _end_margin_hours() -> int:
+    return int(os.environ.get("END_MARGIN_HOURS", _DEFAULT_END_MARGIN_HOURS))
+
+
 def compute_window(
     now: datetime,
     event: dict[str, Any],
@@ -190,11 +199,20 @@ def compute_window(
 
     we = event.get("window_end")
     ws = event.get("window_start")
-    end_dt = (
-        datetime.strptime(_norm(we), "%Y-%m-%d %H:%M:%S")
-        if we
-        else now.replace(second=0, microsecond=0)
-    )
+    if we:
+        end_dt = datetime.strptime(_norm(we), "%Y-%m-%d %H:%M:%S")
+    else:
+        end_dt = now.replace(second=0, microsecond=0)
+        if audit_type() in _ARRIVAL_DRIVEN_MODES:
+            # Never recompute up to now(). The batch path stops emitting one tf
+            # after the last bar it can SEE, while the live consumer carries the
+            # position forward indefinitely — so recomputing a stretch whose bars
+            # have not arrived yet DELETES good carry-forward rows and writes
+            # nothing in their place. On 2026-08-01 a manual repair ending at
+            # 03:27 blew an 87-minute hole (02:00–03:26) in 7 ADA sid=12
+            # strategies whose bars arrive ~152 min late; their 01:00 bar landed
+            # at 03:33. Back the end off past the arrival horizon instead.
+            end_dt -= timedelta(hours=_end_margin_hours())
     if ws:
         start_dt = datetime.strptime(_norm(ws), "%Y-%m-%d %H:%M:%S")
     else:
