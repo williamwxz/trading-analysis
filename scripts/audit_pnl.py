@@ -653,10 +653,36 @@ def fetch_seed_anchor(
 ) -> dict:
     """Return {pnl, price, position} from the latest target row at ts < failure_ts.
 
-    Returns a zero anchor when no such row exists (strategy starts at failure_ts).
+    This is what makes a repaired window *continue* the existing PnL chain rather
+    than restart it, so it must not give up early. Two stages:
+
+      1. a 7-day bounded query, which lets ClickHouse prune partitions via the
+         (strategy_table_name, ts) sort key — answers ~always, since carry-forward
+         writes a row every minute even while a strategy is paused;
+      2. if that finds nothing, the same query with **no lower bound** — look as
+         far back as the table goes.
+
+    Stage 2 matters because the bound is only safe while carry-forward is
+    healthy. When it stops, a strategy disappears from the PnL table entirely
+    (metadata-less anchor records did exactly this on 2026-07-13), and a bounded
+    lookup would then hand back a zero anchor and silently restart
+    cumulative_pnl from 0 — turning a recoverable outage into a permanently
+    wrong chain. A strategy paused 23.7 days (sid=20 ETH, 2026-07-03 -> 07-27)
+    is well past the old 7-day bound.
+
+    Only a strategy with no history at all zero-anchors (genuinely starts here).
     """
     tgt = TARGET_TABLE[type_]
-    sql = f"""
+
+    fts = f"{failure_ts:%Y-%m-%d %H:%M:%S}"
+
+    def _q_anchor(lower_bound: bool) -> list:
+        bound = (
+            f"      AND ts >= toDateTime('{fts}') - INTERVAL 7 DAY\n"
+            if lower_bound
+            else ""
+        )
+        sql = f"""
     SELECT
         argMax(cumulative_pnl, (ts, updated_at)) AS pnl,
         argMax(price,          (ts, updated_at)) AS price,
@@ -664,9 +690,20 @@ def fetch_seed_anchor(
     FROM analytics.{tgt}
     WHERE strategy_table_name = '{_q(strategy_table_name)}'
       AND ts < toDateTime('{failure_ts:%Y-%m-%d %H:%M:%S}')
-      AND ts >= toDateTime('{failure_ts:%Y-%m-%d %H:%M:%S}') - INTERVAL 7 DAY
-    """
-    rows = client.query(sql).result_rows
+{bound}    """
+        return client.query(sql).result_rows
+
+    rows = _q_anchor(lower_bound=True)
+    if not rows or rows[0][0] is None:
+        rows = _q_anchor(lower_bound=False)
+        if rows and rows[0][0] is not None:
+            log.warning(
+                "[seed:%s] %s had no row within 7d of %s — anchored from an older "
+                "row instead of zero-seeding (paused longer than the bound?)",
+                type_,
+                strategy_table_name,
+                failure_ts,
+            )
     if not rows or rows[0][0] is None:
         return {"pnl": 0.0, "price": 0.0, "position": 0.0}
     pnl, price, position = rows[0]
@@ -1081,9 +1118,7 @@ def _fix_bt_underlying(
     refresh_hour_table("bt", earliest, client, dry_run=dry_run, underlying=underlying)
 
 
-def _month_chunks(
-    start: datetime, end: datetime
-) -> list[tuple[datetime, datetime]]:
+def _month_chunks(start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
     """Half-open [start, end) split on calendar-month boundaries (oldest first)."""
     chunks: list[tuple[datetime, datetime]] = []
     cur = start

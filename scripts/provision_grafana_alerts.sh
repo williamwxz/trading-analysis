@@ -56,10 +56,16 @@ if ok "$code"; then echo "   OK ($code)"; else
   echo "   ERROR contact point HTTP $code: $(cat /tmp/ga_resp.json)"; rc=1; fi
 
 echo "==> Upserting alert rules"
-# substitute the real folder uid into each rule, then upsert by uid
+# substitute the real folder uid into each rule, then upsert by uid.
+# Two rule files, two groups: 'divergence' compares PnL modes against each
+# other; 'source-freshness' watches strategy_output_history_v2 itself (a source
+# gap leaves every PnL row present but silently stale, so the divergence rules
+# cannot see it — see gen_source_freshness_rules.py).
 python3 -c "
 import json
-rules = json.load(open('$DIR/rules-divergence.json'))
+rules = []
+for fn in ('rules-divergence.json', 'rules-source-freshness.json'):
+    rules += json.load(open('$DIR/' + fn))
 for r in rules:
     r['folderUID'] = '$FOLDER_UID'
 json.dump(rules, open('/tmp/ga_rules.json', 'w'))
@@ -82,6 +88,14 @@ echo "==> Setting 'divergence' rule-group eval interval to 60s"
 GRP="{\"interval\":60}"
 code=$(req PUT "/api/v1/provisioning/folder/$FOLDER_UID/rule-groups/divergence" \
   "{\"title\":\"divergence\",\"interval\":60}")
+ok "$code" && echo "   OK ($code)" || echo "   WARN group interval HTTP $code (default kept): $(cat /tmp/ga_resp.json)"
+
+# 300s, not 60s: these two rules aggregate hourly buckets out of
+# strategy_output_history_v2 (a large table), so the signal only changes once an
+# hour and a 60s eval would just burn ClickHouse for nothing.
+echo "==> Setting 'source-freshness' rule-group eval interval to 300s"
+code=$(req PUT "/api/v1/provisioning/folder/$FOLDER_UID/rule-groups/source-freshness" \
+  "{\"title\":\"source-freshness\",\"interval\":300}")
 ok "$code" && echo "   OK ($code)" || echo "   WARN group interval HTTP $code (default kept): $(cat /tmp/ga_resp.json)"
 
 exit $rc

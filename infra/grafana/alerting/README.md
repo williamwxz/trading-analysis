@@ -1,8 +1,12 @@
-# Grafana Cloud alerting — position divergence
+# Grafana Cloud alerting — divergence + source freshness
 
-Telegram alerts when the portfolio's weighted-average **position** diverges
-between PnL modes for a sustained stretch. Pairs with the L5 dashboard's
-"Position Divergence" panels (`strategy-pnl-l5-portfolio.json`).
+Two families of Telegram alert:
+
+- **`divergence`** — the portfolio's weighted-average **position** or **PnL**
+  diverges between modes for a sustained stretch. Pairs with the L5 dashboard's
+  "Position Divergence" panels (`strategy-pnl-l5-portfolio.json`).
+- **`source-freshness`** — the upstream table the PnL is computed *from* stopped
+  publishing. These cannot be inferred from the divergence rules; see below.
 
 ## What gets provisioned
 
@@ -12,7 +16,36 @@ between PnL modes for a sustained stretch. Pairs with the L5 dashboard's
 | Position rule — Backtest − Production | `divergence-bt-prod` | fires when \|Δposition\| > 0.05 for 10m |
 | Position rule — Production − Real-Trade | `divergence-prod-rt` | fires when \|Δposition\| > 0.05 for 10m |
 | PnL rule — Production − Real-Trade | `divergence-pnl-prod-rt` | fires when \|Δcumulative_pnl\| > 0.015 for 10m |
-| Folder | `divergence-alerts` | holds the rule group `divergence` (60s eval) |
+| Source rule — bar coverage | `source-bar-coverage` | fires when a settled bar-hour has < 98.5% of the usual 1h strategies, for 30m |
+| Source rule — revision arrival | `source-revision-arrival` | fires when publishing breadth drops below 50% of the 24h median, for 1h |
+| Folder | `divergence-alerts` | holds rule groups `divergence` (60s eval) and `source-freshness` (300s eval) |
+
+### Why the source-freshness rules exist
+
+When a source bar is missing the consumer carries the last position forward and
+still writes a complete row for every strategy every minute. Row counts,
+strategy counts and underlying-completeness all stay perfect — the position is
+just silently stale, and because `cumulative_pnl` is a chained anchor quantity
+the resulting error is **permanent**. The divergence rules compare PnL modes
+against each other and therefore cannot see this at all.
+
+Three incidents in the week of 2026-07-24 raised nothing:
+
+| When | What | Impact |
+|------|------|--------|
+| 07-25 05:00–21:00 (17h) | 12 strategies stopped publishing bars | −0.0019% wtd prod PnL |
+| 07-26 08:00–22:00 (15h) | 87 strategies stopped publishing bars | **+0.1276%** wtd prod PnL |
+| 07-28 03:00–07:00 (4h) | publisher stall (16–18 strategies emitting), then ~168k revisions carrying bars up to 144h old | −0.0111% wtd prod PnL |
+
+Incidents 1–2 are bar-coverage failures; incident 3 is an arrival failure with
+eventually-complete coverage — hence two detectors. Backtested over that week:
+the coverage rule flags 32 hours (exactly Gaps A and B) and the arrival rule
+flags 4 hours (exactly the stall), with no other hits.
+
+Both are **ratio-based against a trailing 24h baseline**, not absolute counts,
+so they survive roster changes (695 total = 614 `1h` + 2 `10m` + 79 `1d`)
+without a threshold edit. Coverage judges a bar-hour only after a 3h settle,
+since first revisions land p50 ~16m / p90 ~72m / p99 ~96m past bar close.
 
 Each rule queries the ClickHouse datasource for the last 15 complete minutes
 (`countDistinct(underlying)=8`, same completeness gate as the panels), computes
@@ -72,11 +105,15 @@ The script is idempotent (fixed UIDs, PUT-then-POST upserts).
 
 ## Editing the rules
 
-`rules-divergence.json` is generated — edit `gen_rules.py` and re-run it:
+Both rule files are generated — edit the generator and re-run it:
 
 ```bash
-python3 infra/grafana/alerting/gen_rules.py
+python3 infra/grafana/alerting/gen_rules.py                    # rules-divergence.json
+python3 infra/grafana/alerting/gen_source_freshness_rules.py   # rules-source-freshness.json
 ```
 
-Validate the rule SQL against ClickHouse before deploying (returns one value per
-minute; `|last|` is what the alert thresholds on).
+Always execute the generated SQL against live ClickHouse before deploying — the
+unit tests do not run it, and a rule that fails to parse silently goes to
+`Alerting` via `execErrState`. The divergence queries return one value per
+minute (`last` is thresholded); the source-freshness queries return a single
+ratio that should read ~1.0 on a healthy system.

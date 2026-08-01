@@ -1,0 +1,172 @@
+[
+  {
+    "uid": "source-bar-coverage",
+    "title": "Source bar coverage — strategy_output_history_v2",
+    "folderUID": "__FOLDER_UID__",
+    "ruleGroup": "source-freshness",
+    "condition": "C",
+    "for": "30m",
+    "noDataState": "Alerting",
+    "execErrState": "Alerting",
+    "orgID": 1,
+    "labels": {
+      "alertgroup": "source-freshness",
+      "metric": "source-bar-coverage"
+    },
+    "annotations": {
+      "summary": "Strategies stopped publishing 1h bars to strategy_output_history_v2. prod and real_trade are carrying stale positions forward RIGHT NOW and the PnL error is permanent once written (cumulative_pnl is chained). Check which strategies: SELECT strategy_table_name, count() FROM analytics.strategy_output_history_v2 WHERE ts >= now() - INTERVAL 6 HOUR AND config_timeframe='1h' GROUP BY 1. Escalate upstream — a recompute cannot invent bars that were never published."
+    },
+    "notification_settings": {
+      "receiver": "telegram-divergence"
+    },
+    "data": [
+      {
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 86400,
+          "to": 0
+        },
+        "datasourceUid": "dfjc5vjyfcc8wf",
+        "model": {
+          "refId": "A",
+          "editorType": "sql",
+          "rawSql": "WITH per_hour AS (  SELECT toStartOfHour(ts) AS h,         countDistinct(strategy_table_name) AS n  FROM analytics.strategy_output_history_v2 WHERE ts >= now() - INTERVAL 24 HOUR   AND ts <  now() - INTERVAL 3 HOUR    AND config_timeframe = '1h'  GROUP BY h) SELECT (SELECT max(h) FROM per_hour) AS time,        (SELECT argMax(n, h) FROM per_hour)        / nullIf((SELECT max(n) FROM per_hour), 0) AS value",
+          "format": 1,
+          "queryType": "timeseries",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "dfjc5vjyfcc8wf"
+          },
+          "intervalMs": 300000,
+          "maxDataPoints": 100
+        }
+      },
+      {
+        "refId": "B",
+        "datasourceUid": "__expr__",
+        "model": {
+          "refId": "B",
+          "type": "reduce",
+          "datasource": {
+            "type": "__expr__",
+            "uid": "__expr__"
+          },
+          "expression": "A",
+          "reducer": "last",
+          "settings": {
+            "mode": "dropNN"
+          }
+        }
+      },
+      {
+        "refId": "C",
+        "datasourceUid": "__expr__",
+        "model": {
+          "refId": "C",
+          "type": "threshold",
+          "datasource": {
+            "type": "__expr__",
+            "uid": "__expr__"
+          },
+          "expression": "B",
+          "conditions": [
+            {
+              "type": "query",
+              "evaluator": {
+                "type": "lt",
+                "params": [
+                  0.985
+                ]
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "uid": "source-revision-arrival",
+    "title": "Source revision arrival — publisher stall",
+    "folderUID": "__FOLDER_UID__",
+    "ruleGroup": "source-freshness",
+    "condition": "C",
+    "for": "1h",
+    "noDataState": "Alerting",
+    "execErrState": "Alerting",
+    "orgID": 1,
+    "labels": {
+      "alertgroup": "source-freshness",
+      "metric": "source-revision-arrival"
+    },
+    "annotations": {
+      "summary": "The strategy publisher has largely stopped emitting revisions. Bars usually arrive late in a burst afterwards (up to 144h old on 2026-07-28), so prod/real_trade positions are frozen until it recovers. The arrival-driven fix-prod-window / fix-real-trade-window Lambdas will repair the span once the bars land, but only back to MAX_LOOKBACK_HOURS (120h) — watch for the companion 'window-clamped' CloudWatch alarm."
+    },
+    "notification_settings": {
+      "receiver": "telegram-divergence"
+    },
+    "data": [
+      {
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 86400,
+          "to": 0
+        },
+        "datasourceUid": "dfjc5vjyfcc8wf",
+        "model": {
+          "refId": "A",
+          "editorType": "sql",
+          "rawSql": "WITH per_hour AS (  SELECT toStartOfHour(revision_ts) AS h,         countDistinct(strategy_table_name) AS n  FROM analytics.strategy_output_history_v2 WHERE revision_ts >= now() - INTERVAL 24 HOUR   AND revision_ts <  now() - INTERVAL 1 HOUR  GROUP BY h) SELECT (SELECT max(h) FROM per_hour) AS time,        (SELECT argMax(n, h) FROM per_hour)        / nullIf((SELECT quantile(0.5)(n) FROM per_hour), 0) AS value",
+          "format": 1,
+          "queryType": "timeseries",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "dfjc5vjyfcc8wf"
+          },
+          "intervalMs": 300000,
+          "maxDataPoints": 100
+        }
+      },
+      {
+        "refId": "B",
+        "datasourceUid": "__expr__",
+        "model": {
+          "refId": "B",
+          "type": "reduce",
+          "datasource": {
+            "type": "__expr__",
+            "uid": "__expr__"
+          },
+          "expression": "A",
+          "reducer": "last",
+          "settings": {
+            "mode": "dropNN"
+          }
+        }
+      },
+      {
+        "refId": "C",
+        "datasourceUid": "__expr__",
+        "model": {
+          "refId": "C",
+          "type": "threshold",
+          "datasource": {
+            "type": "__expr__",
+            "uid": "__expr__"
+          },
+          "expression": "B",
+          "conditions": [
+            {
+              "type": "query",
+              "evaluator": {
+                "type": "lt",
+                "params": [
+                  0.5
+                ]
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+]

@@ -1,10 +1,11 @@
 # services/fix_bt_window/Dockerfile
-# AWS Lambda container image. Triggered daily by EventBridge Rule; also
+# AWS Lambda container image, deployed as three scheduled functions (bt daily,
+# prod + real_trade 6-hourly) selected via AUDIT_TYPE/CONSUMER_SERVICE env; also
 # invokable ad-hoc with {"window_start": "...", "window_end": "...", "dry_run": true}.
-# Repairs the trailing bt PnL window (audit_pnl --type bt --fix-window) after the
-# late-publishing strategy_cum_pnl_bt_v2 batches land, pausing/resuming the bt
-# consumer around the rewrite. No VPC attachment needed: talks only to
-# ClickHouse Cloud (public HTTPS) and AWS APIs.
+# Repairs the trailing PnL window (audit_pnl --type <mode> --fix-window) once
+# late-arriving source rows land, pausing/resuming that mode's consumer around
+# the rewrite. Functions are VPC-attached (ClickHouse Cloud only allows the NAT
+# EIP; see infra/terraform/fix_bt_window.tf).
 FROM public.ecr.aws/lambda/python:3.11
 
 # All deps are pure-Python; no system libs needed. python-dotenv is imported

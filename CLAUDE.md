@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Mini trading analytics pipeline. Streams strategy PnL data: Binance API → streaming producer (Kafka/Redpanda) → pnl_consumer → ClickHouse Cloud analytics → Grafana Cloud dashboards. Batch recompute/repair is handled by `scripts/audit_pnl.py`; market-data gap-fill is a daily `backfill_prices` Lambda; a daily `fix_bt_window` Lambda repairs the trailing bt PnL window (retro-corrects `strategy_cum_pnl_bt_v2` publish lag). Services run on AWS ECS Fargate in `ap-northeast-1` (Tokyo). Grafana is Grafana Cloud (not self-hosted).
+Mini trading analytics pipeline. Streams strategy PnL data: Binance API → streaming producer (Kafka/Redpanda) → pnl_consumer → ClickHouse Cloud analytics → Grafana Cloud dashboards. Batch recompute/repair is handled by `scripts/audit_pnl.py`; market-data gap-fill is a daily `backfill_prices` Lambda; the `fix_bt_window` image backs three scheduled repair Lambdas — bt daily, prod and real_trade 6-hourly — which re-run `audit_pnl --fix-window` so late-arriving bars get folded back into the chain. Services run on AWS ECS Fargate in `ap-northeast-1` (Tokyo). Grafana is Grafana Cloud (not self-hosted).
 
 ## Commands
 
@@ -46,7 +46,21 @@ Independent ECS Fargate services, each with its own Dockerfile:
 | `trading-analysis-ws-consumer` | `services/streaming/` | Binance WebSocket → Kafka/Redpanda topic `binance.price.ticks` |
 | `trading-analysis-pnl-consumer-{prod,bt,real-trade,price}` | `services/pnl_consumer/` | Kafka consumer → real-time PnL → ClickHouse (one ECS service per mode; the `price` sink writes `futures_price_1min` from `candle.open`) |
 
-Batch PnL recompute/repair is the standalone script `scripts/audit_pnl.py` (not a service). Market-data historical gap-fill (`futures_price_1min`) is `services/backfill_prices/` — a daily AWS Lambda using ccxt. `services/fix_bt_window/` is a daily AWS Lambda (15:00 UTC) that pauses the bt consumer, runs `audit_pnl --type bt --fix-window` over the trailing 49h, and resumes it — retro-correcting positions once late `strategy_cum_pnl_bt_v2` batches land (the cum publisher delivers hours-to-days after bar time; the post-resume bootstrap re-seeds the consumer's chain from the repaired tail).
+Batch PnL recompute/repair is the standalone script `scripts/audit_pnl.py` (not a service). Market-data historical gap-fill (`futures_price_1min`) is `services/backfill_prices/` — a daily AWS Lambda using ccxt. `services/fix_bt_window/` is one image backing **three** scheduled repair Lambdas, selected by the `AUDIT_TYPE` env var. Each pauses its mode's consumer, runs `audit_pnl --type <mode> --fix-window`, and resumes it; the post-resume bootstrap re-seeds the consumer's chain from the repaired tail.
+
+| Function | Schedule | Window |
+|----------|----------|--------|
+| `fix-bt-window` | daily 15:00 UTC | trailing 49h (fixed) |
+| `fix-prod-window` | 6-hourly, 03:10 +6h | 49h floor, **arrival-driven** start, 120h cap, **end = now−3h** |
+| `fix-real-trade-window` | 6-hourly, 03:40 +6h | 49h floor, **arrival-driven** start, 120h cap, **end = now−3h** |
+
+**Why prod/real_trade are arrival-driven and bt is not.** bt sources positions from `strategy_cum_pnl_bt_v2`, re-pushed in bulk — a fixed trailing window is the right shape. prod/real_trade source from `strategy_output_history_v2`, whose revisions land p50 ~16m / p90 ~72m past bar close and which on 2026-07-28 backfilled bars **144h old**; a fixed 49h window would repair none of those. So the start bound is pulled back to the oldest bar whose revision arrived since the last run (`handler._probe_oldest_revised_bar`), floored at 49h and capped at `MAX_LOOKBACK_HOURS`.
+
+**The window end must stop short of `now()` (`END_MARGIN_HOURS`, default 3h).** The batch path emits rows only until one `tf` past the last bar it can *see*, while the live consumer carries the position forward indefinitely. Recomputing a stretch whose bars have not arrived yet therefore DELETES good carry-forward rows and writes nothing back. On 2026-08-01 a manual repair ending at 03:27 blew an 87-minute hole (02:00–03:26) in 7 ADA `sid=12` strategies whose first revisions run ~152 min late — their 01:00 bar landed at 03:33. bt is exempt: it sources from the cum table and minute-chains, so it has always run to `now()` safely.
+
+**The cap is a Lambda-timeout constraint, not a correctness one** — 900s max, ~2M rows per 4–5 min in-VPC, so 120h (~5M rows) is the safe ceiling. When a backfill reaches further the handler logs `clamped to MAX_LOOKBACK_HOURS` and a CloudWatch alarm fires; repair the remainder manually. If that becomes routine, move these two to an ECS RunTask rather than raising the cap.
+
+**This repair pass is the only thing that stops prod/real_trade PnL error accumulating.** Measured 2026-07-31: bt had 100% of rows rewritten daily, while prod and real_trade had *zero* rows with a write lag over 1h across 8 days — pure live writes, never revisited. Since `cumulative_pnl` is chained, one minute on a stale position is permanent and every later minute inherits it.
 
 Adding new instruments requires updating `INSTRUMENTS` in `services/streaming/streaming/binance_ws_consumer.py` and in the `backfill_prices` Lambda.
 
@@ -69,9 +83,11 @@ Binance WebSocket (1m closed candles)
 backfill_prices Lambda (daily, ccxt)  — fills futures_price_1min historical gaps only
     → analytics.futures_price_1min
 
-fix_bt_window Lambda (daily 15:00 UTC)  — pause bt consumer → audit_pnl --type bt
-    --fix-window [now-49h, now) → resume — retro-corrects cum-table publish lag
-    → analytics.strategy_pnl_1min_bt_v2 (+ 1hour/1day rollups)
+fix_{bt,prod,real_trade}_window Lambdas  — pause consumer → audit_pnl --type <mode>
+    --fix-window → resume.  bt: daily, trailing 49h.  prod/real_trade: 6-hourly,
+    start pulled back to the oldest bar revised since the last run (49h floor,
+    120h cap) so hours-to-days-late bars still get folded into the chain
+    → analytics.strategy_pnl_1min_{bt,prod,real_trade}_v2 (+ 1hour/1day rollups)
 
 External strategy service (push)
     → analytics.strategy_output_history_v2 / _bt_v2
