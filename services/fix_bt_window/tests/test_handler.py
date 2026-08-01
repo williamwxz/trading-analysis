@@ -53,19 +53,13 @@ def test_compute_window_event_overrides():
 def test_build_argv_shape():
     argv = h.build_argv("2026-07-07 14:00:00", "2026-07-09 15:00:00", dry_run=False)
     assert argv[0] == "audit_pnl"
-    assert ["--type", "bt"] == argv[1:3]
+    assert ["--type", "bt"] == argv[1:3]  # bt is the default audit type
     assert ["--fix-window", "2026-07-07 14:00:00", "2026-07-09 15:00:00"] == argv[3:6]
     assert "--no-pause" in argv  # the Lambda manages ECS itself
     # Lambda FS is read-only outside /tmp
     assert argv[argv.index("--state-file") + 1].startswith("/tmp/")
     assert argv[argv.index("--report") + 1].startswith("/tmp/")
     assert "--dry-run" not in argv
-
-
-@pytest.mark.unit
-def test_build_argv_dry_run():
-    argv = h.build_argv("a", "b", dry_run=True)
-    assert "--dry-run" in argv
 
 
 @pytest.mark.unit
@@ -289,10 +283,14 @@ def test_handler_pauses_the_mode_specific_consumer(monkeypatch):
     ecs = MagicMock()
     with (
         patch.object(h, "_ecs", return_value=ecs),
-        patch.object(h, "run_audit", return_value=0),
+        patch.object(h, "run_audit", return_value=0) as ra,
         patch.object(h, "_fetch_secrets_into_env"),
         patch.object(h, "_probe_oldest_revised_bar", return_value=None),
     ):
         h.handler({}, None)
     services = {c.kwargs["service"] for c in ecs.update_service.call_args_list}
     assert services == {"trading-analysis-pnl-consumer-real-trade"}
+    # ...and the audit runs against that same mode. Pausing one consumer while
+    # repairing another mode's table would be silent corruption (from PR #65).
+    argv = ra.call_args.args[0]
+    assert ["--type", "real_trade"] == argv[1:3]

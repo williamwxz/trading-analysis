@@ -1,6 +1,8 @@
 """AWS Lambda entry point for the scheduled PnL window repair.
 
-One image, three functions, selected by the AUDIT_TYPE env var:
+One image, three functions, selected by the AUDIT_TYPE env var. The mode comes
+from env and never from the event payload, so a mis-sent payload cannot repair
+one mode while pausing another mode's consumer:
 
     fix-bt-window          AUDIT_TYPE=bt          daily 15:00 UTC
     fix-prod-window        AUDIT_TYPE=prod        6-hourly from 03:10 UTC
