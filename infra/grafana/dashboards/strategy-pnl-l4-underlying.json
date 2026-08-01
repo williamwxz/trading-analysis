@@ -34,7 +34,7 @@
         "uid": "dfjc5vjyfcc8wf"
       },
       "title": "Aggregate PnL (from backtest day 0) \u2014 ${underlying}",
-      "description": "All strategies combined for this underlying, PnL normalised from strategy inception (not the selected time range). Production vs Backtest overlaid. Strategy Benchmark = weighted average of each strategy's own benchmark, also cumulative from inception. Buy & Hold = cumulative 1-min return of ${underlying}USDT, anchored at the start of the selected time range \u2014 so it starts at 0% and is not directly comparable to the inception-based curves.",
+      "description": "All strategies combined for this underlying, PnL normalised from strategy inception (not the selected time range). Production vs Backtest overlaid. Strategy Benchmark = weighted average of each strategy's own benchmark, also cumulative from inception. Benchmark = ${underlying}USDT buy-and-hold, anchored at the start of the selected time range \u2014 so it starts at 0% and is not directly comparable to the inception-based curves.",
       "type": "timeseries",
       "id": 2,
       "gridPos": {
@@ -120,7 +120,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "dfjc5vjyfcc8wf"
           },
-          "rawSql": "WITH px AS (\n    SELECT instrument, ts, open,\n           lagInFrame(open) OVER (PARTITION BY instrument ORDER BY ts) AS prev_open\n    FROM analytics.futures_price_1min\n    WHERE (empty('${underlying}') OR instrument = concat('${underlying}', 'USDT'))\n      AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))\n),\nper_min AS (\n    SELECT ts, avg((open - prev_open) / nullIf(prev_open, 0)) AS bm\n    FROM px\n    WHERE prev_open != 0\n    GROUP BY ts\n),\nper_bucket AS (\n    SELECT CASE\n             WHEN ts >= toStartOfHour(now() - INTERVAL 6 HOUR) THEN toStartOfMinute(ts)\n             WHEN ts >= toStartOfDay(now() - INTERVAL 30 DAY) THEN toStartOfHour(ts)\n             ELSE toStartOfDay(ts)\n           END AS time,\n           sum(bm) AS period_bm\n    FROM per_min\n    GROUP BY time\n)\nSELECT time,\n       cum - first_value(cum) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING\n                                    AND UNBOUNDED FOLLOWING) AS `Buy & Hold`\nFROM (\n    SELECT time,\n           sum(period_bm) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)\n             AS cum\n    FROM per_bucket\n)\nORDER BY time",
+          "rawSql": "WITH px AS (\n    SELECT instrument, ts, open,\n           lagInFrame(open) OVER (PARTITION BY instrument ORDER BY ts) AS prev_open\n    FROM analytics.futures_price_1min\n    WHERE (empty('${underlying}') OR instrument = concat('${underlying}', 'USDT'))\n      AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))\n),\nper_min AS (\n    SELECT ts, avg((open - prev_open) / nullIf(prev_open, 0)) AS bm\n    FROM px\n    WHERE prev_open != 0\n    GROUP BY ts\n),\nper_bucket AS (\n    SELECT CASE\n             WHEN ts >= toStartOfHour(now() - INTERVAL 6 HOUR) THEN toStartOfMinute(ts)\n             WHEN ts >= toStartOfDay(now() - INTERVAL 30 DAY) THEN toStartOfHour(ts)\n             ELSE toStartOfDay(ts)\n           END AS time,\n           sum(bm) AS period_bm\n    FROM per_min\n    GROUP BY time\n)\nSELECT time,\n       cum - first_value(cum) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING\n                                    AND UNBOUNDED FOLLOWING) AS `Benchmark`\nFROM (\n    SELECT time,\n           sum(period_bm) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)\n             AS cum\n    FROM per_bucket\n)\nORDER BY time",
           "refId": "D",
           "format": 1,
           "queryType": "sql",
@@ -139,7 +139,7 @@
         "uid": "dfjc5vjyfcc8wf"
       },
       "title": "Aggregate PnL (from 0%) \u2014 ${underlying}",
-      "description": "All strategies combined for this underlying. Production vs Backtest overlaid. PnL normalised to 0% at the start of the selected time range. Strategy Benchmark = weighted average of each strategy's own benchmark, likewise normalised. Buy & Hold = cumulative 1-min return of ${underlying}USDT over the same window \u2014 all series share the same anchor here.",
+      "description": "All strategies combined for this underlying. Production vs Backtest overlaid. PnL normalised to 0% at the start of the selected time range. Strategy Benchmark = weighted average of each strategy's own benchmark, likewise normalised. Benchmark = ${underlying}USDT buy-and-hold over the same window \u2014 all series share the same anchor here.",
       "type": "timeseries",
       "id": 3,
       "gridPos": {
@@ -226,7 +226,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "dfjc5vjyfcc8wf"
           },
-          "rawSql": "WITH px AS (\n    SELECT instrument, ts, open,\n           lagInFrame(open) OVER (PARTITION BY instrument ORDER BY ts) AS prev_open\n    FROM analytics.futures_price_1min\n    WHERE (empty('${underlying}') OR instrument = concat('${underlying}', 'USDT'))\n      AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))\n),\nper_min AS (\n    SELECT ts, avg((open - prev_open) / nullIf(prev_open, 0)) AS bm\n    FROM px\n    WHERE prev_open != 0\n    GROUP BY ts\n),\nper_bucket AS (\n    SELECT CASE\n             WHEN ts >= toStartOfHour(now() - INTERVAL 6 HOUR) THEN toStartOfMinute(ts)\n             WHEN ts >= toStartOfDay(now() - INTERVAL 30 DAY) THEN toStartOfHour(ts)\n             ELSE toStartOfDay(ts)\n           END AS time,\n           sum(bm) AS period_bm\n    FROM per_min\n    GROUP BY time\n)\nSELECT time,\n       cum - first_value(cum) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING\n                                    AND UNBOUNDED FOLLOWING) AS `Buy & Hold`\nFROM (\n    SELECT time,\n           sum(period_bm) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)\n             AS cum\n    FROM per_bucket\n)\nORDER BY time",
+          "rawSql": "WITH px AS (\n    SELECT instrument, ts, open,\n           lagInFrame(open) OVER (PARTITION BY instrument ORDER BY ts) AS prev_open\n    FROM analytics.futures_price_1min\n    WHERE (empty('${underlying}') OR instrument = concat('${underlying}', 'USDT'))\n      AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))\n),\nper_min AS (\n    SELECT ts, avg((open - prev_open) / nullIf(prev_open, 0)) AS bm\n    FROM px\n    WHERE prev_open != 0\n    GROUP BY ts\n),\nper_bucket AS (\n    SELECT CASE\n             WHEN ts >= toStartOfHour(now() - INTERVAL 6 HOUR) THEN toStartOfMinute(ts)\n             WHEN ts >= toStartOfDay(now() - INTERVAL 30 DAY) THEN toStartOfHour(ts)\n             ELSE toStartOfDay(ts)\n           END AS time,\n           sum(bm) AS period_bm\n    FROM per_min\n    GROUP BY time\n)\nSELECT time,\n       cum - first_value(cum) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING\n                                    AND UNBOUNDED FOLLOWING) AS `Benchmark`\nFROM (\n    SELECT time,\n           sum(period_bm) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)\n             AS cum\n    FROM per_bucket\n)\nORDER BY time",
           "refId": "D",
           "format": 1,
           "queryType": "sql",
@@ -245,7 +245,7 @@
         "uid": "dfjc5vjyfcc8wf"
       },
       "title": "${underlying} \u2014 Drawdown",
-      "description": "Drawdown from peak for the combined strategy return on this underlying, alongside drawdown of the strategy benchmark and of ${underlying}USDT buy-and-hold. Drawdown is anchor-independent, so all series are comparable.",
+      "description": "Drawdown from peak for the combined strategy return on this underlying, alongside drawdown of the strategy benchmark and of the ${underlying}USDT buy-and-hold benchmark. Drawdown is anchor-independent, so all series are comparable.",
       "type": "timeseries",
       "id": 4,
       "gridPos": {
@@ -335,7 +335,7 @@
             "type": "grafana-clickhouse-datasource",
             "uid": "dfjc5vjyfcc8wf"
           },
-          "rawSql": "WITH px AS (\n    SELECT instrument, ts, open,\n           lagInFrame(open) OVER (PARTITION BY instrument ORDER BY ts) AS prev_open\n    FROM analytics.futures_price_1min\n    WHERE (empty('${underlying}') OR instrument = concat('${underlying}', 'USDT'))\n      AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))\n),\nper_min AS (\n    SELECT ts, avg((open - prev_open) / nullIf(prev_open, 0)) AS bm\n    FROM px\n    WHERE prev_open != 0\n    GROUP BY ts\n),\nper_bucket AS (\n    SELECT CASE\n             WHEN ts >= toStartOfHour(now() - INTERVAL 6 HOUR) THEN toStartOfMinute(ts)\n             WHEN ts >= toStartOfDay(now() - INTERVAL 30 DAY) THEN toStartOfHour(ts)\n             ELSE toStartOfDay(ts)\n           END AS time,\n           sum(bm) AS period_bm\n    FROM per_min\n    GROUP BY time\n)\nSELECT time,\n       cum - max(cum) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)\n         AS `Buy & Hold Drawdown`\nFROM (\n    SELECT time,\n           sum(period_bm) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)\n             AS cum\n    FROM per_bucket\n)\nORDER BY time",
+          "rawSql": "WITH px AS (\n    SELECT instrument, ts, open,\n           lagInFrame(open) OVER (PARTITION BY instrument ORDER BY ts) AS prev_open\n    FROM analytics.futures_price_1min\n    WHERE (empty('${underlying}') OR instrument = concat('${underlying}', 'USDT'))\n      AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000))\n),\nper_min AS (\n    SELECT ts, avg((open - prev_open) / nullIf(prev_open, 0)) AS bm\n    FROM px\n    WHERE prev_open != 0\n    GROUP BY ts\n),\nper_bucket AS (\n    SELECT CASE\n             WHEN ts >= toStartOfHour(now() - INTERVAL 6 HOUR) THEN toStartOfMinute(ts)\n             WHEN ts >= toStartOfDay(now() - INTERVAL 30 DAY) THEN toStartOfHour(ts)\n             ELSE toStartOfDay(ts)\n           END AS time,\n           sum(bm) AS period_bm\n    FROM per_min\n    GROUP BY time\n)\nSELECT time,\n       cum - max(cum) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)\n         AS `Benchmark Drawdown`\nFROM (\n    SELECT time,\n           sum(period_bm) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)\n             AS cum\n    FROM per_bucket\n)\nORDER BY time",
           "refId": "D",
           "format": 1,
           "queryType": "sql",
