@@ -1009,6 +1009,11 @@ resource "aws_ecs_service" "ws_consumer" {
     assign_public_ip = false
   }
 
+  # CI owns the deployed revision — see the note on aws_ecs_service.pnl_consumer.
+  lifecycle {
+    ignore_changes = [task_definition]
+  }
+
   tags = local.common_tags
 }
 
@@ -1028,6 +1033,25 @@ resource "aws_ecs_service" "pnl_consumer" {
     subnets          = [aws_subnet.private.id]
     security_groups  = [aws_security_group.ecs_tasks.id]
     assign_public_ip = false
+  }
+
+  # Terraform registers the task definition above (image `:latest`) only to
+  # bootstrap the service; from then on CI owns the deployed revision, which it
+  # pins to the build's commit SHA. Without this, terraform reverts the service
+  # to its own `:latest` revision on EVERY push to main — and `:latest` has not
+  # been pushed since 2026-05-29, because the build tags by SHA only.
+  #
+  # ci-cd.yml runs `terraform` and `build` in parallel, then `deploy`. So each
+  # deploy opened a window where every consumer ran the 2026-05-29 image until
+  # the deploy job's update-service landed. On 2026-08-01 19:43:53 that window
+  # was ~2 min, and the pre-June bt bootstrap in it (reference_ts = now(), seed
+  # from row_json) re-anchored all 695 bt chains to cum_pnl_first — a +0.106
+  # jump in the aggregate at ts=19:44, carried forward until the next repair.
+  # The identical 2026-06-28 19:48 incident is what `_bootstrap_bt_state`'s
+  # "refusing to start (would mass re-anchor)" guard was added for; the stale
+  # image predates the guard, so it sails straight through every time.
+  lifecycle {
+    ignore_changes = [task_definition]
   }
 
   tags = local.common_tags
