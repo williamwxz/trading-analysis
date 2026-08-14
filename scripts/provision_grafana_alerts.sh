@@ -55,6 +55,17 @@ fi
 if ok "$code"; then echo "   OK ($code)"; else
   echo "   ERROR contact point HTTP $code: $(cat /tmp/ga_resp.json)"; rc=1; fi
 
+# Retired rules. The upsert below is keyed by uid and never prunes, so a rule
+# removed from rules-divergence.json would otherwise keep running in Grafana
+# Cloud forever. 404 means already gone, so this stays idempotent.
+echo "==> Deleting retired alert rules"
+for uid in divergence-bt-prod divergence-prod-rt; do
+  code=$(req DELETE "/api/v1/provisioning/alert-rules/$uid")
+  if ok "$code"; then echo "   deleted $uid ($code)"
+  elif [[ "$code" == 404 ]]; then echo "   $uid already absent"
+  else echo "   WARN delete $uid HTTP $code: $(cat /tmp/ga_resp.json)"; fi
+done
+
 echo "==> Upserting alert rules"
 # substitute the real folder uid into each rule, then upsert by uid.
 # Two rule files, two groups: 'divergence' compares PnL modes against each

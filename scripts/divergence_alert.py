@@ -1,8 +1,10 @@
 """Position-divergence checker (local/manual diagnostic).
 
-Production alerting is Grafana-native — see infra/grafana/alerting/ (the rule
-SQL and 0.05/sustained threshold mirror this script). Use this for ad-hoc CLI
-spot-checks or a quick dry-run of the same logic against live ClickHouse.
+This computes the PORTFOLIO-AGGREGATE divergence at a single flat threshold. It
+no longer mirrors production alerting: since 2026-08-14 the Grafana position rule
+is per-underlying with per-coin thresholds and names the top contributing
+strategies (see infra/grafana/alerting/). Keep using this for ad-hoc CLI
+spot-checks of the aggregate picture; it is not the alert.
 
 Computes the portfolio weighted-average POSITION for prod / real_trade / bt over
 the last N complete minutes and reports when two modes trade meaningfully
