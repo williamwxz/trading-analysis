@@ -512,6 +512,116 @@
           }
         }
       ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Position Divergence \u2014 ${underlying}",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "dfjc5vjyfcc8wf"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 34,
+        "w": 24,
+        "h": 7
+      },
+      "description": "Weighted-average position, backtest minus production, for the selected underlying. The dashed lines are that coin's alert threshold \u2014 the Telegram rule fires when the curve stays outside them for 10 minutes. Thresholds are per-coin because a coin with few strategies moves its own weighted average far more on one late bar than the portfolio does.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisCenteredZero": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "Threshold.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": false,
+                  "tooltip": true,
+                  "viz": false
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "dfjc5vjyfcc8wf"
+          },
+          "editorType": "sql",
+          "rawSql": "SELECT a.time AS time, (a.wpos - b.wpos) AS `Backtest \u2212 Production` FROM (SELECT $__timeInterval(ts) AS time, sum(position * weighting) / nullIf(sum(weighting), 0) AS wpos FROM (SELECT * FROM analytics.strategy_pnl_1min_bt_v2 FINAL WHERE ts >= toStartOfHour(now() - INTERVAL 6 HOUR) UNION ALL SELECT * FROM analytics.strategy_pnl_1hour_bt_v2 FINAL WHERE ts >= toStartOfDay(now() - INTERVAL 30 DAY) AND ts < toStartOfHour(now() - INTERVAL 6 HOUR) UNION ALL SELECT * FROM analytics.strategy_pnl_1day_bt_v2 FINAL WHERE ts < toStartOfDay(now() - INTERVAL 30 DAY)) WHERE (empty('${underlying}') OR `underlying` = '${underlying}') AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time) AS a INNER JOIN (SELECT $__timeInterval(ts) AS time, sum(position * weighting) / nullIf(sum(weighting), 0) AS wpos FROM (SELECT strategy_table_name, strategy_id, strategy_name, underlying, config_timeframe, source, version, ts, cumulative_pnl, benchmark, position, price, final_signal, weighting, updated_at FROM (SELECT * FROM analytics.strategy_pnl_1min_prod_v2 FINAL WHERE ts >= toStartOfHour(now() - INTERVAL 6 HOUR) UNION ALL SELECT * FROM analytics.strategy_pnl_1hour_prod_v2 FINAL WHERE ts >= toStartOfDay(now() - INTERVAL 30 DAY) AND ts < toStartOfHour(now() - INTERVAL 6 HOUR) UNION ALL SELECT * FROM analytics.strategy_pnl_1day_prod_v2 FINAL WHERE ts < toStartOfDay(now() - INTERVAL 30 DAY))) WHERE (empty('${underlying}') OR `underlying` = '${underlying}') AND ts >= toDateTime(intDiv(${__from},1000)) AND ts <= toDateTime(intDiv(${__to},1000)) GROUP BY time) AS b USING (time) ORDER BY time",
+          "format": 1,
+          "queryType": "timeseries"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "dfjc5vjyfcc8wf"
+          },
+          "editorType": "sql",
+          "rawSql": "SELECT toDateTime(intDiv(${__from},1000)) AS time, (CASE '${underlying}' WHEN 'BTC' THEN 0.15 WHEN 'ETH' THEN 0.15 WHEN 'SOL' THEN 0.2 WHEN 'ADA' THEN 0.25 WHEN 'DOGE' THEN 0.25 WHEN 'AVAX' THEN 0.3 WHEN 'XRP' THEN 0.3 WHEN 'FET' THEN 0.4 ELSE 0.25 END) AS `Threshold +`, -1 * (CASE '${underlying}' WHEN 'BTC' THEN 0.15 WHEN 'ETH' THEN 0.15 WHEN 'SOL' THEN 0.2 WHEN 'ADA' THEN 0.25 WHEN 'DOGE' THEN 0.25 WHEN 'AVAX' THEN 0.3 WHEN 'XRP' THEN 0.3 WHEN 'FET' THEN 0.4 ELSE 0.25 END) AS `Threshold \u2212` UNION ALL SELECT toDateTime(intDiv(${__to},1000)) AS time, (CASE '${underlying}' WHEN 'BTC' THEN 0.15 WHEN 'ETH' THEN 0.15 WHEN 'SOL' THEN 0.2 WHEN 'ADA' THEN 0.25 WHEN 'DOGE' THEN 0.25 WHEN 'AVAX' THEN 0.3 WHEN 'XRP' THEN 0.3 WHEN 'FET' THEN 0.4 ELSE 0.25 END) AS `Threshold +`, -1 * (CASE '${underlying}' WHEN 'BTC' THEN 0.15 WHEN 'ETH' THEN 0.15 WHEN 'SOL' THEN 0.2 WHEN 'ADA' THEN 0.25 WHEN 'DOGE' THEN 0.25 WHEN 'AVAX' THEN 0.3 WHEN 'XRP' THEN 0.3 WHEN 'FET' THEN 0.4 ELSE 0.25 END) AS `Threshold \u2212` ORDER BY time",
+          "format": 1,
+          "queryType": "timeseries"
+        }
+      ]
     }
   ],
   "templating": {
