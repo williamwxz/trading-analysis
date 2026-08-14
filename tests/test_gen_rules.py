@@ -64,7 +64,28 @@ def test_sql_selects_the_instance_dimensions():
 
 
 def test_sql_keeps_the_completeness_gate():
-    assert "countDistinct(underlying) = 8" in gen_rules.per_underlying_sql()
+    assert "countDistinct(underlying) = (" in gen_rules.per_underlying_sql()
+
+
+def test_completeness_gate_is_not_hardcoded_to_a_roster_size():
+    """An exact `= 8` rejects every minute once a ninth instrument is onboarded.
+    With noDataState=OK that silently disables alerting instead of failing loudly,
+    and makes DEFAULT_THRESHOLD unreachable. Both rules must derive the count."""
+    for sql in (
+        gen_rules.per_underlying_sql(),
+        next(d for d in gen_rules.pnl_rule()["data"] if d["refId"] == "A")["model"][
+            "rawSql"
+        ],
+    ):
+        assert "countDistinct(underlying) = 8" not in sql
+        assert "countDistinct(underlying) = (SELECT countDistinct(underlying)" in sql
+
+
+def test_roster_size_is_scoped_to_the_same_window_as_the_gate():
+    sql = gen_rules.roster_size("strategy_pnl_1min_prod_v2")
+    assert f"INTERVAL {gen_rules.WINDOW_MIN} MINUTE" in sql
+    assert "FINAL" not in sql
+    assert "FINAL" in gen_rules.roster_size("strategy_pnl_1min_prod_v2", final=True)
 
 
 def test_sql_limits_to_top_n_per_underlying():

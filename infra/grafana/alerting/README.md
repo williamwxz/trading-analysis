@@ -49,11 +49,27 @@ without a threshold edit. Coverage judges a bar-hour only after a 3h settle,
 since first revisions land p50 ~16m / p90 ~72m / p99 ~96m past bar close.
 
 Both rules query the ClickHouse datasource for the last 15 complete minutes
-(`countDistinct(underlying)=8`, same completeness gate as the panels), reduce to
-the latest minute, and threshold. The `for: 10m` makes them sustained-breach
-alerts, not single-minute blips. Rules route straight to the Telegram contact
-point via per-rule notification settings, so the global notification policy tree
-is left untouched.
+(every underlying written), reduce to the latest minute, and threshold. The
+`for: 10m` makes them sustained-breach alerts, not single-minute blips. Rules
+route straight to the Telegram contact point via per-rule notification settings,
+so the global notification policy tree is left untouched.
+
+**The completeness gate derives the roster from the window; never hardcode it.**
+The L5 panels and `divergence_alert.py` still use a literal
+`countDistinct(underlying) = 8`, but the alert rules compare against
+`(SELECT countDistinct(underlying) FROM <same table, same window>)`. An exact
+`= 8` matches **zero** minutes the day a ninth instrument is onboarded (verified
+against live data 2026-08-14 by injecting a synthetic 9th underlying), and since
+both rules set `noDataState: OK` that silently switches alerting off rather than
+failing loudly — it would also make `DEFAULT_THRESHOLD` unreachable, since the
+gate breaks before a new coin's default could ever apply. Onboarding an
+instrument already means editing `INSTRUMENTS` in two places (see CLAUDE.md); it
+must not also mean quietly losing divergence alerting.
+
+A coin that stops writing for a whole window shrinks the derived roster instead
+of wedging the gate. That is the better failure mode: the per-underlying rule
+simply has no instances for the missing coin and the other seven keep alerting.
+Detecting genuinely absent source data is the source-freshness rules' job.
 
 ### Thresholds
 
@@ -124,9 +140,15 @@ then re-run it to regenerate `rules-divergence.json`.
 
 `divergence-bt-prod` and `divergence-prod-rt` (both portfolio-aggregate position)
 were retired on 2026-08-14. Because the provisioning script upserts by uid and
-never prunes, it now DELETEs these two uids explicitly on every run; a 404 means
-already gone. Do not re-add them to `rules-divergence.json` — the delete pass
-would race the upsert.
+never prunes, it DELETEs these two uids explicitly; a 404 means already gone, so
+it is idempotent. Do not re-add them to `rules-divergence.json`.
+
+**The delete runs after the upsert, and only if `divergence-bt-prod-per-underlying`
+was confirmed installed.** Deleting first would mean a transient PUT+POST failure
+leaves no position-divergence coverage at all — and because the provisioning step
+is `continue-on-error: true` in `ci-cd.yml`, that outage would persist silently
+until some later successful run. If the replacement does not install, the script
+logs `SKIPPED` and leaves the old rules in place.
 
 ## Required secrets (GitHub Actions repo secrets)
 

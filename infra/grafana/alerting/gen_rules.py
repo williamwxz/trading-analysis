@@ -53,6 +53,27 @@ def threshold_case(col: str) -> str:
     return f"CASE {col} {whens} ELSE {DEFAULT_THRESHOLD:g} END"
 
 
+def roster_size(tbl: str, final: bool = False) -> str:
+    """Scalar subquery: how many underlyings are currently live in `tbl`.
+
+    Derived from the window itself, never hardcoded. An exact `countDistinct(...)
+    = 8` rejects EVERY minute the day a ninth instrument is onboarded — and since
+    both rules use noDataState=OK, that silently disables all alerting rather than
+    failing loudly. It would also make DEFAULT_THRESHOLD unreachable: the gate
+    breaks before a new coin's default could ever apply.
+
+    A coin that stops writing for the whole window shrinks the roster instead of
+    wedging the gate. That is the better failure: the per-underlying rule simply
+    has no instances for the missing coin, and the other coins keep alerting.
+    Genuinely absent source data is the source-freshness rules' job, not this one.
+    """
+    f = " FINAL" if final else ""
+    return (
+        f"SELECT countDistinct(underlying) FROM analytics.{tbl}{f} "
+        f"WHERE ts >= now() - INTERVAL {WINDOW_MIN} MINUTE"
+    )
+
+
 def _pairs(minutes: int, gated: bool) -> str:
     """Per-strategy (bt - prod) position delta over the last `minutes` minutes.
 
@@ -96,11 +117,12 @@ def per_underlying_sql() -> str:
     two real episodes in the 21d history, 60m gives one long stable run each
     (XRP 50 min, FET 21 min) where 17m fragments into runs as short as 2 minutes.
     """
+    roster = roster_size("strategy_pnl_1min_prod_v2")
     return f"""
 WITH complete AS (
   SELECT toStartOfMinute(ts) t FROM analytics.strategy_pnl_1min_prod_v2
   WHERE ts >= now() - INTERVAL {WINDOW_MIN} MINUTE
-  GROUP BY t HAVING countDistinct(underlying) = 8
+  GROUP BY t HAVING countDistinct(underlying) = ({roster})
 ),
 coin AS (
   SELECT u, t, abs(sum(dp * w) / nullIf(sum(w), 0)) AS adiv
@@ -221,7 +243,8 @@ def _pnl_wagg(tbl: str) -> str:
         f"AND toStartOfMinute(ts) IN ("
         f"SELECT toStartOfMinute(ts) FROM analytics.{tbl} FINAL "
         f"WHERE ts >= now() - INTERVAL {WINDOW_MIN} MINUTE "
-        f"GROUP BY toStartOfMinute(ts) HAVING countDistinct(underlying) = 8) "
+        f"GROUP BY toStartOfMinute(ts) "
+        f"HAVING countDistinct(underlying) = ({roster_size(tbl, final=True)})) "
         f"GROUP BY t"
     )
 

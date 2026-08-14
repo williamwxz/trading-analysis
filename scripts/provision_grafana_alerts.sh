@@ -55,17 +55,6 @@ fi
 if ok "$code"; then echo "   OK ($code)"; else
   echo "   ERROR contact point HTTP $code: $(cat /tmp/ga_resp.json)"; rc=1; fi
 
-# Retired rules. The upsert below is keyed by uid and never prunes, so a rule
-# removed from rules-divergence.json would otherwise keep running in Grafana
-# Cloud forever. 404 means already gone, so this stays idempotent.
-echo "==> Deleting retired alert rules"
-for uid in divergence-bt-prod divergence-prod-rt; do
-  code=$(req DELETE "/api/v1/provisioning/alert-rules/$uid")
-  if ok "$code"; then echo "   deleted $uid ($code)"
-  elif [[ "$code" == 404 ]]; then echo "   $uid already absent"
-  else echo "   WARN delete $uid HTTP $code: $(cat /tmp/ga_resp.json)"; fi
-done
-
 echo "==> Upserting alert rules"
 # substitute the real folder uid into each rule, then upsert by uid.
 # Two rule files, two groups: 'divergence' compares PnL modes against each
@@ -81,6 +70,8 @@ for r in rules:
     r['folderUID'] = '$FOLDER_UID'
 json.dump(rules, open('/tmp/ga_rules.json', 'w'))
 "
+REPLACEMENT_UID="divergence-bt-prod-per-underlying"
+replacement_ok=0
 count=$(python3 -c "import json;print(len(json.load(open('/tmp/ga_rules.json'))))")
 for i in $(seq 0 $((count - 1))); do
   body=$(python3 -c "import json;print(json.dumps(json.load(open('/tmp/ga_rules.json'))[$i]))")
@@ -91,9 +82,32 @@ for i in $(seq 0 $((count - 1))); do
     echo "   PUT $uid HTTP $code -> trying POST"
     code=$(req POST "/api/v1/provisioning/alert-rules" "$body")
   fi
-  if ok "$code"; then echo "   OK  $title ($code)"; else
+  if ok "$code"; then
+    echo "   OK  $title ($code)"
+    [[ "$uid" == "$REPLACEMENT_UID" ]] && replacement_ok=1
+  else
     echo "   ERROR $title HTTP $code: $(cat /tmp/ga_resp.json)"; rc=1; fi
 done
+
+# Retired rules, deleted only AFTER their replacement is confirmed installed.
+# The upsert above is keyed by uid and never prunes, so a rule removed from
+# rules-divergence.json would otherwise keep running in Grafana Cloud forever —
+# but deleting first would mean a transient PUT+POST failure leaves NO position
+# divergence coverage at all, and this whole step is continue-on-error in CI, so
+# that outage would persist silently until some later successful run.
+# 404 means already gone, so this stays idempotent.
+echo "==> Deleting retired alert rules"
+if [[ "$replacement_ok" == 1 ]]; then
+  for uid in divergence-bt-prod divergence-prod-rt; do
+    code=$(req DELETE "/api/v1/provisioning/alert-rules/$uid")
+    if ok "$code"; then echo "   deleted $uid ($code)"
+    elif [[ "$code" == 404 ]]; then echo "   $uid already absent"
+    else echo "   WARN delete $uid HTTP $code: $(cat /tmp/ga_resp.json)"; fi
+  done
+else
+  echo "   SKIPPED — $REPLACEMENT_UID was not installed; keeping the old rules"
+  echo "   so position divergence stays covered. Retry once the upsert succeeds."
+fi
 
 echo "==> Setting 'divergence' rule-group eval interval to 60s"
 GRP="{\"interval\":60}"
