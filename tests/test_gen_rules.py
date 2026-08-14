@@ -92,6 +92,36 @@ def test_sql_limits_to_top_n_per_underlying():
     assert f"WHERE rn <= {gen_rules.TOP_N}" in gen_rules.per_underlying_sql()
 
 
+def test_per_underlying_query_uses_timeseries_format_not_table():
+    """The result carries string DIMENSION columns, i.e. a `long` frame. Grafana
+    server-side expressions reject those outright:
+
+        [sse.readDataError] [A] got error: input data must be a wide series
+        but got type long
+
+    format 0 (FormatOptionTimeSeries) runs LongToWide and attaches the string
+    columns as field Labels — that is what produces the underlying/sid/sno alert
+    labels. format 1 (FormatOptionTable) passes the long frame through and every
+    evaluation errors with all annotations rendering `[no value]`.
+    """
+    q = next(d for d in gen_rules.per_underlying_rule()["data"] if d["refId"] == "A")
+    assert q["model"]["format"] == 0
+    assert gen_rules.FORMAT_TIME_SERIES == 0
+    assert gen_rules.FORMAT_TABLE == 1
+
+
+def test_per_underlying_query_range_covers_the_ranking_window():
+    """Ranking reads 60 minutes back; the declared range must not understate it."""
+    q = next(d for d in gen_rules.per_underlying_rule()["data"] if d["refId"] == "A")
+    assert q["relativeTimeRange"]["from"] >= gen_rules.RANK_WINDOW_MIN * 60
+
+
+def test_pnl_query_stays_table_format():
+    """It returns a single `time, value` series, which is already wide."""
+    q = next(d for d in gen_rules.pnl_rule()["data"] if d["refId"] == "A")
+    assert q["model"]["format"] == 1
+
+
 def test_rule_condition_is_a_flat_ratio_threshold():
     """Per-coin thresholds live in the SQL as a ratio, so the Grafana threshold is 1."""
     rule = gen_rules.per_underlying_rule()
