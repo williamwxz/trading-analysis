@@ -76,8 +76,11 @@ far more on one late bar than the 695-strategy portfolio does.
 
 Six firings over 21 days, every one a discrete episode. A new underlying falls
 back to `DEFAULT_THRESHOLD` (0.25) until measured. Measured 2026-08-14; re-measure
-when the roster changes materially, chunking **per coin** — a single query joining
-per-strategy rows across 21 days OOMs ClickHouse Cloud at 7.2 GiB (code 241).
+when the roster changes materially, chunking **per coin and per week** — a query
+joining per-strategy rows across 21 days OOMs ClickHouse Cloud at 7.2 GiB (code
+241), and per-coin chunking alone still OOMs on the largest coins (ETH, 137
+strategies) when the cluster is under concurrent load. `max_threads: 2` and
+`join_algorithm: 'grace_hash'` help; retry on 241 rather than assuming drift.
 
 Because a Grafana rule applies one threshold to all its instances, the per-coin
 numbers live in the SQL: the rule's value is `|Δposition| / T_coin` and the
