@@ -219,7 +219,6 @@ def _threshold_node(evaluator: dict) -> dict:
 
 
 def per_underlying_rule() -> dict:
-    thresholds = ", ".join(f"{k} {v:g}" for k, v in THRESHOLDS.items())
     return {
         "uid": "divergence-bt-prod-per-underlying",
         "title": "Position divergence per underlying: Backtest − Production",
@@ -235,20 +234,19 @@ def per_underlying_rule() -> dict:
             "metric": "position",
             "pair": "bt-prod",
         },
+        # One terse line per instance. When a coin breaches, all TOP_N of its
+        # instances fire in the same evaluation and Grafana groups them into a
+        # single notification — so anything static here is repeated TOP_N times
+        # on top of a full label set per block. A `description` carrying the
+        # threshold table made that a wall of text for what is really five short
+        # facts; the table lives in infra/grafana/alerting/README.md instead.
         "annotations": {
             "summary": (
-                "{{ $labels.underlying }}: backtest vs production weighted position "
-                "diverged past its threshold for " + FOR + " "
-                "({{ $values.B }}x threshold). "
-                "Among the top " + str(TOP_N) + " contributors: "
-                "sid={{ $labels.sid }} sno={{ $labels.sno }}. "
-                "See dashboard: Strategy PnL — L4 Underlying."
-            ),
-            "description": (
-                "Per-underlying thresholds (|Δposition|): "
-                + thresholds
-                + f"; default {DEFAULT_THRESHOLD:g}. The alert value is the ratio "
-                "of the observed divergence to that threshold, so it fires above 1."
+                "{{ $labels.underlying }} sid={{ $labels.sid }} "
+                "sno={{ $labels.sno }} — backtest vs production position at "
+                "{{ $values.B }}x this coin's threshold for " + FOR + " "
+                "(one of the top " + str(TOP_N) + " contributors). "
+                "Dashboard: Strategy PnL — L4 Underlying."
             ),
         },
         "notification_settings": {"receiver": "telegram-divergence"},

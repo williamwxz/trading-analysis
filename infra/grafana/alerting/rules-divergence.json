@@ -15,8 +15,7 @@
       "pair": "bt-prod"
     },
     "annotations": {
-      "summary": "{{ $labels.underlying }}: backtest vs production weighted position diverged past its threshold for 10m ({{ $values.B }}x threshold). Among the top 5 contributors: sid={{ $labels.sid }} sno={{ $labels.sno }}. See dashboard: Strategy PnL — L4 Underlying.",
-      "description": "Per-underlying thresholds (|Δposition|): BTC 0.15, ETH 0.15, SOL 0.2, ADA 0.25, DOGE 0.25, AVAX 0.3, XRP 0.3, FET 0.4; default 0.25. The alert value is the ratio of the observed divergence to that threshold, so it fires above 1."
+      "summary": "{{ $labels.underlying }} sid={{ $labels.sid }} sno={{ $labels.sno }} — backtest vs production position at {{ $values.B }}x this coin's threshold for 10m (one of the top 5 contributors). Dashboard: Strategy PnL — L4 Underlying."
     },
     "notification_settings": {
       "receiver": "telegram-divergence"

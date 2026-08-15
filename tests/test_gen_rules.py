@@ -122,6 +122,22 @@ def test_pnl_query_stays_table_format():
     assert q["model"]["format"] == 1
 
 
+def test_summary_names_the_offending_strategy():
+    """The whole point of the rule: the notification must identify who diverged."""
+    summary = gen_rules.per_underlying_rule()["annotations"]["summary"]
+    for label in ("underlying", "sid", "sno"):
+        assert f"{{{{ $labels.{label} }}}}" in summary
+    assert "{{ $values.B }}" in summary
+
+
+def test_no_static_annotation_repeated_per_instance():
+    """All TOP_N instances of a breaching coin fire together and Grafana groups
+    them into one notification, so a static annotation is repeated TOP_N times on
+    top of a full label set per block. Keep the threshold table in the README."""
+    annotations = gen_rules.per_underlying_rule()["annotations"]
+    assert set(annotations) == {"summary"}
+
+
 def test_rule_condition_is_a_flat_ratio_threshold():
     """Per-coin thresholds live in the SQL as a ratio, so the Grafana threshold is 1."""
     rule = gen_rules.per_underlying_rule()
