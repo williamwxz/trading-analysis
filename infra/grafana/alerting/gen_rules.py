@@ -145,7 +145,33 @@ ORDER BY time, underlying, sid, sno
 """.strip()
 
 
-def _query_node(sql: str, window_min: int) -> dict:
+# grafana-plugin-sdk-go data/sqlutil/query.go — FormatQueryOption:
+#   0 FormatOptionTimeSeries (runs LongToWide)   3 FormatOptionTrace
+#   1 FormatOptionTable                          4 FormatOptionMulti (LongToMulti)
+#   2 FormatOptionLogs
+FORMAT_TIME_SERIES = 0
+FORMAT_TABLE = 1
+
+
+def _query_node(sql: str, window_min: int, fmt: int) -> dict:
+    """Alert query node.
+
+    `fmt` is load-bearing, not boilerplate. A query whose result carries string
+    DIMENSION columns (underlying/sid/sno) is a "long" frame, and server-side
+    expressions reject it outright:
+
+        [sse.readDataError] [A] got error: input data must be a wide series
+        but got type long
+
+    FORMAT_TIME_SERIES runs LongToWide, which turns each distinct combination of
+    the string columns into its own field with Labels attached — that is what
+    gives the alert instances their underlying/sid/sno labels. FORMAT_TABLE
+    passes the long frame straight through and the rule errors on every
+    evaluation with every annotation rendering as `[no value]`.
+
+    A single-series `time, value` query is already wide, so FORMAT_TABLE is
+    harmless there — which is why the retired aggregate rules used it.
+    """
     return {
         "refId": "A",
         "relativeTimeRange": {"from": window_min * 60, "to": 0},
@@ -154,7 +180,7 @@ def _query_node(sql: str, window_min: int) -> dict:
             "refId": "A",
             "editorType": "sql",
             "rawSql": sql,
-            "format": 1,
+            "format": fmt,
             "queryType": "timeseries",
             "datasource": {"type": "grafana-clickhouse-datasource", "uid": DS_UID},
             "intervalMs": 60000,
@@ -193,7 +219,6 @@ def _threshold_node(evaluator: dict) -> dict:
 
 
 def per_underlying_rule() -> dict:
-    thresholds = ", ".join(f"{k} {v:g}" for k, v in THRESHOLDS.items())
     return {
         "uid": "divergence-bt-prod-per-underlying",
         "title": "Position divergence per underlying: Backtest − Production",
@@ -209,25 +234,25 @@ def per_underlying_rule() -> dict:
             "metric": "position",
             "pair": "bt-prod",
         },
+        # One terse line per instance. When a coin breaches, all TOP_N of its
+        # instances fire in the same evaluation and Grafana groups them into a
+        # single notification — so anything static here is repeated TOP_N times
+        # on top of a full label set per block. A `description` carrying the
+        # threshold table made that a wall of text for what is really five short
+        # facts; the table lives in infra/grafana/alerting/README.md instead.
         "annotations": {
             "summary": (
-                "{{ $labels.underlying }}: backtest vs production weighted position "
-                "diverged past its threshold for " + FOR + " "
-                "({{ $values.B }}x threshold). "
-                "Among the top " + str(TOP_N) + " contributors: "
-                "sid={{ $labels.sid }} sno={{ $labels.sno }}. "
-                "See dashboard: Strategy PnL — L4 Underlying."
-            ),
-            "description": (
-                "Per-underlying thresholds (|Δposition|): "
-                + thresholds
-                + f"; default {DEFAULT_THRESHOLD:g}. The alert value is the ratio "
-                "of the observed divergence to that threshold, so it fires above 1."
+                "{{ $labels.underlying }} sid={{ $labels.sid }} "
+                "sno={{ $labels.sno }} — backtest vs production position at "
+                "{{ $values.B }}x this coin's threshold for " + FOR + " "
+                "(one of the top " + str(TOP_N) + " contributors). "
+                "Dashboard: Strategy PnL — L4 Underlying."
             ),
         },
         "notification_settings": {"receiver": "telegram-divergence"},
         "data": [
-            _query_node(per_underlying_sql(), WINDOW_MIN),
+            # long frame (underlying/sid/sno are dimensions) -> must be widened
+            _query_node(per_underlying_sql(), RANK_WINDOW_MIN, FORMAT_TIME_SERIES),
             _reduce_node(),
             _threshold_node({"type": "gt", "params": [1.0]}),
         ],
@@ -287,7 +312,8 @@ def pnl_rule() -> dict:
         },
         "notification_settings": {"receiver": "telegram-divergence"},
         "data": [
-            _query_node(sql, WINDOW_MIN),
+            # already a single `time, value` series, i.e. wide
+            _query_node(sql, WINDOW_MIN, FORMAT_TABLE),
             _reduce_node(),
             _threshold_node(
                 {"type": "outside_range", "params": [-PNL_THRESHOLD, PNL_THRESHOLD]}
