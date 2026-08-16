@@ -155,12 +155,35 @@ Position divergence per underlying: Backtest − Production
 
 Two consequences for anyone editing rules:
 
-- **Every rule routed to this contact point must set a `summary` annotation**,
-  and it should be one short line — it is the only thing rendered. Standing
-  context (thresholds, what the ratio means, which dashboard) belongs in this
-  README, not in an annotation that repeats five times per notification.
-- **Do not add other annotations to the per-underlying rule** expecting them to
-  show up; they will not be rendered.
+- **Every rule routed to this contact point should set a one-line `summary`.**
+  It is the only annotation rendered on the happy path. Standing context
+  (thresholds, what the ratio means, which dashboard) belongs in this README,
+  not in an annotation that repeats five times per notification. A rule without
+  one degrades to a raw label dump rather than a blank line.
+- **Do not add other annotations expecting them to show up** — except `Error`,
+  which is special (below).
+
+**Failure paths are deliberately handled.** All four rules here use
+`execErrState: Alerting`, and the two source-freshness rules also use
+`noDataState: Alerting`, so evaluation failures notify:
+
+- When a rule errors, Grafana attaches an `Error` annotation and renders the
+  rule's own `summary` as `[no value]`. The template prints the `Error` text and
+  suppresses the useless summary — that text is the *only* diagnostic in the
+  notification. The 2026-08-14 `input data must be a wide series but got type
+  long` bug was diagnosed from exactly this line; a summary-only template would
+  have hidden it.
+- A synthetic `DatasourceNoData` alert carries no rule annotations at all, so
+  the template falls back to the label set (which includes `rulename`).
+
+**`parse_mode` is `None`, not HTML, and the template contains no markup.**
+Telegram's HTML mode rejects an entire message on an unknown tag, and error text
+is untrusted — a datasource error echoing SQL with `<` (this repo has
+`rn <= 5`) would mean *no notification delivered* at exactly the moment
+something is broken. A bold header is not worth that.
+
+The template was verified by executing it against Go's `text/template` with
+Alertmanager-shaped data for all four cases above.
 
 The alert value is rounded to 3dp in SQL rather than formatted in the template,
 so `{{ $values.B }}` needs no template functions. `tests/test_contact_point.py`

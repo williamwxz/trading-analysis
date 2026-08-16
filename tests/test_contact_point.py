@@ -1,10 +1,16 @@
 """Tests for the Telegram contact point's message template.
 
 Grafana's DEFAULT Telegram template renders, per alert instance: the value, the
-full label set, every annotation, a Source link and a Silence link (which is a
-long query string). A single breaching coin fires TOP_N instances at once and
-they group into one notification, so the default produced ~90 lines for what is
-really five short facts. The custom template collapses that to one line each.
+full label set, every annotation, a Source link and a Silence link (a long query
+string). A single breaching coin fires TOP_N instances at once and they group
+into one notification, so the default produced ~90 lines for what is really five
+short facts. The custom template collapses that to one line each.
+
+The template was verified by executing it against Go's text/template with
+Alertmanager-shaped data for four cases: normal multi-instance firing, an
+evaluation error, a synthetic DatasourceNoData alert carrying no annotations,
+and a resolve. These tests pin the structural properties that verification
+established, since CI runs pytest only and cannot re-execute a Go template.
 """
 
 import json
@@ -31,34 +37,49 @@ def test_template_renders_one_line_per_alert_from_summary():
     msg = _settings()["message"]
     assert "{{ range .Alerts.Firing }}" in msg
     assert "{{ range .Alerts.Resolved }}" in msg
-    assert msg.count("{{ .Annotations.summary }}") == 2  # firing + resolved
 
 
-def test_template_does_not_render_labels_or_silence_urls():
-    """Those are the bulk of the default template."""
+def test_template_surfaces_evaluation_errors():
+    """When a rule hits execErrState/noDataState Alerting, Grafana attaches an
+    `Error` annotation and renders the rule's own summary as `[no value]`. That
+    Error text is the only diagnostic in the notification — dropping it is how a
+    broken rule becomes undebuggable from Telegram alone."""
     msg = _settings()["message"]
-    for noisy in (".Labels", ".SilenceURL", ".GeneratorURL", ".DashboardURL"):
+    assert '{{ with index .Annotations "Error" }}' in msg
+    assert "{{ else }}" in msg, "the summary path must be the `with` else-branch"
+
+
+def test_template_falls_back_to_labels_when_summary_is_absent():
+    """A synthetic DatasourceNoData alert carries no rule annotations at all, so
+    a summary-only template would notify a blank line."""
+    msg = _settings()["message"]
+    assert msg.count("{{ if .Annotations.summary }}") == 2  # firing + resolved
+    assert msg.count("{{ .Labels }}") == 2
+
+
+def test_template_does_not_render_the_noisy_default_fields():
+    msg = _settings()["message"]
+    for noisy in (".SilenceURL", ".GeneratorURL", ".DashboardURL", ".PanelURL"):
         assert noisy not in msg
 
 
 def test_template_only_uses_fields_every_routed_rule_provides():
     """This contact point serves the divergence AND source-freshness rules, so the
     template must not depend on anything only one family defines. All of them set
-    `summary`; none of the referenced fields are rule-specific."""
-    msg = _settings()["message"]
+    `summary`; anything without one degrades to the label fallback, not a blank."""
     for rules_file in ("rules-divergence.json", "rules-source-freshness.json"):
         for rule in json.loads((ALERTING / rules_file).read_text()):
             assert rule["annotations"].get("summary"), (
-                f"{rule['uid']} has no summary; the Telegram template renders "
-                f"only .Annotations.summary, so it would notify an empty line"
+                f"{rule['uid']} has no summary; give it a one-line summary or it "
+                f"will notify as a raw label dump"
             )
-    assert ".CommonLabels.alertname" in msg
+    assert ".CommonLabels.alertname" in _settings()["message"]
 
 
-def test_parse_mode_html_is_matched_by_the_markup_used():
+def test_plain_text_because_error_text_is_untrusted_markup():
+    """Telegram's HTML mode rejects the whole message on an unknown tag, so a
+    datasource error containing `<` (this repo's SQL has `rn <= 5`) would mean
+    NO notification delivered at exactly the moment something is broken."""
     settings = _settings()
-    assert settings["parse_mode"] == "HTML"
-    msg = settings["message"]
-    # Only <b> is used; Telegram's HTML mode rejects unknown tags outright.
-    tags = {t.strip("</>") for t in re.findall(r"</?[a-z]+>", msg)}
-    assert tags <= {"b", "i", "code", "pre", "a", "u", "s"}, tags
+    assert settings["parse_mode"] == "None"
+    assert not re.search(r"</?[a-z]+>", settings["message"])

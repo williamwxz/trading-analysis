@@ -5,8 +5,8 @@
   "settings": {
     "bottoken": "${TELEGRAM_BOT_TOKEN}",
     "chatid": "${TELEGRAM_CHAT_ID}",
-    "parse_mode": "HTML",
-    "message": "<b>{{ .CommonLabels.alertname }}</b>\n{{ range .Alerts.Firing }}🔴 {{ .Annotations.summary }}\n{{ end }}{{ range .Alerts.Resolved }}✅ {{ .Annotations.summary }}\n{{ end }}"
+    "parse_mode": "None",
+    "message": "{{ .CommonLabels.alertname }}\n{{ range .Alerts.Firing }}{{ with index .Annotations \"Error\" }}⚠️ evaluation failed — {{ . }}\n{{ else }}🔴 {{ if .Annotations.summary }}{{ .Annotations.summary }}{{ else }}{{ .Labels }}{{ end }}\n{{ end }}{{ end }}{{ range .Alerts.Resolved }}✅ {{ if .Annotations.summary }}{{ .Annotations.summary }}{{ else }}{{ .Labels }}{{ end }}\n{{ end }}"
   },
   "disableResolveMessage": false
 }
