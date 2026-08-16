@@ -136,6 +136,36 @@ seam), not the baseline. bt is excluded — its `cumulative_pnl` is raw row_json
 Tune the thresholds (and `FOR`/`WINDOW_MIN`/`RANK_WINDOW_MIN`) in `gen_rules.py`,
 then re-run it to regenerate `rules-divergence.json`.
 
+### Notification format
+
+The Telegram contact point carries an explicit `message` template. Grafana's
+default renders, **per alert instance**, the value, the full label set, every
+annotation, a Source link and a Silence link (a long query string). A breaching
+coin fires all 5 of its instances at once and they group into one notification,
+so the default produced ~90 lines for what is really five short facts.
+
+The template renders one line per instance from `summary` alone:
+
+```
+Position divergence per underlying: Backtest − Production
+🔴 AVAX sid=12 sno=171 — 1.034x threshold
+🔴 AVAX sid=12 sno=180 — 1.034x threshold
+...
+```
+
+Two consequences for anyone editing rules:
+
+- **Every rule routed to this contact point must set a `summary` annotation**,
+  and it should be one short line — it is the only thing rendered. Standing
+  context (thresholds, what the ratio means, which dashboard) belongs in this
+  README, not in an annotation that repeats five times per notification.
+- **Do not add other annotations to the per-underlying rule** expecting them to
+  show up; they will not be rendered.
+
+The alert value is rounded to 3dp in SQL rather than formatted in the template,
+so `{{ $values.B }}` needs no template functions. `tests/test_contact_point.py`
+pins the template shape and checks every routed rule still provides a `summary`.
+
 ### Retired rules
 
 `divergence-bt-prod` and `divergence-prod-rt` (both portfolio-aggregate position)

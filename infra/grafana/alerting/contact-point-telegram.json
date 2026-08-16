@@ -5,7 +5,8 @@
   "settings": {
     "bottoken": "${TELEGRAM_BOT_TOKEN}",
     "chatid": "${TELEGRAM_CHAT_ID}",
-    "parse_mode": "HTML"
+    "parse_mode": "HTML",
+    "message": "<b>{{ .CommonLabels.alertname }}</b>\n{{ range .Alerts.Firing }}🔴 {{ .Annotations.summary }}\n{{ end }}{{ range .Alerts.Resolved }}✅ {{ .Annotations.summary }}\n{{ end }}"
   },
   "disableResolveMessage": false
 }
