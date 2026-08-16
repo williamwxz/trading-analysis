@@ -130,6 +130,22 @@ def test_summary_names_the_offending_strategy():
     assert "{{ $values.B }}" in summary
 
 
+def test_summary_is_one_short_line():
+    """The contact point renders one line per firing instance and a breaching coin
+    fires TOP_N of them at once, so prose here is multiplied by five."""
+    summary = gen_rules.per_underlying_rule()["annotations"]["summary"]
+    assert "\n" not in summary
+    assert len(summary) < 120, f"summary is {len(summary)} chars: {summary}"
+    for boilerplate in ("Dashboard", "contributors", "threshold for"):
+        assert boilerplate not in summary
+
+
+def test_alert_value_is_rounded_in_sql():
+    """`$values.B` is rendered straight into the message. Unrounded it reads
+    1.0337282943619281; rounding in SQL avoids needing template functions."""
+    assert "round(coin.adiv" in gen_rules.per_underlying_sql()
+
+
 def test_no_static_annotation_repeated_per_instance():
     """All TOP_N instances of a breaching coin fire together and Grafana groups
     them into one notification, so a static annotation is repeated TOP_N times on

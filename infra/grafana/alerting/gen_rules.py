@@ -106,6 +106,13 @@ def per_underlying_sql() -> str:
     `value` is the coin's |divergence| divided by its own threshold, so a single
     flat Grafana condition (> 1) expresses eight different thresholds.
 
+    It is rounded to 3dp here rather than formatted in the annotation, because
+    `{{ $values.B }}` renders the raw float otherwise (1.0337282943619281) and
+    formatting it would need template functions. Side effect: a ratio in
+    [1.0000, 1.0005) rounds to exactly 1.0 and does not clear `> 1`, so the
+    effective threshold is up to 0.05% higher than nominal. At thresholds of
+    0.15-0.40 that is noise, and such a breach fires on the next minute anyway.
+
     Rows are emitted for every coin at every minute, not only breaching ones, so
     each (underlying, sid, sno) alert instance exists continuously and its `for`
     timer is not restarted by the instance blinking in and out of existence.
@@ -139,7 +146,7 @@ SELECT coin.t AS time,
        coin.u AS underlying,
        extract(top.s, 'sid=([0-9]+)') AS sid,
        extract(top.s, 'sno=([0-9]+)') AS sno,
-       coin.adiv / ({threshold_case('coin.u')}) AS value
+       round(coin.adiv / ({threshold_case('coin.u')}), 3) AS value
 FROM coin INNER JOIN top ON coin.u = top.u
 ORDER BY time, underlying, sid, sno
 """.strip()
@@ -234,19 +241,23 @@ def per_underlying_rule() -> dict:
             "metric": "position",
             "pair": "bt-prod",
         },
-        # One terse line per instance. When a coin breaches, all TOP_N of its
-        # instances fire in the same evaluation and Grafana groups them into a
-        # single notification — so anything static here is repeated TOP_N times
-        # on top of a full label set per block. A `description` carrying the
-        # threshold table made that a wall of text for what is really five short
-        # facts; the table lives in infra/grafana/alerting/README.md instead.
+        # ONE SHORT LINE, and `summary` is the only annotation.
+        #
+        # When a coin breaches, all TOP_N of its instances fire in the same
+        # evaluation and Grafana groups them into a single notification. The
+        # Telegram contact point renders exactly one line per firing instance
+        # (see contact-point-telegram.json), so everything here is repeated
+        # TOP_N times — keep it to the facts that differ between instances.
+        # Standing context (thresholds, what the ratio means, which dashboard)
+        # belongs in infra/grafana/alerting/README.md, not in every line.
+        #
+        # `$values.B` is pre-rounded in SQL rather than formatted here, so this
+        # needs no template functions: an unrounded ratio renders as
+        # 1.0337282943619281.
         "annotations": {
             "summary": (
                 "{{ $labels.underlying }} sid={{ $labels.sid }} "
-                "sno={{ $labels.sno }} — backtest vs production position at "
-                "{{ $values.B }}x this coin's threshold for " + FOR + " "
-                "(one of the top " + str(TOP_N) + " contributors). "
-                "Dashboard: Strategy PnL — L4 Underlying."
+                "sno={{ $labels.sno }} — {{ $values.B }}x threshold"
             ),
         },
         "notification_settings": {"receiver": "telegram-divergence"},
