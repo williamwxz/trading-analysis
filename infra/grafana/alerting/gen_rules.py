@@ -19,6 +19,23 @@ DS_UID = "dfjc5vjyfcc8wf"  # grafana-clickhouse-datasource (same as L4/L5 panels
 WINDOW_MIN = 17  # query lookback for the divergence value; 15 complete minutes + slack
 RANK_WINDOW_MIN = 60  # lookback for RANKING the top contributors — see below
 TOP_N = 5  # contributors named per underlying
+
+# Window anchors. The A (ratio) and D (delta) nodes are separate ClickHouse
+# statements, so each would evaluate a bare now() independently — and a minute
+# boundary landing between them changes what they see. Two distinct consequences:
+#
+#   * the VALUE window drifting means reduce(D) reports a newer minute than
+#     reduce(B), so the message's Δpos no longer corresponds to the ratio that
+#     fired. Anchored per minute: freshness matters here, so no coarser.
+#   * the RANKING window drifting can reorder the top-N, leaving an instance in A
+#     with no counterpart in D — `$values.E` then renders `[no value]`. Ranking is
+#     a 60-minute average, so being up to 5 minutes stale is harmless, and a
+#     5-minute anchor makes this the rarer failure by ~5x.
+#
+# This narrows both races to "a boundary falls inside the sub-second gap between
+# two statements"; it does not close them. See per_underlying_sql.
+VALUE_ANCHOR = "toStartOfMinute(now())"
+RANK_ANCHOR = "toStartOfFiveMinutes(now())"
 FOR = "10m"  # sustained breach before firing
 
 # Rules replaced by divergence-bt-prod-per-underlying / deleted outright. The
@@ -70,11 +87,11 @@ def roster_size(tbl: str, final: bool = False) -> str:
     f = " FINAL" if final else ""
     return (
         f"SELECT countDistinct(underlying) FROM analytics.{tbl}{f} "
-        f"WHERE ts >= now() - INTERVAL {WINDOW_MIN} MINUTE"
+        f"WHERE ts >= {VALUE_ANCHOR} - INTERVAL {WINDOW_MIN} MINUTE"
     )
 
 
-def _pairs(minutes: int, gated: bool) -> str:
+def _pairs(minutes: int, gated: bool, anchor: str) -> str:
     """Per-strategy (bt - prod) position delta over the last `minutes` minutes.
 
     INNER JOIN on (underlying, strategy, minute) keeps the comparison
@@ -89,7 +106,7 @@ def _pairs(minutes: int, gated: bool) -> str:
             f"SELECT underlying u, strategy_table_name s, toStartOfMinute(ts) t, "
             f"argMax(position, updated_at) p, argMax(weighting, updated_at) w "
             f"FROM analytics.{tbl} "
-            f"WHERE ts >= now() - INTERVAL {minutes} MINUTE {gate}"
+            f"WHERE ts >= {anchor} - INTERVAL {minutes} MINUTE {gate}"
             f"GROUP BY u, s, t"
         )
 
@@ -142,18 +159,18 @@ def per_underlying_sql(metric: str = "ratio") -> str:
     return f"""
 WITH complete AS (
   SELECT toStartOfMinute(ts) t FROM analytics.strategy_pnl_1min_prod_v2
-  WHERE ts >= now() - INTERVAL {WINDOW_MIN} MINUTE
+  WHERE ts >= {VALUE_ANCHOR} - INTERVAL {WINDOW_MIN} MINUTE
   GROUP BY t HAVING countDistinct(underlying) = ({roster})
 ),
 coin AS (
   SELECT u, t, abs(sum(dp * w) / nullIf(sum(w), 0)) AS adiv
-  FROM ({_pairs(WINDOW_MIN, True)}) GROUP BY u, t
+  FROM ({_pairs(WINDOW_MIN, True, VALUE_ANCHOR)}) GROUP BY u, t
 ),
 top AS (
   SELECT u, s FROM (
     SELECT u, s, row_number() OVER (PARTITION BY u ORDER BY contrib DESC, s ASC) AS rn
     FROM (SELECT u, s, avg(abs(dp) * w) AS contrib
-          FROM ({_pairs(RANK_WINDOW_MIN, False)}) GROUP BY u, s)
+          FROM ({_pairs(RANK_WINDOW_MIN, False, RANK_ANCHOR)}) GROUP BY u, s)
   ) WHERE rn <= {TOP_N}
 )
 SELECT coin.t AS time,

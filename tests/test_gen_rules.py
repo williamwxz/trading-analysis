@@ -171,6 +171,26 @@ def test_ratio_and_delta_queries_differ_only_in_the_value_expression():
     assert "AS value" in a[differing[0]]
 
 
+def test_windows_are_anchored_not_bare_now():
+    """A and D are separate ClickHouse statements, so a bare now() in each drifts
+    between them: the value window drifting makes reduce(D) report a newer minute
+    than reduce(B), and the ranking window drifting can reorder the top-N and leave
+    `$values.E` rendering `[no value]`."""
+    for metric in ("ratio", "delta"):
+        sql = gen_rules.per_underlying_sql(metric)
+        assert "ts >= now() -" not in sql, "bare now() drifts between A and D"
+        assert gen_rules.VALUE_ANCHOR in sql
+        assert gen_rules.RANK_ANCHOR in sql
+
+
+def test_ranking_anchor_is_coarser_than_the_value_anchor():
+    """Ranking is a 60-minute average, so staleness is harmless and a coarser
+    anchor makes the label-mismatch race rarer. The value window cannot be
+    coarsened the same way — that would delay detection."""
+    assert gen_rules.VALUE_ANCHOR == "toStartOfMinute(now())"
+    assert gen_rules.RANK_ANCHOR == "toStartOfFiveMinutes(now())"
+
+
 def test_unknown_metric_is_rejected():
     try:
         gen_rules.per_underlying_sql("nonsense")
