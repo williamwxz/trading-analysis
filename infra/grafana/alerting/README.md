@@ -148,10 +148,24 @@ The template renders one line per instance from `summary` alone:
 
 ```
 Position divergence per underlying: Backtest − Production
-🔴 AVAX sid=12 sno=171 — 1.034x threshold
-🔴 AVAX sid=12 sno=180 — 1.034x threshold
+🔴 BTC sid=1 sno=616 — Δpos 0.044 (0.293x threshold)
+🔴 BTC sid=19 sno=199 — Δpos 0.044 (0.293x threshold)
 ...
 ```
+
+`Δpos` is the raw `|wagg_bt − wagg_prod|` for that coin; the ratio is that over
+the coin's threshold. Both are shown because the ratio alone tells you whether a
+divergence matters but not how large it is, and the reader should not have to
+multiply by a threshold they first have to look up.
+
+The two numbers come from **two query nodes** — `A` (ratio) drives the condition,
+`D` (raw delta) exists only to be reported, with `E = reduce(D)` surfacing it as
+`$values.E`. They are generated from one function with a substituted value
+expression (`per_underlying_sql("ratio" | "delta")`) and are otherwise
+byte-identical, which matters: Grafana aligns `$values.E` to an alert instance
+**by label set**, so if the two queries could ever rank a different top-5 the
+delta would render blank. Verified live 2026-08-17: both return the same 40 label
+sets, and `Δpos / threshold` reproduces the ratio exactly.
 
 Two consequences for anyone editing rules:
 

@@ -132,12 +132,74 @@ def test_summary_names_the_offending_strategy():
 
 def test_summary_is_one_short_line():
     """The contact point renders one line per firing instance and a breaching coin
-    fires TOP_N of them at once, so prose here is multiplied by five."""
+    fires TOP_N of them at once, so prose here is multiplied by five.
+
+    Measured on the RENDERED line, not the template — the template is mostly
+    `{{ ... }}` scaffolding and its length says nothing about the message."""
     summary = gen_rules.per_underlying_rule()["annotations"]["summary"]
     assert "\n" not in summary
-    assert len(summary) < 120, f"summary is {len(summary)} chars: {summary}"
+    rendered = (
+        summary.replace("{{ $labels.underlying }}", "AVAX")
+        .replace("{{ $labels.sid }}", "12")
+        .replace("{{ $labels.sno }}", "171")
+        .replace("{{ $values.E }}", "0.0123")
+        .replace("{{ $values.B }}", "1.034")
+    )
+    assert "{{" not in rendered, f"unsubstituted template left: {rendered}"
+    assert len(rendered) <= 60, f"renders as {len(rendered)} chars: {rendered}"
     for boilerplate in ("Dashboard", "contributors", "threshold for"):
         assert boilerplate not in summary
+
+
+def test_delta_query_reports_raw_divergence_not_the_ratio():
+    """ "0.082x threshold" says whether it is bad, not how bad. The notification
+    reports the raw |Δposition| from a second query."""
+    delta = gen_rules.per_underlying_sql("delta")
+    assert "round(coin.adiv, 4) AS value" in delta
+    assert "CASE coin.u" not in delta.split("SELECT coin.t")[-1]
+
+
+def test_ratio_and_delta_queries_differ_only_in_the_value_expression():
+    """Grafana aligns $values.E to an instance BY LABELS. If the two queries could
+    ever pick different top-N members the delta would render blank, so they must be
+    the same query with one substituted expression — not two hand-written SQLs."""
+    a = gen_rules.per_underlying_sql("ratio").splitlines()
+    d = gen_rules.per_underlying_sql("delta").splitlines()
+    assert len(a) == len(d)
+    differing = [i for i, (x, y) in enumerate(zip(a, d)) if x != y]
+    assert len(differing) == 1, f"expected 1 differing line, got {differing}"
+    assert "AS value" in a[differing[0]]
+
+
+def test_unknown_metric_is_rejected():
+    try:
+        gen_rules.per_underlying_sql("nonsense")
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError for an unknown metric")
+
+
+def test_condition_path_is_untouched_by_the_reporting_nodes():
+    """D/E exist only to report the delta. If the condition ever moved off C, or
+    the threshold stopped reading B, the alert semantics would silently change."""
+    rule = gen_rules.per_underlying_rule()
+    assert rule["condition"] == "C"
+    refs = [d["refId"] for d in rule["data"]]
+    assert refs == ["A", "B", "C", "D", "E"]
+    threshold = next(d for d in rule["data"] if d["refId"] == "C")
+    assert threshold["model"]["expression"] == "B"
+    assert (
+        next(d for d in rule["data"] if d["refId"] == "B")["model"]["expression"] == "A"
+    )
+    assert (
+        next(d for d in rule["data"] if d["refId"] == "E")["model"]["expression"] == "D"
+    )
+
+
+def test_summary_reports_both_magnitude_and_ratio():
+    summary = gen_rules.per_underlying_rule()["annotations"]["summary"]
+    assert "{{ $values.E }}" in summary, "raw divergence missing"
+    assert "{{ $values.B }}" in summary, "ratio-to-threshold missing"
 
 
 def test_alert_value_is_rounded_in_sql():
