@@ -19,6 +19,23 @@ DS_UID = "dfjc5vjyfcc8wf"  # grafana-clickhouse-datasource (same as L4/L5 panels
 WINDOW_MIN = 17  # query lookback for the divergence value; 15 complete minutes + slack
 RANK_WINDOW_MIN = 60  # lookback for RANKING the top contributors — see below
 TOP_N = 5  # contributors named per underlying
+
+# Window anchors. The A (ratio) and D (delta) nodes are separate ClickHouse
+# statements, so each would evaluate a bare now() independently — and a minute
+# boundary landing between them changes what they see. Two distinct consequences:
+#
+#   * the VALUE window drifting means reduce(D) reports a newer minute than
+#     reduce(B), so the message's Δpos no longer corresponds to the ratio that
+#     fired. Anchored per minute: freshness matters here, so no coarser.
+#   * the RANKING window drifting can reorder the top-N, leaving an instance in A
+#     with no counterpart in D — `$values.E` then renders `[no value]`. Ranking is
+#     a 60-minute average, so being up to 5 minutes stale is harmless, and a
+#     5-minute anchor makes this the rarer failure by ~5x.
+#
+# This narrows both races to "a boundary falls inside the sub-second gap between
+# two statements"; it does not close them. See per_underlying_sql.
+VALUE_ANCHOR = "toStartOfMinute(now())"
+RANK_ANCHOR = "toStartOfFiveMinutes(now())"
 FOR = "10m"  # sustained breach before firing
 
 # Rules replaced by divergence-bt-prod-per-underlying / deleted outright. The
@@ -70,11 +87,11 @@ def roster_size(tbl: str, final: bool = False) -> str:
     f = " FINAL" if final else ""
     return (
         f"SELECT countDistinct(underlying) FROM analytics.{tbl}{f} "
-        f"WHERE ts >= now() - INTERVAL {WINDOW_MIN} MINUTE"
+        f"WHERE ts >= {VALUE_ANCHOR} - INTERVAL {WINDOW_MIN} MINUTE"
     )
 
 
-def _pairs(minutes: int, gated: bool) -> str:
+def _pairs(minutes: int, gated: bool, anchor: str) -> str:
     """Per-strategy (bt - prod) position delta over the last `minutes` minutes.
 
     INNER JOIN on (underlying, strategy, minute) keeps the comparison
@@ -89,7 +106,7 @@ def _pairs(minutes: int, gated: bool) -> str:
             f"SELECT underlying u, strategy_table_name s, toStartOfMinute(ts) t, "
             f"argMax(position, updated_at) p, argMax(weighting, updated_at) w "
             f"FROM analytics.{tbl} "
-            f"WHERE ts >= now() - INTERVAL {minutes} MINUTE {gate}"
+            f"WHERE ts >= {anchor} - INTERVAL {minutes} MINUTE {gate}"
             f"GROUP BY u, s, t"
         )
 
@@ -100,17 +117,25 @@ def _pairs(minutes: int, gated: bool) -> str:
     )
 
 
-def per_underlying_sql() -> str:
+def per_underlying_sql(metric: str = "ratio") -> str:
     """One row per (minute, underlying, sid, sno) for each coin's TOP_N contributors.
 
-    `value` is the coin's |divergence| divided by its own threshold, so a single
-    flat Grafana condition (> 1) expresses eight different thresholds.
+    Two variants, IDENTICAL except for the `value` expression, so both produce
+    exactly the same label sets and Grafana can align them per alert instance:
 
-    It is rounded to 3dp here rather than formatted in the annotation, because
+      "ratio" — the coin's |divergence| divided by its own threshold. Drives the
+                condition: a single flat `> 1` expresses eight per-coin
+                thresholds, which one Grafana threshold node otherwise cannot.
+      "delta" — the raw |Δposition|. Reported in the notification, because
+                "0.082x threshold" says whether it is bad but not how bad; the
+                reader should not have to multiply by a threshold they have to
+                look up.
+
+    Values are rounded here rather than formatted in the annotation, because
     `{{ $values.B }}` renders the raw float otherwise (1.0337282943619281) and
-    formatting it would need template functions. Side effect: a ratio in
-    [1.0000, 1.0005) rounds to exactly 1.0 and does not clear `> 1`, so the
-    effective threshold is up to 0.05% higher than nominal. At thresholds of
+    formatting it would need template functions. Side effect for the ratio: a
+    value in [1.0000, 1.0005) rounds to exactly 1.0 and does not clear `> 1`, so
+    the effective threshold is up to 0.05% higher than nominal. At thresholds of
     0.15-0.40 that is noise, and such a breach fires on the next minute anyway.
 
     Rows are emitted for every coin at every minute, not only breaching ones, so
@@ -124,29 +149,35 @@ def per_underlying_sql() -> str:
     two real episodes in the 21d history, 60m gives one long stable run each
     (XRP 50 min, FET 21 min) where 17m fragments into runs as short as 2 minutes.
     """
+    if metric == "ratio":
+        value = f"round(coin.adiv / ({threshold_case('coin.u')}), 3)"
+    elif metric == "delta":
+        value = "round(coin.adiv, 4)"
+    else:
+        raise ValueError(f"metric must be 'ratio' or 'delta', got {metric!r}")
     roster = roster_size("strategy_pnl_1min_prod_v2")
     return f"""
 WITH complete AS (
   SELECT toStartOfMinute(ts) t FROM analytics.strategy_pnl_1min_prod_v2
-  WHERE ts >= now() - INTERVAL {WINDOW_MIN} MINUTE
+  WHERE ts >= {VALUE_ANCHOR} - INTERVAL {WINDOW_MIN} MINUTE
   GROUP BY t HAVING countDistinct(underlying) = ({roster})
 ),
 coin AS (
   SELECT u, t, abs(sum(dp * w) / nullIf(sum(w), 0)) AS adiv
-  FROM ({_pairs(WINDOW_MIN, True)}) GROUP BY u, t
+  FROM ({_pairs(WINDOW_MIN, True, VALUE_ANCHOR)}) GROUP BY u, t
 ),
 top AS (
   SELECT u, s FROM (
     SELECT u, s, row_number() OVER (PARTITION BY u ORDER BY contrib DESC, s ASC) AS rn
     FROM (SELECT u, s, avg(abs(dp) * w) AS contrib
-          FROM ({_pairs(RANK_WINDOW_MIN, False)}) GROUP BY u, s)
+          FROM ({_pairs(RANK_WINDOW_MIN, False, RANK_ANCHOR)}) GROUP BY u, s)
   ) WHERE rn <= {TOP_N}
 )
 SELECT coin.t AS time,
        coin.u AS underlying,
        extract(top.s, 'sid=([0-9]+)') AS sid,
        extract(top.s, 'sno=([0-9]+)') AS sno,
-       round(coin.adiv / ({threshold_case('coin.u')}), 3) AS value
+       {value} AS value
 FROM coin INNER JOIN top ON coin.u = top.u
 ORDER BY time, underlying, sid, sno
 """.strip()
@@ -160,7 +191,7 @@ FORMAT_TIME_SERIES = 0
 FORMAT_TABLE = 1
 
 
-def _query_node(sql: str, window_min: int, fmt: int) -> dict:
+def _query_node(sql: str, window_min: int, fmt: int, ref: str = "A") -> dict:
     """Alert query node.
 
     `fmt` is load-bearing, not boilerplate. A query whose result carries string
@@ -180,11 +211,11 @@ def _query_node(sql: str, window_min: int, fmt: int) -> dict:
     harmless there — which is why the retired aggregate rules used it.
     """
     return {
-        "refId": "A",
+        "refId": ref,
         "relativeTimeRange": {"from": window_min * 60, "to": 0},
         "datasourceUid": DS_UID,
         "model": {
-            "refId": "A",
+            "refId": ref,
             "editorType": "sql",
             "rawSql": sql,
             "format": fmt,
@@ -196,15 +227,15 @@ def _query_node(sql: str, window_min: int, fmt: int) -> dict:
     }
 
 
-def _reduce_node() -> dict:
+def _reduce_node(ref: str = "B", over: str = "A") -> dict:
     return {
-        "refId": "B",
+        "refId": ref,
         "datasourceUid": "__expr__",
         "model": {
-            "refId": "B",
+            "refId": ref,
             "type": "reduce",
             "datasource": {"type": "__expr__", "uid": "__expr__"},
-            "expression": "A",
+            "expression": over,
             "reducer": "last",
             "settings": {"mode": "dropNN"},
         },
@@ -257,15 +288,26 @@ def per_underlying_rule() -> dict:
         "annotations": {
             "summary": (
                 "{{ $labels.underlying }} sid={{ $labels.sid }} "
-                "sno={{ $labels.sno }} — {{ $values.B }}x threshold"
+                "sno={{ $labels.sno }} — Δpos {{ $values.E }} "
+                "({{ $values.B }}x threshold)"
             ),
         },
         "notification_settings": {"receiver": "telegram-divergence"},
+        # A/B/C drive the alert; D/E exist only so the notification can report the
+        # raw divergence. D is IDENTICAL to A except for the value expression, so
+        # it yields the same label sets and Grafana aligns $values.E per instance.
+        # The condition stays exactly `C` — the firing path is untouched.
         "data": [
             # long frame (underlying/sid/sno are dimensions) -> must be widened
-            _query_node(per_underlying_sql(), RANK_WINDOW_MIN, FORMAT_TIME_SERIES),
-            _reduce_node(),
+            _query_node(
+                per_underlying_sql("ratio"), RANK_WINDOW_MIN, FORMAT_TIME_SERIES, "A"
+            ),
+            _reduce_node("B", "A"),
             _threshold_node({"type": "gt", "params": [1.0]}),
+            _query_node(
+                per_underlying_sql("delta"), RANK_WINDOW_MIN, FORMAT_TIME_SERIES, "D"
+            ),
+            _reduce_node("E", "D"),
         ],
     }
 
