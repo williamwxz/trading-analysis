@@ -252,7 +252,7 @@ logs `SKIPPED` and leaves the old rules in place.
 | `GRAFANA_CLOUD_URL` | already set (dashboard deploy) |
 | `GRAFANA_CLOUD_TOKEN` | already set; needs Alerting **write** scope |
 | `TELEGRAM_BOT_TOKEN` | **add** — `@falcon_finance_data_devops_bot` token |
-| `TELEGRAM_CHAT_ID` | **add** — destination chat id |
+| `TELEGRAM_CHAT_ID` | destination chat id for **Trading Analysis DevOps**; the numeric value is managed only as a repository secret |
 
 ```bash
 gh secret set TELEGRAM_BOT_TOKEN --repo williamwxz/trading-analysis
@@ -260,6 +260,10 @@ gh secret set TELEGRAM_CHAT_ID   --repo williamwxz/trading-analysis
 ```
 
 ## Deployment
+
+The production contact point routes to **Trading Analysis DevOps**. Changing the
+destination is a secret rotation: update `TELEGRAM_CHAT_ID` and re-run the
+provisioning workflow; do not commit the numeric chat id.
 
 Provisioned by the `deploy-grafana-cloud` job on push to `main` (whenever
 `infra/grafana/**` changes), as a **non-fatal** step — an alerting error never
