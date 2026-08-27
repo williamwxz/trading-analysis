@@ -6,67 +6,12 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      setup_telegram:
-        description: Discover the Telegram chat ID and provision Grafana only
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: read
 
 jobs:
-  setup-telegram:
-    if: github.event_name == 'workflow_dispatch' && inputs.setup_telegram
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v6.0.2
-
-      - name: Discover chat, provision Grafana, and verify delivery
-        env:
-          GRAFANA_CLOUD_TOKEN: ${{ secrets.GRAFANA_CLOUD_TOKEN }}
-          GRAFANA_CLOUD_URL: ${{ secrets.GRAFANA_CLOUD_URL }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        run: |
-          set -euo pipefail
-          : "${GRAFANA_CLOUD_TOKEN:?missing GRAFANA_CLOUD_TOKEN}"
-          : "${GRAFANA_CLOUD_URL:?missing GRAFANA_CLOUD_URL}"
-          : "${TELEGRAM_BOT_TOKEN:?missing TELEGRAM_BOT_TOKEN}"
-
-          updates=$(curl -sS --fail-with-body \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates")
-          chat_id=$(jq -r --arg title "Trading Analysis DevOps" '
-            [.result[]
-              | [.message.chat?, .edited_message.chat?, .channel_post.chat?,
-                 .my_chat_member.chat?, .chat_member.chat?]
-              | .[]
-              | select(.title == $title)
-              | .id]
-            | last // empty
-          ' <<<"$updates")
-          if [[ ! "$chat_id" =~ ^-?[0-9]+$ ]]; then
-            echo "ERROR: no pending Telegram update for Trading Analysis DevOps"
-            echo "Send a message in the group after adding the bot, then retry."
-            exit 1
-          fi
-
-          echo "TELEGRAM_CHAT_ID=$chat_id"
-          export TELEGRAM_CHAT_ID="$chat_id"
-          bash scripts/provision_grafana_alerts.sh
-
-          response=$(curl -sS --fail-with-body \
-            -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=$chat_id" \
-            --data-urlencode \
-              "text=✅ Grafana alerting is connected to Trading Analysis DevOps.")
-          jq -e '.ok == true' <<<"$response" >/dev/null
-          echo "Telegram verification message delivered."
-
   detect-changes:
-    if: github.event_name != 'workflow_dispatch' || !inputs.setup_telegram
     runs-on: ubuntu-latest
     outputs:
       streaming:        ${{ steps.filter.outputs.streaming        == 'true' || steps.filter.outputs.terraform == 'true' || steps.force.outputs.streaming        == 'true' }}
